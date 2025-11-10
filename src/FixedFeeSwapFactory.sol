@@ -257,12 +257,12 @@ contract FixedFeeSwapFactory {
     }
 
     // Get hook reference for later use
-    FixedFeeSwapHook fixedFeeSwapHook = FixedFeeSwapHook(hook);
+    FixedFeeSwapHook hookContract = FixedFeeSwapHook(hook);
 
     // Create and initialize PT pool
     PoolKey memory ptPoolKey;
     (ptPoolKey, ptPoolId) = _createTradingPool(
-      address(fixedFeeSwapHook.principalToken()),
+      address(hookContract.principalToken()),
       referenceToken,
       hook
     );
@@ -270,7 +270,7 @@ contract FixedFeeSwapFactory {
     // Create and initialize YT pool
     PoolKey memory ytPoolKey;
     (ytPoolKey, ytPoolId) = _createTradingPool(
-      address(fixedFeeSwapHook.yieldToken()),
+      address(hookContract.yieldToken()),
       referenceToken,
       hook
     );
@@ -284,8 +284,8 @@ contract FixedFeeSwapFactory {
       swapInfo.ytPoolKey = ytPoolKey;
       swapInfo.maturity = standardizedMaturity;
       swapInfo.createdAt = block.timestamp;
-      swapInfo.principalToken = address(fixedFeeSwapHook.principalToken());
-      swapInfo.yieldToken = address(fixedFeeSwapHook.yieldToken());
+      swapInfo.principalToken = address(hookContract.principalToken());
+      swapInfo.yieldToken = address(hookContract.yieldToken());
 
       // Update storage
       swapsByPoolId[targetPoolId] = swapInfo;
