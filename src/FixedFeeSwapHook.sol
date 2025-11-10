@@ -3,6 +3,10 @@ pragma solidity 0.8.30;
 
 import {LimitOrderHook} from "@openzeppelin/uniswap-hooks/general/LimitOrderHook.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
+import {PoolKey} from "v4-core/src/types/PoolKey.sol";
+import {Currency} from "v4-core/src/types/Currency.sol";
+import {PrincipalToken} from "./PrincipalToken.sol";
+import {YieldToken} from "./YieldToken.sol";
 
 /// @notice A Hook to manage a fixed fee swap. A user can deposit liquidity
 /// to a target pool outside of this hook conforming to a predefined set of
@@ -13,26 +17,94 @@ import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 /// to principal holders. Also, users can burn their PT and YT to receive
 /// The principal and yield respectively.
 contract FixedFeeSwapHook is LimitOrderHook {
+  /// @notice Structure for liquidity position configuration
+  struct LiquidityPosition {
+    int24 tickLower;
+    int24 tickUpper;
+    uint256 weight;
+  }
+
   /// @notice The length from the start of the market to maturity.
-  uint48 immutable MARKET_LENGTH;
+  uint48 public immutable MARKET_LENGTH;
 
   /// @notice The maximum the close fee can be set.
-  uint256 immutable MAX_CLOSE_FEE;
+  uint256 public immutable MAX_CLOSE_FEE;
 
   /// @notice The max fee a closer can request when closing the market.
-  uint256 closeFee;
+  uint256 public closeFee;
 
-  /// @notice Indicating whether the morket is closed or not.
-  bool closed = false;
+  /// @notice Indicating whether the market is closed or not.
+  bool public closed = false;
 
   /// @notice The token0 in the target liquidity distribution pool
-  address immutable TOKEN0;
+  address public immutable TOKEN0;
 
   /// @notice The token1 in the target liquidity distribution pool
-  address immutable TOKEN1;
+  address public immutable TOKEN1;
 
+  /// @notice The target pool that this hook manages liquidity for
+  PoolKey public targetPoolKey;
 
-  constructor(IPoolManager _poolManager) LimitOrderHook(_poolManager) {}
+  /// @notice The predefined liquidity positions for this market
+  LiquidityPosition[] public positions;
+
+  /// @notice The principal token for this fixed fee swap
+  PrincipalToken public principalToken;
+
+  /// @notice The yield token for this fixed fee swap
+  YieldToken public yieldToken;
+
+  /// @notice Market timing
+  uint256 public marketStartTime;
+  uint256 public maturityTime;
+
+  constructor(
+    IPoolManager _poolManager,
+    PoolKey memory _targetPoolKey,
+    uint48 _marketLength,
+    uint256 _maxCloseFee,
+    LiquidityPosition[] memory _positions
+  ) LimitOrderHook(_poolManager) {
+    // Store target pool info
+    targetPoolKey = _targetPoolKey;
+    TOKEN0 = Currency.unwrap(_targetPoolKey.currency0);
+    TOKEN1 = Currency.unwrap(_targetPoolKey.currency1);
+
+    // Store market parameters
+    MARKET_LENGTH = _marketLength;
+    MAX_CLOSE_FEE = _maxCloseFee;
+    closeFee = _maxCloseFee; // Initialize to max
+
+    // Store liquidity positions
+    for (uint256 i = 0; i < _positions.length; i++) {
+      positions.push(_positions[i]);
+    }
+
+    // Set market timing
+    marketStartTime = block.timestamp;
+    maturityTime = marketStartTime + _marketLength;
+
+    // Deploy PT and YT tokens
+    // Create unique names based on the underlying tokens and maturity
+    string memory ptName = string(abi.encodePacked("PT-", _getTokenSymbol(TOKEN0), "-", _getTokenSymbol(TOKEN1)));
+    string memory ptSymbol = string(abi.encodePacked("PT", _toMaturityString(maturityTime)));
+
+    string memory ytName = string(abi.encodePacked("YT-", _getTokenSymbol(TOKEN0), "-", _getTokenSymbol(TOKEN1)));
+    string memory ytSymbol = string(abi.encodePacked("YT", _toMaturityString(maturityTime)));
+
+    principalToken = new PrincipalToken(ptName, ptSymbol, address(this));
+    yieldToken = new YieldToken(ytName, ytSymbol, address(this));
+  }
+
+  /// @notice Helper to get token symbol (simplified - in production would query token)
+  function _getTokenSymbol(address) internal pure returns (string memory) {
+    return "TKN"; // Simplified - would query actual symbol in production
+  }
+
+  /// @notice Helper to convert maturity to string (simplified)
+  function _toMaturityString(uint256) internal pure returns (string memory) {
+    return "2025"; // Simplified - would format actual date in production
+  }
 
   /// @notice Deposit token0 and token1 to be distributed in a target
   /// v4 liquidity pool. This will mint pinciple tokens and yield tokens.
