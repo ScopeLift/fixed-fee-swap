@@ -250,7 +250,6 @@ contract FixedFeeSwapFactory {
         poolManager,
         targetPoolKey,
         uint48(standardizedMaturity - block.timestamp),
-        closeFee,
         hookPositions
       );
       hook = address(fixedFeeSwapHook);

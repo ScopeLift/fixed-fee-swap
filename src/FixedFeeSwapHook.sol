@@ -10,8 +10,11 @@ import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {Position} from "v4-core/src/libraries/Position.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
+import {ModifyLiquidityParams} from "v4-core/src/types/PoolOperation.sol";
 import {LiquidityAmounts} from "v4-core/test/utils/LiquidityAmounts.sol";
 import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
+import {ERC20} from "openzeppelin/token/ERC20/ERC20.sol";
+import {Strings} from "openzeppelin/utils/Strings.sol";
 import {PrincipalToken} from "./PrincipalToken.sol";
 import {YieldToken} from "./YieldToken.sol";
 
@@ -26,6 +29,7 @@ import {YieldToken} from "./YieldToken.sol";
 contract FixedFeeSwapHook is LimitOrderHook {
   using PoolIdLibrary for PoolKey;
   using StateLibrary for IPoolManager;
+  using Strings for uint256;
   /// @notice Structure for liquidity position configuration
   struct LiquidityPosition {
     int24 tickLower;
@@ -35,12 +39,6 @@ contract FixedFeeSwapHook is LimitOrderHook {
 
   /// @notice The length from the start of the market to maturity.
   uint48 public immutable MARKET_LENGTH;
-
-  /// @notice The maximum the close fee can be set.
-  uint256 public immutable MAX_CLOSE_FEE;
-
-  /// @notice The max fee a closer can request when closing the market.
-  uint256 public closeFee;
 
   /// @notice Indicating whether the market is closed or not.
   bool public closed = false;
@@ -57,6 +55,8 @@ contract FixedFeeSwapHook is LimitOrderHook {
   /// @notice The predefined liquidity positions for this market
   LiquidityPosition[] public positions;
 
+  uint256 public totalPositionWeight;
+
   /// @notice The principal token for this fixed fee swap
   PrincipalToken public principalToken;
 
@@ -69,6 +69,7 @@ contract FixedFeeSwapHook is LimitOrderHook {
 
   /// @notice Total liquidity deposited for each position
   mapping(bytes32 => uint128) public positionLiquidity;
+
 
   /// @notice Total principal tokens issued
   uint256 public totalPrincipal;
@@ -107,7 +108,6 @@ contract FixedFeeSwapHook is LimitOrderHook {
     IPoolManager _poolManager,
     PoolKey memory _targetPoolKey,
     uint48 _marketLength,
-    uint256 _maxCloseFee,
     LiquidityPosition[] memory _positions
   ) LimitOrderHook(_poolManager) {
     // Store target pool info
@@ -117,12 +117,11 @@ contract FixedFeeSwapHook is LimitOrderHook {
 
     // Store market parameters
     MARKET_LENGTH = _marketLength;
-    MAX_CLOSE_FEE = _maxCloseFee;
-    closeFee = _maxCloseFee; // Initialize to max
 
     // Store liquidity positions
     for (uint256 i = 0; i < _positions.length; i++) {
       positions.push(_positions[i]);
+	  totalPositionWeight += _positions[i].weight;
     }
 
     // Set market timing
@@ -132,23 +131,82 @@ contract FixedFeeSwapHook is LimitOrderHook {
     // Deploy PT and YT tokens
     // Create unique names based on the underlying tokens and maturity
     string memory ptName = string(abi.encodePacked("PT-", _getTokenSymbol(TOKEN0), "-", _getTokenSymbol(TOKEN1)));
-    string memory ptSymbol = string(abi.encodePacked("PT", _toMaturityString(maturityTime)));
+    string memory ptSymbol = string(abi.encodePacked("PT", _toString(maturityTime), _toString(MARKET_LENGTH)));
 
     string memory ytName = string(abi.encodePacked("YT-", _getTokenSymbol(TOKEN0), "-", _getTokenSymbol(TOKEN1)));
-    string memory ytSymbol = string(abi.encodePacked("YT", _toMaturityString(maturityTime)));
+    string memory ytSymbol = string(abi.encodePacked("YT", _toString(maturityTime), _toString(MARKET_LENGTH)));
 
     principalToken = new PrincipalToken(ptName, ptSymbol, address(this));
     yieldToken = new YieldToken(ytName, ytSymbol, address(this));
   }
 
-  /// @notice Helper to get token symbol (simplified - in production would query token)
-  function _getTokenSymbol(address) internal pure returns (string memory) {
-    return "TKN"; // Simplified - would query actual symbol in production
+  /// @notice Helper to get token symbol.
+  function _getTokenSymbol(address _token) internal view returns (string memory) {
+    return ERC20(_token).symbol(); 
   }
 
-  /// @notice Helper to convert maturity to string (simplified)
-  function _toMaturityString(uint256) internal pure returns (string memory) {
-    return "2025"; // Simplified - would format actual date in production
+  /// @notice Helper to convert maturity to string 
+  function _toString(uint256 _value) internal pure returns (string memory) {
+    return _value.toString();  
+  }
+
+  /// @notice Internal function to ensure market is closed after maturity
+  function _closeMatureMarket() internal {
+    if (block.timestamp >= maturityTime && !closed) {
+      _closeMarket();
+    }
+  }
+
+  /// @notice Internal function to collect fees from all positions
+  /// @return fees0 Total fees collected in token0
+  /// @return fees1 Total fees collected in token1
+  function _collectFeesFromPositions() internal returns (uint256 fees0, uint256 fees1) {
+    fees0 = 0;
+    fees1 = 0;
+
+    // Collect fees from each position by calling modifyLiquidity with 0 delta
+    for (uint256 i = 0; i < positions.length; i++) {
+      LiquidityPosition memory pos = positions[i];
+      bytes32 positionKey = keccak256(abi.encodePacked(address(this), pos.tickLower, pos.tickUpper));
+
+      uint128 posLiquidity = positionLiquidity[positionKey];
+      if (posLiquidity > 0) {
+        // Call modifyLiquidity with 0 liquidity delta to collect fees
+        // This returns a BalanceDelta with the fees collected
+        ModifyLiquidityParams memory params = ModifyLiquidityParams({
+          tickLower: pos.tickLower,
+          tickUpper: pos.tickUpper,
+          liquidityDelta: 0,  // 0 delta just collects fees
+          salt: bytes32(0)
+        });
+
+        (,BalanceDelta _fees) = poolManager.modifyLiquidity(targetPoolKey, params, "");
+        fees0 += uint256(uint128(_fees.amount0()));  // Positive amount = fees collected
+        fees1 += uint256(uint128(_fees.amount1()));
+      }
+    }
+
+    // Update our internal fee accumulator
+    if (fees0 > 0 || fees1 > 0) {
+      feeGrowthGlobal0 += fees0;
+      feeGrowthGlobal1 += fees1;
+    }
+  }
+
+  /// @notice Internal function to close the market
+  function _closeMarket() internal {
+    if (closed) return; // Already closed
+
+    // Collect all outstanding fees from positions
+    _collectFeesFromPositions();
+
+    // Snapshot the fee growth at close time
+    // These snapshots are used to calculate yield for YT holders
+    closeFeeGrowth0 = feeGrowthGlobal0;
+    closeFeeGrowth1 = feeGrowthGlobal1;
+
+    // Mark market as closed
+    closed = true;
   }
 
   /// @notice Helper function to add liquidity for a single position
@@ -202,19 +260,17 @@ contract FixedFeeSwapHook is LimitOrderHook {
     uint256 ytMinted
   ) {
     // Check market is active (not mature and not closed)
+	// If a market isn't active it is also closed.
     if (block.timestamp >= maturityTime) revert MarketNotActive();
-    if (closed) revert MarketAlreadyClosed();
     if (amount0Max == 0 || amount1Max == 0) revert InvalidAmount();
+
+    // Collect fees from existing positions before deposit
+    // This ensures proper fee accounting for yield tokens
+    _collectFeesFromPositions();
 
     // Transfer max tokens from user (will refund unused later)
     IERC20(TOKEN0).transferFrom(msg.sender, address(this), amount0Max);
     IERC20(TOKEN1).transferFrom(msg.sender, address(this), amount1Max);
-
-    // Calculate total weight for proportional distribution
-    uint256 totalWeight = 0;
-    for (uint256 i = 0; i < positions.length; i++) {
-      totalWeight += positions[i].weight;
-    }
 
     // Get current pool state
     PoolId poolId = targetPoolKey.toId();
@@ -228,10 +284,12 @@ contract FixedFeeSwapHook is LimitOrderHook {
     // Process each position
     for (uint256 i = 0; i < positions.length; i++) {
       // Calculate maximum amounts for this position based on weight
-      uint256 posAmount0Max = (amount0Max * positions[i].weight) / totalWeight;
-      uint256 posAmount1Max = (amount1Max * positions[i].weight) / totalWeight;
+      uint256 posAmount0Max = (amount0Max * positions[i].weight) / totalPositionWeight;
+      uint256 posAmount1Max = (amount1Max * positions[i].weight) / totalPositionWeight;
 
       // Add liquidity to this position
+	  // TODO: Double check this. Does one liquidity at any given price also equate to the
+	  // amount of shares that should be minted.
       (uint128 liquidityAdded, uint256 amount0ForPos, uint256 amount1ForPos) = _addLiquidityToPosition(
         positions[i],
         posAmount0Max,
@@ -285,6 +343,11 @@ contract FixedFeeSwapHook is LimitOrderHook {
   function claimPrincipal() external {
     // Check market is mature
     if (block.timestamp < maturityTime) revert MarketNotMature();
+
+    // Ensure market is closed if mature
+    _closeMatureMarket();
+	// Collect any remaining fees
+    _collectFeesFromPositions();
 
     // Get user's PT balance
     uint256 ptBalance = principalToken.balanceOf(msg.sender);
@@ -355,6 +418,9 @@ contract FixedFeeSwapHook is LimitOrderHook {
   /// @notice At maturity a person holding a Yield token can
   /// burn their token and claim the underlying liquidity.
   function claimYield() external {
+    // Ensure market is closed if mature
+    _closeMatureMarket();
+
     // Check market is closed (must be closed for final fee accounting)
     if (!closed) revert MarketNotClosed();
 
@@ -399,13 +465,10 @@ contract FixedFeeSwapHook is LimitOrderHook {
     totalYield -= ytBalance;
   }
 
-  /// @notice A function anyone can call after maturity. It
-  /// does a final accounting of fees and pays a small fee
-  /// to the caller from those fees. There is a lag from
-  /// maturity to when final accounting is completed. After
-  /// The market is closed no one can deposit new liquidity.
-  /// If more fee accumulate they are given to principal holders
-  /// after the close date.
+  /// @notice A function anyone can call after maturity to close the market.
+  /// This performs final fee accounting. After the market is closed,
+  /// no new liquidity can be deposited. Any fees that accumulate after
+  /// closing are given to principal holders.
   function close() external {
     // Check market is mature
     if (block.timestamp < maturityTime) revert MarketNotMature();
@@ -413,55 +476,7 @@ contract FixedFeeSwapHook is LimitOrderHook {
     // Check market not already closed
     if (closed) revert MarketAlreadyClosed();
 
-    // Calculate accumulated fees from all positions
-    uint256 totalFees0 = 0;
-    uint256 totalFees1 = 0;
-
-    // Get current pool state
-    PoolId poolId = PoolIdLibrary.toId(targetPoolKey);
-    (uint160 sqrtPriceX96, , , ) = poolManager.getSlot0(poolId);
-
-    // Collect fees from each position
-    for (uint256 i = 0; i < positions.length; i++) {
-      LiquidityPosition memory pos = positions[i];
-      bytes32 positionKey = keccak256(abi.encodePacked(address(this), pos.tickLower, pos.tickUpper));
-
-      uint128 posLiquidity = positionLiquidity[positionKey];
-      if (posLiquidity > 0) {
-        // In a real implementation, this would collect fees from the PoolManager
-        // Here we simulate fee collection
-        uint256 positionFees0 = (posLiquidity * 100) / 10000; // 1% simulated fee
-        uint256 positionFees1 = (posLiquidity * 100) / 10000; // 1% simulated fee
-
-        totalFees0 += positionFees0;
-        totalFees1 += positionFees1;
-      }
-    }
-
-    // Update fee growth snapshots at close
-    feeGrowthGlobal0 += totalFees0;
-    feeGrowthGlobal1 += totalFees1;
-    closeFeeGrowth0 = feeGrowthGlobal0;
-    closeFeeGrowth1 = feeGrowthGlobal1;
-
-    // Calculate close fee for the caller
-    uint256 closerFee0 = (totalFees0 * closeFee) / 10000;
-    uint256 closerFee1 = (totalFees1 * closeFee) / 10000;
-
-    // Pay the closer
-    if (closerFee0 > 0) {
-      IERC20(TOKEN0).transfer(msg.sender, closerFee0);
-    }
-    if (closerFee1 > 0) {
-      IERC20(TOKEN1).transfer(msg.sender, closerFee1);
-    }
-
-    // Mark market as closed
-    closed = true;
-
-    // Reduce close fee for next time (incentivize early closing)
-    if (closeFee > 10) {
-      closeFee = closeFee - 10; // Reduce by 0.1%
-    }
+    // Close the market
+    _closeMarket();
   }
 }
