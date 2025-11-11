@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import {LimitOrderHook} from "@openzeppelin/uniswap-hooks/general/LimitOrderHook.sol";
+import {LimitOrderHook} from "../lib/uniswap-hooks/src/general/LimitOrderHook.sol";
+import {Hooks} from "v4-core/src/libraries/Hooks.sol";
+import {BeforeSwapDelta, toBeforeSwapDelta} from "v4-core/src/types/BeforeSwapDelta.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
@@ -10,7 +12,7 @@ import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {Position} from "v4-core/src/libraries/Position.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
-import {ModifyLiquidityParams} from "v4-core/src/types/PoolOperation.sol";
+import {ModifyLiquidityParams, SwapParams} from "v4-core/src/types/PoolOperation.sol";
 import {LiquidityAmounts} from "v4-core/test/utils/LiquidityAmounts.sol";
 import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
 import {ERC20} from "openzeppelin/token/ERC20/ERC20.sol";
@@ -30,6 +32,7 @@ contract FixedFeeSwapHook is LimitOrderHook {
   using PoolIdLibrary for PoolKey;
   using StateLibrary for IPoolManager;
   using Strings for uint256;
+
   /// @notice Structure for liquidity position configuration
   struct LiquidityPosition {
     int24 tickLower;
@@ -69,7 +72,6 @@ contract FixedFeeSwapHook is LimitOrderHook {
 
   /// @notice Total liquidity deposited for each position
   mapping(bytes32 => uint128) public positionLiquidity;
-
 
   /// @notice Total principal tokens issued
   uint256 public totalPrincipal;
@@ -121,7 +123,7 @@ contract FixedFeeSwapHook is LimitOrderHook {
     // Store liquidity positions
     for (uint256 i = 0; i < _positions.length; i++) {
       positions.push(_positions[i]);
-	  totalPositionWeight += _positions[i].weight;
+      totalPositionWeight += _positions[i].weight;
     }
 
     // Set market timing
@@ -130,11 +132,15 @@ contract FixedFeeSwapHook is LimitOrderHook {
 
     // Deploy PT and YT tokens
     // Create unique names based on the underlying tokens and maturity
-    string memory ptName = string(abi.encodePacked("PT-", _getTokenSymbol(TOKEN0), "-", _getTokenSymbol(TOKEN1)));
-    string memory ptSymbol = string(abi.encodePacked("PT", _toString(maturityTime), _toString(MARKET_LENGTH)));
+    string memory ptName =
+      string(abi.encodePacked("PT-", _getTokenSymbol(TOKEN0), "-", _getTokenSymbol(TOKEN1)));
+    string memory ptSymbol =
+      string(abi.encodePacked("PT", _toString(maturityTime), _toString(MARKET_LENGTH)));
 
-    string memory ytName = string(abi.encodePacked("YT-", _getTokenSymbol(TOKEN0), "-", _getTokenSymbol(TOKEN1)));
-    string memory ytSymbol = string(abi.encodePacked("YT", _toString(maturityTime), _toString(MARKET_LENGTH)));
+    string memory ytName =
+      string(abi.encodePacked("YT-", _getTokenSymbol(TOKEN0), "-", _getTokenSymbol(TOKEN1)));
+    string memory ytSymbol =
+      string(abi.encodePacked("YT", _toString(maturityTime), _toString(MARKET_LENGTH)));
 
     principalToken = new PrincipalToken(ptName, ptSymbol, address(this));
     yieldToken = new YieldToken(ytName, ytSymbol, address(this));
@@ -142,19 +148,17 @@ contract FixedFeeSwapHook is LimitOrderHook {
 
   /// @notice Helper to get token symbol.
   function _getTokenSymbol(address _token) internal view returns (string memory) {
-    return ERC20(_token).symbol(); 
+    return ERC20(_token).symbol();
   }
 
-  /// @notice Helper to convert maturity to string 
+  /// @notice Helper to convert maturity to string
   function _toString(uint256 _value) internal pure returns (string memory) {
-    return _value.toString();  
+    return _value.toString();
   }
 
   /// @notice Internal function to ensure market is closed after maturity
   function _closeMatureMarket() internal {
-    if (block.timestamp >= maturityTime && !closed) {
-      _closeMarket();
-    }
+    if (block.timestamp >= maturityTime && !closed) _closeMarket();
   }
 
   /// @notice Internal function to collect fees from all positions
@@ -176,12 +180,12 @@ contract FixedFeeSwapHook is LimitOrderHook {
         ModifyLiquidityParams memory params = ModifyLiquidityParams({
           tickLower: pos.tickLower,
           tickUpper: pos.tickUpper,
-          liquidityDelta: 0,  // 0 delta just collects fees
+          liquidityDelta: 0, // 0 delta just collects fees
           salt: bytes32(0)
         });
 
-        (,BalanceDelta _fees) = poolManager.modifyLiquidity(targetPoolKey, params, "");
-        fees0 += uint256(uint128(_fees.amount0()));  // Positive amount = fees collected
+        (, BalanceDelta _fees) = poolManager.modifyLiquidity(targetPoolKey, params, "");
+        fees0 += uint256(uint128(_fees.amount0())); // Positive amount = fees collected
         fees1 += uint256(uint128(_fees.amount1()));
       }
     }
@@ -237,6 +241,9 @@ contract FixedFeeSwapHook is LimitOrderHook {
       // Update position tracking
       bytes32 positionKey = keccak256(abi.encodePacked(address(this), pos.tickLower, pos.tickUpper));
       positionLiquidity[positionKey] += liquidityAdded;
+
+      // Actually provide the liquidity to the pool
+      _providePositionLiquidity(pos, liquidityAdded);
     }
   }
 
@@ -250,17 +257,12 @@ contract FixedFeeSwapHook is LimitOrderHook {
   /// @return amount1Used Actual amount of token1 used
   /// @return ptMinted Amount of PT tokens minted
   /// @return ytMinted Amount of YT tokens minted
-  function depositLiquidity(
-    uint256 amount0Max,
-    uint256 amount1Max
-  ) external returns (
-    uint256 amount0Used,
-    uint256 amount1Used,
-    uint256 ptMinted,
-    uint256 ytMinted
-  ) {
+  function depositLiquidity(uint256 amount0Max, uint256 amount1Max)
+    external
+    returns (uint256 amount0Used, uint256 amount1Used, uint256 ptMinted, uint256 ytMinted)
+  {
     // Check market is active (not mature and not closed)
-	// If a market isn't active it is also closed.
+    // If a market isn't active it is also closed.
     if (block.timestamp >= maturityTime) revert MarketNotActive();
     if (amount0Max == 0 || amount1Max == 0) revert InvalidAmount();
 
@@ -274,7 +276,7 @@ contract FixedFeeSwapHook is LimitOrderHook {
 
     // Get current pool state
     PoolId poolId = targetPoolKey.toId();
-    (uint160 sqrtPriceX96, , , ) = poolManager.getSlot0(poolId);
+    (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
 
     // Track actual amounts used and liquidity added
     uint256 totalLiquidityAdded = 0;
@@ -288,14 +290,10 @@ contract FixedFeeSwapHook is LimitOrderHook {
       uint256 posAmount1Max = (amount1Max * positions[i].weight) / totalPositionWeight;
 
       // Add liquidity to this position
-	  // TODO: Double check this. Does one liquidity at any given price also equate to the
-	  // amount of shares that should be minted.
-      (uint128 liquidityAdded, uint256 amount0ForPos, uint256 amount1ForPos) = _addLiquidityToPosition(
-        positions[i],
-        posAmount0Max,
-        posAmount1Max,
-        sqrtPriceX96
-      );
+      // TODO: Double check this. Does one liquidity at any given price also equate to the
+      // amount of shares that should be minted.
+      (uint128 liquidityAdded, uint256 amount0ForPos, uint256 amount1ForPos) =
+        _addLiquidityToPosition(positions[i], posAmount0Max, posAmount1Max, sqrtPriceX96);
 
       // Update totals
       totalLiquidityAdded += liquidityAdded;
@@ -329,12 +327,8 @@ contract FixedFeeSwapHook is LimitOrderHook {
     uint256 refund0 = amount0Max - amount0Used;
     uint256 refund1 = amount1Max - amount1Used;
 
-    if (refund0 > 0) {
-      IERC20(TOKEN0).transfer(msg.sender, refund0);
-    }
-    if (refund1 > 0) {
-      IERC20(TOKEN1).transfer(msg.sender, refund1);
-    }
+    if (refund0 > 0) IERC20(TOKEN0).transfer(msg.sender, refund0);
+    if (refund1 > 0) IERC20(TOKEN1).transfer(msg.sender, refund1);
   }
 
   /// @notice At maturity a person holding a Principal token can
@@ -346,7 +340,7 @@ contract FixedFeeSwapHook is LimitOrderHook {
 
     // Ensure market is closed if mature
     _closeMatureMarket();
-	// Collect any remaining fees
+    // Collect any remaining fees
     _collectFeesFromPositions();
 
     // Get user's PT balance
@@ -373,20 +367,12 @@ contract FixedFeeSwapHook is LimitOrderHook {
         uint128 userLiquidity = uint128((uint256(posLiquidity) * share) / 1e18);
 
         if (userLiquidity > 0) {
-          // Get current pool state
-          PoolId poolId = PoolIdLibrary.toId(targetPoolKey);
-          (uint160 sqrtPriceX96, , , ) = poolManager.getSlot0(poolId);
+          // Remove liquidity from the pool and get the actual amounts
+          (uint256 actualAmount0, uint256 actualAmount1) =
+            _removePositionLiquidity(pos, userLiquidity);
 
-          // Calculate token amounts for this liquidity
-          (uint256 amount0, uint256 amount1) = LiquidityAmounts.getAmountsForLiquidity(
-            sqrtPriceX96,
-            TickMath.getSqrtPriceAtTick(pos.tickLower),
-            TickMath.getSqrtPriceAtTick(pos.tickUpper),
-            userLiquidity
-          );
-
-          amount0ToReturn += amount0;
-          amount1ToReturn += amount1;
+          amount0ToReturn += actualAmount0;
+          amount1ToReturn += actualAmount1;
 
           // Update position liquidity
           positionLiquidity[positionKey] -= userLiquidity;
@@ -404,12 +390,8 @@ contract FixedFeeSwapHook is LimitOrderHook {
     }
 
     // Transfer tokens to user
-    if (amount0ToReturn > 0) {
-      IERC20(TOKEN0).transfer(msg.sender, amount0ToReturn);
-    }
-    if (amount1ToReturn > 0) {
-      IERC20(TOKEN1).transfer(msg.sender, amount1ToReturn);
-    }
+    if (amount0ToReturn > 0) IERC20(TOKEN0).transfer(msg.sender, amount0ToReturn);
+    if (amount1ToReturn > 0) IERC20(TOKEN1).transfer(msg.sender, amount1ToReturn);
 
     // Update total principal
     totalPrincipal -= ptBalance;
@@ -454,12 +436,8 @@ contract FixedFeeSwapHook is LimitOrderHook {
     }
 
     // Transfer fee tokens to user
-    if (fees0 > 0) {
-      IERC20(TOKEN0).transfer(msg.sender, fees0);
-    }
-    if (fees1 > 0) {
-      IERC20(TOKEN1).transfer(msg.sender, fees1);
-    }
+    if (fees0 > 0) IERC20(TOKEN0).transfer(msg.sender, fees0);
+    if (fees1 > 0) IERC20(TOKEN1).transfer(msg.sender, fees1);
 
     // Update total yield
     totalYield -= ytBalance;
@@ -478,5 +456,128 @@ contract FixedFeeSwapHook is LimitOrderHook {
 
     // Close the market
     _closeMarket();
+  }
+
+  // ============ Hook Lifecycle Methods ============
+
+  /// @notice Override hook permissions to enable liquidity management hooks
+  function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
+    return Hooks.Permissions({
+      beforeInitialize: false,
+      afterInitialize: true,
+      beforeAddLiquidity: true, // Restrict external liquidity additions
+      beforeRemoveLiquidity: true, // Restrict external liquidity removals
+      afterAddLiquidity: false,
+      afterRemoveLiquidity: false,
+      beforeSwap: true, // Apply custom logic for PT/YT trading
+      afterSwap: true,
+      beforeDonate: false,
+      afterDonate: false,
+      beforeSwapReturnDelta: false,
+      afterSwapReturnDelta: false,
+      afterAddLiquidityReturnDelta: false,
+      afterRemoveLiquidityReturnDelta: false
+    });
+  }
+
+  /// @notice Hook to prevent external liquidity additions to target pool
+  /// Only this hook should manage liquidity in the predefined positions
+  function beforeAddLiquidity(
+    address sender,
+    PoolKey calldata key,
+    ModifyLiquidityParams calldata,
+    bytes calldata
+  ) external view override returns (bytes4) {
+    // Only allow this hook to add liquidity to the target pool
+    if (PoolId.unwrap(key.toId()) == PoolId.unwrap(targetPoolKey.toId())) {
+      if (sender != address(this)) revert("External liquidity not allowed");
+    }
+
+    // For PT/YT pools, allow anyone to add liquidity (market making)
+    return this.beforeAddLiquidity.selector;
+  }
+
+  /// @notice Hook to prevent external liquidity removals from target pool
+  /// Only this hook should remove liquidity from the predefined positions
+  function beforeRemoveLiquidity(
+    address sender,
+    PoolKey calldata key,
+    ModifyLiquidityParams calldata,
+    bytes calldata
+  ) external view override returns (bytes4) {
+    // Only allow this hook to remove liquidity from the target pool
+    if (PoolId.unwrap(key.toId()) == PoolId.unwrap(targetPoolKey.toId())) {
+      if (sender != address(this)) revert("External liquidity removal not allowed");
+    }
+
+    // For PT/YT pools, allow anyone to remove liquidity
+    return this.beforeRemoveLiquidity.selector;
+  }
+
+  /// @notice Hook for custom swap logic on PT/YT pools
+  /// Enforces trading restrictions based on market status
+  function beforeSwap(address, PoolKey calldata key, SwapParams calldata, bytes calldata)
+    external
+    override
+    returns (bytes4, BeforeSwapDelta, uint24)
+  {
+    // Auto-close market if mature on any interaction
+    _closeMatureMarket();
+
+    // Check if this is a PT or YT pool by checking if hook is set to this contract
+    if (address(key.hooks) == address(this)) {
+      // After maturity, consider restricting or modifying PT/YT trading
+      // For now, allow normal trading but market dynamics will naturally
+      // drive PT price to par and YT price to zero at maturity
+    }
+
+    // Return no delta modification and no custom fee
+    return (this.beforeSwap.selector, toBeforeSwapDelta(0, 0), 0);
+  }
+
+  // ============ Helper Functions for Liquidity Management ============
+
+  /// @notice Internal function to add liquidity to target pool positions
+  /// This is called internally by depositLiquidity and manages the actual
+  /// liquidity provision to the PoolManager
+  function _providePositionLiquidity(LiquidityPosition memory pos, uint128 liquidityToAdd)
+    internal
+  {
+    if (liquidityToAdd == 0) return;
+
+    // Prepare modify liquidity parameters
+    ModifyLiquidityParams memory params = ModifyLiquidityParams({
+      tickLower: pos.tickLower,
+      tickUpper: pos.tickUpper,
+      liquidityDelta: int256(uint256(liquidityToAdd)),
+      salt: bytes32(0)
+    });
+
+    // Add liquidity to the target pool through PoolManager
+    poolManager.modifyLiquidity(targetPoolKey, params, "");
+  }
+
+  /// @notice Internal function to remove liquidity from target pool positions
+  /// This is called internally when users claim principal tokens
+  function _removePositionLiquidity(LiquidityPosition memory pos, uint128 liquidityToRemove)
+    internal
+    returns (uint256 amount0, uint256 amount1)
+  {
+    if (liquidityToRemove == 0) return (0, 0);
+
+    // Prepare modify liquidity parameters with negative delta
+    ModifyLiquidityParams memory params = ModifyLiquidityParams({
+      tickLower: pos.tickLower,
+      tickUpper: pos.tickUpper,
+      liquidityDelta: -int256(uint256(liquidityToRemove)),
+      salt: bytes32(0)
+    });
+
+    // Remove liquidity from the target pool
+    (, BalanceDelta delta) = poolManager.modifyLiquidity(targetPoolKey, params, "");
+
+    // Convert balance delta to amounts (negative delta means tokens returned)
+    amount0 = uint256(uint128(-delta.amount0()));
+    amount1 = uint256(uint128(-delta.amount1()));
   }
 }

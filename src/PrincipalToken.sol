@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import {ERC20} from "lib/uniswap-hooks/lib/v4-periphery/lib/permit2/lib/solmate/src/tokens/ERC20.sol";
+import {
+  ERC20
+} from "lib/uniswap-hooks/lib/v4-periphery/lib/permit2/lib/solmate/src/tokens/ERC20.sol";
 
 /// @title PrincipalToken
 /// @notice ERC20 token representing principal in the fixed fee swap system

@@ -19,9 +19,9 @@ contract FixedFeeSwapFactory {
   /// @notice Structure to track deployed fixed fee swaps
   struct FixedFeeSwapInfo {
     address hook;
-    PoolKey targetPoolKey;  // The underlying pool providing liquidity
-    PoolKey ptPoolKey;      // Pool for PT token trading
-    PoolKey ytPoolKey;      // Pool for YT token trading
+    PoolKey targetPoolKey; // The underlying pool providing liquidity
+    PoolKey ptPoolKey; // Pool for PT token trading
+    PoolKey ytPoolKey; // Pool for YT token trading
     uint256 maturity;
     uint256 createdAt;
     address principalToken;
@@ -88,46 +88,26 @@ contract FixedFeeSwapFactory {
   /// @notice Mapping from hook address to fixed fee swap info
   mapping(address => FixedFeeSwapInfo) public swapsByHook;
 
-  /// @notice Default liquidity positions (can be overridden)
-  LiquidityPosition[] public defaultPositions;
-
   /// @notice Constructor
   /// @param _poolManager The Uniswap v4 pool manager
-  /// @param _expiryDivisor The divisor to use for standardizing expiry times (e.g., DAILY_EXPIRY, WEEKLY_EXPIRY)
+  /// @param _expiryDivisor The divisor to use for standardizing expiry times (e.g., DAILY_EXPIRY,
+  /// WEEKLY_EXPIRY)
   constructor(IPoolManager _poolManager, uint256 _expiryDivisor) {
     if (address(_poolManager) == address(0)) revert ZeroAddress();
     if (_expiryDivisor == 0) revert ZeroAddress();
 
     poolManager = _poolManager;
     EXPIRY_DIVISOR = _expiryDivisor;
-
-    // Initialize default liquidity distribution
-    // Position 1: 30% weight, narrow range around current price
-    defaultPositions.push(LiquidityPosition({
-      tickLower: -600,
-      tickUpper: 600,
-      weight: 3000
-    }));
-
-    // Position 2: 50% weight, medium range
-    defaultPositions.push(LiquidityPosition({
-      tickLower: -2400,
-      tickUpper: 2400,
-      weight: 5000
-    }));
-
-    // Position 3: 20% weight, wide range
-    defaultPositions.push(LiquidityPosition({
-      tickLower: -4800,
-      tickUpper: 4800,
-      weight: 2000
-    }));
   }
 
   /// @notice Calculate the standardized maturity time based on the expiry divisor
   /// @param requestedMaturity The requested maturity length in seconds from now
   /// @return The standardized maturity timestamp
-  function _calculateStandardizedMaturity(uint48 requestedMaturity) internal view returns (uint256) {
+  function _calculateStandardizedMaturity(uint48 requestedMaturity)
+    internal
+    view
+    returns (uint256)
+  {
     uint256 targetTime = block.timestamp + requestedMaturity;
     // Round up to the next expiry divisor boundary
     // For example, if EXPIRY_DIVISOR is 1 day, this rounds to the next midnight UTC
@@ -140,11 +120,10 @@ contract FixedFeeSwapFactory {
   /// @param hook The hook address for the pool
   /// @return poolKey The created pool key
   /// @return poolId The created pool ID
-  function _createTradingPool(
-    address token,
-    address referenceToken,
-    address hook
-  ) internal returns (PoolKey memory poolKey, PoolId poolId) {
+  function _createTradingPool(address token, address referenceToken, address hook)
+    internal
+    returns (PoolKey memory poolKey, PoolId poolId)
+  {
     // Ensure proper token ordering
     address token0 = token < referenceToken ? token : referenceToken;
     address token1 = token < referenceToken ? referenceToken : token;
@@ -162,9 +141,9 @@ contract FixedFeeSwapFactory {
     poolId = poolKey.toId();
 
     // Initialize the pool at 1:1 price
-	// TODO; What is the best way to set the initial price of the pools
-	// TODO: We need to set an initial positions to allow the connection of limit orders.
-    poolManager.initialize(poolKey, 79228162514264337593543950336);
+    // TODO; What is the best way to set the initial price of the pools
+    // TODO: We need to set an initial positions to allow the connection of limit orders.
+    poolManager.initialize(poolKey, 79_228_162_514_264_337_593_543_950_336);
   }
 
   /// @notice Create a Fixed fee swap for a given maturity length with default positions.
@@ -173,8 +152,8 @@ contract FixedFeeSwapFactory {
   /// created for trading PT and YT against a reference token.
   /// The maturity will be standardized to the next expiry boundary.
   /// @param targetPoolKey The existing pool to create fixed fee swap for
-  /// @param maturityLength The approximate length until maturity in seconds (will be rounded to next boundary)
-  /// @param closeFee The fee paid to the closer (in basis points)
+  /// @param maturityLength The approximate length until maturity in seconds (will be rounded to
+  /// next boundary) @param closeFee The fee paid to the closer (in basis points)
   /// @param referenceToken The token to pair PT/YT with (typically USDC or ETH)
   /// @return hook The address of the deployed FixedFeeSwapHook
   /// @return ptPoolId The ID of the created PT trading pool
@@ -183,52 +162,21 @@ contract FixedFeeSwapFactory {
     PoolKey memory targetPoolKey,
     uint48 maturityLength,
     uint256 closeFee,
-    address referenceToken
-  ) external returns (
-    address hook,
-    PoolId ptPoolId,
-    PoolId ytPoolId
-  ) {
-    // Use default positions
-    return _createFixedFeeSwapWithPositions(
-      targetPoolKey,
-      maturityLength,
-      closeFee,
-      referenceToken,
-      defaultPositions
-    );
-  }
-
-  /// @notice Internal function to create a fixed fee swap with specified positions
-  function _createFixedFeeSwapWithPositions(
-    PoolKey memory targetPoolKey,
-    uint48 maturityLength,
-    uint256 closeFee,
     address referenceToken,
     LiquidityPosition[] memory positions
-  ) internal returns (
-    address hook,
-    PoolId ptPoolId,
-    PoolId ytPoolId
-  ) {
+  ) internal returns (address hook, PoolId ptPoolId, PoolId ytPoolId) {
     // Validate inputs
     if (maturityLength < MIN_MATURITY || maturityLength > MAX_MATURITY) {
       revert InvalidMaturityLength();
     }
-    if (closeFee > MAX_CLOSE_FEE_LIMIT) {
-      revert InvalidCloseFee();
-    }
-    if (referenceToken == address(0)) {
-      revert ZeroAddress();
-    }
+    if (closeFee > MAX_CLOSE_FEE_LIMIT) revert InvalidCloseFee();
+    if (referenceToken == address(0)) revert ZeroAddress();
 
     // Verify the target pool exists by checking its sqrtPrice
     PoolId targetPoolId = targetPoolKey.toId();
     {
-      (uint160 sqrtPriceX96, , , ) = poolManager.getSlot0(targetPoolId);
-      if (sqrtPriceX96 == 0) {
-        revert PoolDoesNotExist();
-      }
+      (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(targetPoolId);
+      if (sqrtPriceX96 == 0) revert PoolDoesNotExist();
     }
 
     // Calculate the standardized maturity time
@@ -237,7 +185,8 @@ contract FixedFeeSwapFactory {
     // Deploy the FixedFeeSwapHook with the standardized maturity and positions
     {
       // Convert positions format for the hook
-      FixedFeeSwapHook.LiquidityPosition[] memory hookPositions = new FixedFeeSwapHook.LiquidityPosition[](positions.length);
+      FixedFeeSwapHook.LiquidityPosition[] memory hookPositions =
+        new FixedFeeSwapHook.LiquidityPosition[](positions.length);
       for (uint256 i = 0; i < positions.length; i++) {
         hookPositions[i] = FixedFeeSwapHook.LiquidityPosition({
           tickLower: positions[i].tickLower,
@@ -247,10 +196,7 @@ contract FixedFeeSwapFactory {
       }
 
       FixedFeeSwapHook fixedFeeSwapHook = new FixedFeeSwapHook(
-        poolManager,
-        targetPoolKey,
-        uint48(standardizedMaturity - block.timestamp),
-        hookPositions
+        poolManager, targetPoolKey, uint48(standardizedMaturity - block.timestamp), hookPositions
       );
       hook = address(fixedFeeSwapHook);
     }
@@ -260,19 +206,13 @@ contract FixedFeeSwapFactory {
 
     // Create and initialize PT pool
     PoolKey memory ptPoolKey;
-    (ptPoolKey, ptPoolId) = _createTradingPool(
-      address(hookContract.principalToken()),
-      referenceToken,
-      hook
-    );
+    (ptPoolKey, ptPoolId) =
+      _createTradingPool(address(hookContract.principalToken()), referenceToken, hook);
 
     // Create and initialize YT pool
     PoolKey memory ytPoolKey;
-    (ytPoolKey, ytPoolId) = _createTradingPool(
-      address(hookContract.yieldToken()),
-      referenceToken,
-      hook
-    );
+    (ytPoolKey, ytPoolId) =
+      _createTradingPool(address(hookContract.yieldToken()), referenceToken, hook);
 
     // Store complete fixed fee swap info
     {
@@ -319,22 +259,12 @@ contract FixedFeeSwapFactory {
     uint256 closeFee,
     address referenceToken,
     LiquidityPosition[] memory positions
-  ) external returns (
-    address hook,
-    PoolId ptPoolId,
-    PoolId ytPoolId
-  ) {
+  ) external returns (address hook, PoolId ptPoolId, PoolId ytPoolId) {
     // Validate positions
     _validatePositions(positions);
 
     // Create the fixed fee swap with the specified positions
-    return _createFixedFeeSwapWithPositions(
-      targetPoolKey,
-      maturityLength,
-      closeFee,
-      referenceToken,
-      positions
-    );
+    return createFixedFeeSwap(targetPoolKey, maturityLength, closeFee, referenceToken, positions);
   }
 
   /// @notice Check if a fixed fee swap has been deployed for a pool
@@ -361,9 +291,7 @@ contract FixedFeeSwapFactory {
   /// @notice Validate liquidity positions
   /// @param positions The positions to validate
   function _validatePositions(LiquidityPosition[] memory positions) internal pure {
-    if (positions.length == 0) {
-      revert InvalidLiquidityDistribution();
-    }
+    if (positions.length == 0) revert InvalidLiquidityDistribution();
 
     uint256 totalWeight = 0;
 
@@ -378,8 +306,6 @@ contract FixedFeeSwapFactory {
     }
 
     // Validate total weight equals 10000 (100%)
-    if (totalWeight != 10000) {
-      revert InvalidLiquidityDistribution();
-    }
+    if (totalWeight != 10_000) revert InvalidLiquidityDistribution();
   }
 }
