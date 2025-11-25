@@ -95,10 +95,14 @@ contract VaultShareToken is ERC20 {
     if (_supply == 0) return;
 
     // Update the global cumulative fee index for token0
-    if (_collectedFeeToken0 > 0) feeIndexToken0 += Math.mulDiv(_collectedFeeToken0, PRECISION, _supply);
+    if (_collectedFeeToken0 > 0) {
+      feeIndexToken0 += Math.mulDiv(_collectedFeeToken0, PRECISION, _supply);
+    }
 
     // Update the global cumulative fee index for token1
-    if (_collectedFeeToken1 > 0) feeIndexToken1 += Math.mulDiv(_collectedFeeToken1, PRECISION, _supply);
+    if (_collectedFeeToken1 > 0) {
+      feeIndexToken1 += Math.mulDiv(_collectedFeeToken1, PRECISION, _supply);
+    }
 
     emit FeeIndexesUpdated(feeIndexToken0, feeIndexToken1, _collectedFeeToken0, _collectedFeeToken1);
   }
