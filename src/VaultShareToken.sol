@@ -16,40 +16,42 @@ contract VaultShareToken is ERC20 {
                           EVENTS
   //////////////////////////////////////////////////////////////*/
 
-  /// @notice Emitted when the global fee-per-share for token0 and token1 is updated.
-  /// @param newFeePerShareToken0 Updated global fee-per-share index for token0 (with PRECISION)
-  /// @param newFeePerShareToken1 Updated global fee-per-share index for token1 (with PRECISION)
-  /// @param newToken0Fees Raw amount of token0 fees to add to the index.
-  /// @param newToken1Fees Raw amount of token1 fees to add to the index.
-  event FeePerShareUpdated(
-    uint256 newFeePerShareToken0,
-    uint256 newFeePerShareToken1,
-    uint256 newToken0Fees,
-    uint256 newToken1Fees
+  /// @notice Emitted when the global cumulative fee index for token0 and token1 are updated.
+  /// @param feeIndexToken0 Updated global cumulative fee index for token0 (with PRECISION).
+  /// @param feeIndexToken1 Updated global cumulative fee index for token1 (with PRECISION).
+  /// @param collectedFeeToken0 Amount of token0 fees collected from the pool.
+  /// @param collectedFeeToken1 Amount of token1 fees collected from the pool.
+  event FeeIndexesUpdated(
+    uint256 feeIndexToken0,
+    uint256 feeIndexToken1,
+    uint256 collectedFeeToken0,
+    uint256 collectedFeeToken1
   );
 
   /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
   //////////////////////////////////////////////////////////////*/
 
-  /// @notice Global fee-per-share accumulator for token0.
-  /// @dev Scaled by PRECISION.
-  ///      Every time new fees are distributed, this increases.
-  ///      Used to compute each user's portion of collected fees.
-  uint256 public feePerShareToken0;
+  /// @notice Global cumulative fee index for token0.
+  /// @dev
+  ///   - Scaled by PRECISION.
+  ///   - Increases whenever new token0 fees are distributed via `_updateFees`.
+  ///   - Represents the total amount of token0 fees accrued per 1 share since vault inception.
+  ///   - Used together with `userFeeIndexToken0[user]` to compute a user's pending token0 fees.
+  uint256 public feeIndexToken0;
 
-  /// @notice Global fee-per-share accumulator for token1.
-  /// @dev Works identical to `feePerShareToken0`, but for token1.
-  uint256 public feePerShareToken1;
+  /// @notice Global cumulative fee index for token1.
+  /// @dev Same semantics as `feeIndexToken0`, but for token1.
+  uint256 public feeIndexToken1;
 
-  /// @notice Per-account checkpoint of the token0 fee-per-share accumulator.
+  /// @notice User checkpoint of the token0 fee index.
   /// @dev To calculate the user's portion of collected fees, we use the formula:
-  ///      `(balanceOf(user) * (feePerShareToken0 - feePerShareCheckpointToken0 / PRECISION)`
-  mapping(address => uint256) public feePerShareCheckpointToken0;
+  ///      `(balanceOf(user) * (feeIndexToken0 - userFeeIndexToken0 / PRECISION)`
+  mapping(address => uint256) public userFeeIndexToken0;
 
-  /// @notice  Per-account checkpoint of the token1 fee-per-share accumulator.
-  /// @dev Works identical to `feePerShareCheckpointToken0`, but for token1.
-  mapping(address => uint256) public feePerShareCheckpointToken1;
+  /// @notice User checkpoint of the token1 fee index.
+  /// @dev Same semantics as `userFeeIndexToken0`, but for token1.
+  mapping(address => uint256) public userFeeIndexToken1;
 
   /*//////////////////////////////////////////////////////////////
                         CONSTRUCTOR
@@ -81,22 +83,22 @@ contract VaultShareToken is ERC20 {
   }
 
   /// @notice Updates the fee indexes for token0 and token1.
-  /// @param _newToken0Fees Raw amount of token0 fees to add to the index.
-  /// @param _newToken1Fees Raw amount of token1 fees to add to the index.
+  /// @param _collectedFeeToken0 Amount of token0 fees collected from the pool.
+  /// @param _collectedFeeToken1 Amount of token1 fees collected from the pool.
   /// @dev Intended to be called only from the inheriting vault.
-  function _updateFees(uint256 _newToken0Fees, uint256 _newToken1Fees) internal {
+  function _updateFees(uint256 _collectedFeeToken0, uint256 _collectedFeeToken1) internal {
     // Get total supply
     uint256 _supply = totalSupply();
 
     // No shares minted yet, so no fees to update
     if (_supply == 0) return;
 
-    // Update the global fee-per-share for token0
-    if (_newToken0Fees > 0) feePerShareToken0 += (_newToken0Fees * PRECISION) / _supply;
+    // Update the global cumulative fee index for token0
+    if (_collectedFeeToken0 > 0) feeIndexToken0 += (_collectedFeeToken0 * PRECISION) / _supply;
 
-    // Update the global fee-per-share for token1
-    if (_newToken1Fees > 0) feePerShareToken1 += (_newToken1Fees * PRECISION) / _supply;
+    // Update the global cumulative fee index for token1
+    if (_collectedFeeToken1 > 0) feeIndexToken1 += (_collectedFeeToken1 * PRECISION) / _supply;
 
-    emit FeePerShareUpdated(feePerShareToken0, feePerShareToken1, _newToken0Fees, _newToken1Fees);
+    emit FeeIndexesUpdated(feeIndexToken0, feeIndexToken1, _collectedFeeToken0, _collectedFeeToken1);
   }
 }
