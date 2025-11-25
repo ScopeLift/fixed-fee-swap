@@ -22,6 +22,10 @@ contract VaultShareTokenTest is Test {
   function _assumeSafeAmount(uint256 _amount) internal pure {
     vm.assume(_amount > 0);
   }
+
+  function _calculateFeeIndex(uint256 _collectedFeeToken, uint256 _mintAmount) internal returns (uint256) {
+    return (_collectedFeeToken * vaultShareToken.PRECISION()) / _mintAmount;
+  }
 }
 
 contract Constructor is VaultShareTokenTest {
@@ -56,5 +60,87 @@ contract BurnShares is VaultShareTokenTest {
     assertEq(vaultShareToken.balanceOf(_account), _mintAmount);
     vaultShareToken.exposed_burnShares(_account, _burnAmount);
     assertEq(vaultShareToken.balanceOf(_account), _mintAmount - _burnAmount);
+  }
+}
+
+contract UpdateFees is VaultShareTokenTest {
+  function testFuzz_FeeIndexTokensAreUpdated(
+    uint256 _collectedFeeToken0,
+    uint256 _collectedFeeToken1,
+    uint256 _mintAmount,
+    address _account
+  ) public {
+    _assumeSafeAmount(_collectedFeeToken0);
+    _assumeSafeAmount(_collectedFeeToken1);
+    _assumeSafeAddress(_account);
+    _assumeSafeAmount(_mintAmount);
+
+    vaultShareToken.mintShares(_account, _mintAmount);
+
+    assertEq(vaultShareToken.feeIndexToken0(), 0);
+    assertEq(vaultShareToken.feeIndexToken1(), 0);
+
+    vaultShareToken.updateFees(_collectedFeeToken0, _collectedFeeToken1);
+
+    assertEq(vaultShareToken.feeIndexToken0(), _calculateFeeIndex(_collectedFeeToken0, _mintAmount));
+    assertEq(vaultShareToken.feeIndexToken1(), _calculateFeeIndex(_collectedFeeToken1, _mintAmount));
+  }
+
+  function testFuzz_FeeIndexTokensAreUpdatedOnMultipleCalls(
+    uint256 _collectedFeeToken0AtT1,
+    uint256 _collectedFeeToken1AtT1,
+    uint256 _mintAmountAtT1,
+    uint256 _collectedFeeToken0AtT2,
+    uint256 _collectedFeeToken1AtT2,
+    uint256 _mintAmountAtT2
+  ) public {
+    _assumeSafeAmount(_collectedFeeToken0AtT1);
+    _assumeSafeAmount(_collectedFeeToken1AtT1);
+    _assumeSafeAmount(_mintAmountAtT1);
+    _assumeSafeAmount(_collectedFeeToken0AtT2);
+    _assumeSafeAmount(_collectedFeeToken1AtT2);
+    _assumeSafeAmount(_mintAmountAtT2);
+
+    // TODO
+  }
+
+  function testFuzz_FeeIndexIsNotUpdatedWhenTokenFee0IsZero(
+    uint256 _collectedFeeToken0,
+    uint256 _mintAmount
+  ) public {
+    _assumeSafeAmount(_collectedFeeToken0);
+    // TODO
+  }
+
+  function testFuzz_FeeIndexIsNotUpdatedWhenTokenFee1IsZero(
+    uint256 _collectedFeeToken1,
+    uint256 _mintAmount
+  ) public {
+    _assumeSafeAmount(_collectedFeeToken1);
+    // TODO
+  }
+
+  function testFuzz_FeeIndexIsNotUpdatedWhenMintAmountIsZero(
+    uint256 _collectedFeeToken0,
+    uint256 _collectedFeeToken1
+  ) public {
+    assertEq(vaultShareToken.totalSupply(), 0);
+    assertEq(vaultShareToken.feeIndexToken0(), 0);
+    assertEq(vaultShareToken.feeIndexToken1(), 0);
+
+    vaultShareToken.updateFees(_collectedFeeToken0, _collectedFeeToken1);
+
+    assertEq(vaultShareToken.feeIndexToken0(), 0);
+    assertEq(vaultShareToken.feeIndexToken1(), 0);
+  }
+
+  function testFuzz_EmitsFeeIndexesUpdatedEvent(
+    uint256 _collectedFeeToken0,
+    uint256 _collectedFeeToken1,
+    uint256 _mintAmount
+  ) public {
+    _assumeSafeAmount(_collectedFeeToken0);
+    _assumeSafeAmount(_collectedFeeToken1);
+    // TODO
   }
 }
