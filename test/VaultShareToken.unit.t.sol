@@ -3,6 +3,7 @@ pragma solidity ^0.8.30;
 
 // External Imports
 import {Test} from "forge-std/Test.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 // Internal Imports
 import {VaultShareToken} from "src/VaultShareToken.sol";
@@ -15,6 +16,7 @@ contract VaultShareTokenTest is Test {
     vaultShareToken = new VaultShareTokenHarness("Vault Share Token", "VST");
   }
 
+  // Assume safe values
   function _assumeSafeAddress(address _address) internal pure {
     vm.assume(_address != address(0));
   }
@@ -23,8 +25,14 @@ contract VaultShareTokenTest is Test {
     vm.assume(_amount > 0);
   }
 
+  // Bound realistic values
+  function _boundToRealisticAmount(uint256 _amount) internal returns (uint256) {
+    return bound(_amount, 1, type(uint256).max / vaultShareToken.PRECISION());
+  }
+
+  // Utility functions
   function _calculateFeeIndex(uint256 _collectedFeeToken, uint256 _mintAmount) internal returns (uint256) {
-    return (_collectedFeeToken * vaultShareToken.PRECISION()) / _mintAmount;
+    return Math.mulDiv(_collectedFeeToken, vaultShareToken.PRECISION(), _mintAmount);
   }
 }
 
@@ -70,10 +78,10 @@ contract UpdateFees is VaultShareTokenTest {
     uint256 _mintAmount,
     address _account
   ) public {
-    _assumeSafeAmount(_collectedFeeToken0);
-    _assumeSafeAmount(_collectedFeeToken1);
+    _collectedFeeToken0 = _boundToRealisticAmount(_collectedFeeToken0);
+    _collectedFeeToken1 = _boundToRealisticAmount(_collectedFeeToken1);
+    _mintAmount = _boundToRealisticAmount(_mintAmount);
     _assumeSafeAddress(_account);
-    _assumeSafeAmount(_mintAmount);
 
     vaultShareToken.mintShares(_account, _mintAmount);
 
