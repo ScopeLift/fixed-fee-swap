@@ -7,6 +7,7 @@ import {Test} from "forge-std/Test.sol";
 // Internal Imports
 import {VaultShareToken} from "src/VaultShareToken.sol";
 import {VaultShareTokenHarness} from "test/harness/VaultShareTokenHarness.sol";
+import {RewardPerShareLib} from "src/lib/RewardPerShareLib.sol";
 
 contract VaultShareTokenTest is Test {
   VaultShareTokenHarness public vaultShareToken;
@@ -23,8 +24,8 @@ contract VaultShareTokenTest is Test {
     vm.assume(_amount > 0);
   }
 
-  function _boundFeeAmount(uint256 _amount) internal view returns (uint256) {
-    uint256 _maxFee = type(uint256).max / vaultShareToken.PRECISION();
+  function _boundFeeAmount(uint256 _amount) internal pure returns (uint256) {
+    uint256 _maxFee = type(uint256).max / RewardPerShareLib.PRECISION;
     return bound(_amount, 0, _maxFee);
   }
 
@@ -34,14 +35,14 @@ contract VaultShareTokenTest is Test {
 
   function _calculateFeeIndex(uint256 _collectedFeeToken, uint256 _supply)
     internal
-    view
+    pure
     returns (uint256)
   {
     // Manually reproduce the formula `(collected * PRECISION) / supply` rather than calling
     // Math.mulDiv so that the test cross-checks production logic via an equivalent expression.
     if (_supply == 0) return 0;
     unchecked {
-      return (_collectedFeeToken * vaultShareToken.PRECISION()) / _supply;
+      return (_collectedFeeToken * RewardPerShareLib.PRECISION) / _supply;
     }
   }
 
@@ -55,7 +56,7 @@ contract VaultShareTokenTest is Test {
     // expression.
     if (_globalIndex <= _userIndex) return 0;
     unchecked {
-      return (_userBalance * (_globalIndex - _userIndex)) / vaultShareToken.PRECISION();
+      return (_userBalance * (_globalIndex - _userIndex)) / RewardPerShareLib.PRECISION;
     }
   }
 }
@@ -275,7 +276,7 @@ contract UpdateFees is VaultShareTokenTest {
     uint256 _expectedFeeIndex1 = _calculateFeeIndex(_collectedFeeToken1, _mintAmount);
 
     vm.expectEmit();
-    emit VaultShareToken.FeeIndexesUpdated(
+    emit RewardPerShareLib.FeeIndexesUpdated(
       _expectedFeeIndex0, _expectedFeeIndex1, _collectedFeeToken0, _collectedFeeToken1
     );
     vaultShareToken.exposed_updateFees(_collectedFeeToken0, _collectedFeeToken1);
