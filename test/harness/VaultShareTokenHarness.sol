@@ -21,16 +21,16 @@ contract VaultShareTokenHarness is VaultShareToken {
     _burn(_from, _amount);
   }
 
-  /// @notice Exposes the internal _updateFees function for testing.
-  /// @param _collectedFeeToken0 Amount of token0 fees collected from the pool.
-  /// @param _collectedFeeToken1 Amount of token1 fees collected from the pool.
-  function exposed_updateFees(uint256 _collectedFeeToken0, uint256 _collectedFeeToken1) external {
-    _updateFees(_collectedFeeToken0, _collectedFeeToken1);
+  /// @notice Exposes the internal _updateRewards function for testing.
+  /// @param _collectedReward0 Amount of token0 rewards collected from the pool.
+  /// @param _collectedReward1 Amount of token1 rewards collected from the pool.
+  function exposed_updateRewards(uint256 _collectedReward0, uint256 _collectedReward1) external {
+    _updateRewards(_collectedReward0, _collectedReward1);
   }
 
-  /// @notice Exposes the internal _updateUserFees function for testing.
-  /// @param _user The address to update fees for.
-  function exposed_updateUserFees(address _user) external {
-    _updateUserFees(_user);
+  /// @notice Exposes the internal _updateUserRewards function for testing.
+  /// @param _user The address to update rewards for.
+  function exposed_updateUserRewards(address _user) external {
+    _updateUserRewards(_user);
   }
 }

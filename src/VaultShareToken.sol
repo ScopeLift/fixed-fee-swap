@@ -11,29 +11,29 @@ import {RewardPerShareLib} from "src/lib/RewardPerShareLib.sol";
 /// @author [ScopeLift](https://scopelift.co)
 /// @notice ERC20 representing proportional ownership of an LP vault.
 /// @dev
-///  - Implements fee accounting via cumulative "fee-per-share" indexes.
-///  - When new fees are collected, the vault calls `_updateFees`,
+///  - Implements reward accounting via cumulative "reward-per-share" indexes.
+///  - When new rewards are collected, the vault calls `_updateRewards`,
 ///    which increases the global indexes:
-///         `index += fees * PRECISION / totalSupply`
+///         `index += rewards * PRECISION / totalSupply`
 ///
-///  - Users accrue fees lazily:
+///  - Users accrue rewards lazily:
 ///         `accrued += balance * (index - userIndex) / PRECISION`
 ///    and their checkpoint `userIndex` is updated.
 ///
 ///  - This model ensures:
 ///     - Users only earn while they hold shares
-///     - Fee distribution never loops over all holders
+///     - Reward distribution never loops over all holders
 ///     - Mint/burn/transfer are correctly compensated over time
 contract VaultShareToken is ERC20 {
   /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
   //////////////////////////////////////////////////////////////*/
 
-  /// @notice Global fee indexes for token0 and token1.
-  RewardPerShareLib.GlobalFeeIndexes internal _feeIndexes;
+  /// @notice Global reward indexes for token0 and token1.
+  RewardPerShareLib.GlobalRewardIndexes internal _rewardIndexes;
 
-  /// @notice Tracks fee accounting data per user.
-  mapping(address => RewardPerShareLib.UserFees) public userFees;
+  /// @notice Tracks reward accounting data per user.
+  mapping(address => RewardPerShareLib.UserRewards) public userRewards;
 
   /*//////////////////////////////////////////////////////////////
                         CONSTRUCTOR
@@ -48,14 +48,14 @@ contract VaultShareToken is ERC20 {
                         EXTERNAL FUNCTIONS
   //////////////////////////////////////////////////////////////*/
 
-  /// @notice Global cumulative fee index for token0.
-  function feeIndexToken0() external view returns (uint256) {
-    return _feeIndexes.feeIndexToken0;
+  /// @notice Global cumulative reward index for token0.
+  function rewardIndex0() external view returns (uint256) {
+    return _rewardIndexes.rewardIndex0;
   }
 
-  /// @notice Global cumulative fee index for token1.
-  function feeIndexToken1() external view returns (uint256) {
-    return _feeIndexes.feeIndexToken1;
+  /// @notice Global cumulative reward index for token1.
+  function rewardIndex1() external view returns (uint256) {
+    return _rewardIndexes.rewardIndex1;
   }
 
   /*//////////////////////////////////////////////////////////////
@@ -63,29 +63,31 @@ contract VaultShareToken is ERC20 {
   //////////////////////////////////////////////////////////////*/
 
   /// @inheritdoc ERC20
-  /// @dev Updates user fee accounting for both the sender and the recipient.
+  /// @dev Updates user reward accounting for both the sender and the recipient.
   function _update(address _from, address _to, uint256 _value) internal override {
-    if (_from != address(0)) _updateUserFees(_from);
-    if (_to != address(0)) _updateUserFees(_to);
+    if (_from != address(0)) _updateUserRewards(_from);
+    if (_to != address(0)) _updateUserRewards(_to);
     super._update(_from, _to, _value);
   }
 
-  /// @notice Updates the fee indexes for token0 and token1.
-  /// @param _collectedFeeToken0 Newly collected token0 fees collected from the pool (delta since
-  /// last call). @param _collectedFeeToken1 Newly collected token1 fees collected from the pool
+  /// @notice Updates the reward indexes for token0 and token1.
+  /// @param _collectedReward0 Newly collected token0 rewards collected from the pool (delta since
+  /// last call). @param _collectedReward1 Newly collected token1 rewards collected from the pool
   /// (delta since last call).
   /// @dev Intended to be called only from the inheriting vault.
-  function _updateFees(uint256 _collectedFeeToken0, uint256 _collectedFeeToken1) internal {
-    RewardPerShareLib._updateFees(_feeIndexes, _collectedFeeToken0, _collectedFeeToken1, totalSupply());
+  function _updateRewards(uint256 _collectedReward0, uint256 _collectedReward1) internal {
+    RewardPerShareLib._updateRewards(
+      _rewardIndexes, _collectedReward0, _collectedReward1, totalSupply()
+    );
   }
 
-  /// @notice Updates user's accrued (but not yet claimed) and user's fee indices.
-  /// @param _user The address to update fees for.
+  /// @notice Updates user's accrued (but not yet claimed) and user's reward indices.
+  /// @param _user The address to update rewards for.
   /// @dev
   ///   - Should be called before mint, burn, transfer and claim.
-  ///   - Accrues newly earned fees into `userFees[_user].accruedToken0/1`.
-  ///   - Updates `userFees[_user].feeIndexToken0/1` to the current global indices.
-  function _updateUserFees(address _user) internal {
-    RewardPerShareLib._updateUserFees(userFees[_user], _feeIndexes, balanceOf(_user));
+  ///   - Accrues newly earned rewards into `userRewards[_user].accruedReward0/1`.
+  ///   - Updates `userRewards[_user].rewardIndex0/1` to the current global indices.
+  function _updateUserRewards(address _user) internal {
+    RewardPerShareLib._updateUserRewards(userRewards[_user], _rewardIndexes, balanceOf(_user));
   }
 }
