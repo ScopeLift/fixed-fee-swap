@@ -7,24 +7,56 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title VaultShareToken
 /// @author [ScopeLift](https://scopelift.co)
-/// @notice Base ERC20 token representing shares in an LP Vault.
-/// @dev This contract is meant to be inherited by the Vault.
+/// @notice ERC20 representing proportional ownership of an LP vault.
+/// @dev
+///  - Implements fee accounting via cumulative “fee-per-share” indexes.
+///  - When new fees are collected, the vault calls `_updateFees`,
+///    which increases the global indexes:
+///         `index += fees * PRECISION / totalSupply`
+///
+///  - Users accrue fees lazily:
+///         `accrued += balance * (index - userIndex) / PRECISION`
+///    and their checkpoint `userIndex` is updated.
+///
+///  - This model ensures:
+///     - Users only earn while they hold shares
+///     - Reward distribution never loops over all holders
+///     - Mint/burn/transfer are correctly compensated over time
 contract VaultShareToken is ERC20 {
   /// @notice Precision for the fee accumulators (to prevent precision loss).
   uint256 public constant PRECISION = 1e18;
+
+  /*//////////////////////////////////////////////////////////////
+                          STRUCTS
+  //////////////////////////////////////////////////////////////*/
+
+  /// @notice Per-user fee accounting state.
+  /// @dev
+  ///  - `feeIndexToken{0,1}` are the user's last synced fee indices (checkpoints).
+  ///  - `accruedToken{0,1}` are earned-but-not-yet-claimed fee amounts.
+  struct UserFees {
+    /// @notice Last fee-per-share index for token0 the user has synced to.
+    uint256 feeIndexToken0;
+    /// @notice Last fee-per-share index for token1 the user has synced to.
+    uint256 feeIndexToken1;
+    /// @notice Accrued (but not yet claimed) fees for token0.
+    uint256 accruedToken0;
+    /// @notice Accrued (but not yet claimed) fees for token1.
+    uint256 accruedToken1;
+  }
 
   /*//////////////////////////////////////////////////////////////
                           EVENTS
   //////////////////////////////////////////////////////////////*/
 
   /// @notice Emitted when the global cumulative fee index for token0 and token1 are updated.
-  /// @param feeIndexToken0 Updated global cumulative fee index for token0 (with PRECISION).
-  /// @param feeIndexToken1 Updated global cumulative fee index for token1 (with PRECISION).
+  /// @param newFeeIndexToken0 Updated global cumulative fee index for token0 (with PRECISION).
+  /// @param newFeeIndexToken1 Updated global cumulative fee index for token1 (with PRECISION).
   /// @param collectedFeeToken0 Amount of token0 fees collected from the pool.
   /// @param collectedFeeToken1 Amount of token1 fees collected from the pool.
   event FeeIndexesUpdated(
-    uint256 feeIndexToken0,
-    uint256 feeIndexToken1,
+    uint256 newFeeIndexToken0,
+    uint256 newFeeIndexToken1,
     uint256 collectedFeeToken0,
     uint256 collectedFeeToken1
   );
@@ -38,27 +70,15 @@ contract VaultShareToken is ERC20 {
   ///   - Scaled by PRECISION.
   ///   - Increases whenever new token0 fees are distributed via `_updateFees`.
   ///   - Represents the total amount of token0 fees accrued per 1 share since vault inception.
-  ///   - Used together with `userFeeIndexToken0[user]` to compute a user's pending token0 fees.
+  ///   - Used with `userFees[user].feeIndexToken0` to compute user-specific deltas.
   uint256 public feeIndexToken0;
 
   /// @notice Global cumulative fee index for token1.
   /// @dev Same semantics as `feeIndexToken0`, but for token1.
   uint256 public feeIndexToken1;
 
-  /// @notice User checkpoint of the token0 fee index.
-  /// @dev To calculate the user's portion of collected fees, we use the formula:
-  ///      `(balanceOf(user) * (feeIndexToken0 - userFeeIndexToken0 / PRECISION)`
-  mapping(address => uint256) public userFeeIndexToken0;
-
-  /// @notice User checkpoint of the token1 fee index.
-  /// @dev Same semantics as `userFeeIndexToken0`, but for token1.
-  mapping(address => uint256) public userFeeIndexToken1;
-
-  /// @notice Accrued-but-not-yet-claimed token0 fees per user.
-  mapping(address => uint256) public userAccruedToken0;
-
-  /// @notice Accrued-but-not-yet-claimed token1 fees per user.
-  mapping(address => uint256) public userAccruedToken1;
+  /// @notice Tracks fee accounting data per user.
+  mapping(address => UserFees) public userFees;
 
   /*//////////////////////////////////////////////////////////////
                         CONSTRUCTOR
@@ -70,37 +90,40 @@ contract VaultShareToken is ERC20 {
   constructor(string memory _name, string memory _symbol) ERC20(_name, _symbol) {}
 
   /*//////////////////////////////////////////////////////////////
-                        EXTERNAL FUNCTIONS
-  //////////////////////////////////////////////////////////////*/
-
-  function transfer(address _to, uint256 _value) public override returns (bool) {
-    //
-    return super.transfer(_to, _value);
-  }
-
-  /*//////////////////////////////////////////////////////////////
                         INTERNAL FUNCTIONS
   //////////////////////////////////////////////////////////////*/
+
+  /// @inheritdoc ERC20
+  /// @dev Updates user fee accounting for both the sender and the recipient.
+  function _update(address _from, address _to, uint256 _value) internal override {
+    if (_from != address(0)) _updateUserFees(_from);
+    if (_to != address(0)) _updateUserFees(_to);
+    super._update(_from, _to, _value);
+  }
 
   /// @notice Mints new vault shares.
   /// @param _to The address to mint shares to.
   /// @param _amount The amount of shares to mint.
-  /// @dev Intended to be called only from the inheriting vault.
+  /// @dev Updates user fee accounting for the recipient.
+  // TODO: Can we remove this function as we can just rely on?
   function _mintShares(address _to, uint256 _amount) internal {
+    // _updateUserFees(_to);
     _mint(_to, _amount);
   }
 
   /// @notice Burns existing vault shares.
   /// @param _from The address to burn shares from.
   /// @param _amount The amount of shares to burn.
-  /// @dev Intended to be called only from the inheriting vault.
+  /// @dev Updates user fee accounting for the sender.
+  // TODO: Can we remove this function as we can just rely on?
   function _burnShares(address _from, uint256 _amount) internal {
+    // _updateUserFees(_from);
     _burn(_from, _amount);
   }
 
   /// @notice Updates the fee indexes for token0 and token1.
-  /// @param _collectedFeeToken0 Amount of token0 fees collected from the pool.
-  /// @param _collectedFeeToken1 Amount of token1 fees collected from the pool.
+  /// @param _collectedFeeToken0 Newly collected token0 fees collected from the pool (delta since last call).
+  /// @param _collectedFeeToken1 Newly collected token1 fees collected from the pool (delta since last call).
   /// @dev Intended to be called only from the inheriting contract.
   function _updateFees(uint256 _collectedFeeToken0, uint256 _collectedFeeToken1) internal {
     // Get total supply
@@ -137,9 +160,9 @@ contract VaultShareToken is ERC20 {
   /// @notice Updates user's accrued (but not yet claimed) and user's fee indices.
   /// @param _user The address to update fees for.
   /// @dev
-  ///   - Called before mint, burn, transfer and claim.
-  ///   - Updates user's accrued (but not yet claimed) into `userAccruedToken0/1`.
-  ///   - Updates user's fee indices to the current global indices.
+  ///   - Should be called before mint, burn, transfer and claim.
+  ///   - Accrues newly earned fees into `userFees[_user].accruedToken0/1`.
+  ///   - Updates `userFees[_user].feeIndexToken0/1` to the current global indices.
   function _updateUserFees(address _user) internal {
     // 1. User's balance of VaultShares tokens
     uint256 _userBalance = balanceOf(_user);
@@ -149,30 +172,33 @@ contract VaultShareToken is ERC20 {
     uint256 _globalFeeIndex1 = feeIndexToken1;
 
     // 3. User's last recorded fee indices
-    uint256 _userFeeIndex0 = userFeeIndexToken0[_user];
-    uint256 _userFeeIndex1 = userFeeIndexToken1[_user];
+    UserFees storage account = userFees[_user];
+    uint256 _userFeeIndex0 = account.feeIndexToken0;
+    uint256 _userFeeIndex1 = account.feeIndexToken1;
 
-    // 4. If user has no shares, just sync checkpoints and exit
+    // 4. If user has no shares, they cannot earn new fees going forward.
+    // Just sync their fee indices so they don't retro-earn when they
+    // receive shares in the future.
     if (_userBalance == 0) {
-      if (_userFeeIndex0 != _globalFeeIndex0) userFeeIndexToken0[_user] = _globalFeeIndex0;
-      if (_userFeeIndex1 != _globalFeeIndex1) userFeeIndexToken1[_user] = _globalFeeIndex1;
+      if (_userFeeIndex0 != _globalFeeIndex0) account.feeIndexToken0 = _globalFeeIndex0;
+      if (_userFeeIndex1 != _globalFeeIndex1) account.feeIndexToken1 = _globalFeeIndex1;
       return;
     }
 
-    // 5. Update user's accrued fees for token0
+    // 5. Accrue newly earned fees for token0
     if (_globalFeeIndex0 > _userFeeIndex0) {
       uint256 _deltaIndex0 = _globalFeeIndex0 - _userFeeIndex0;
-      userAccruedToken0[_user] += Math.mulDiv(_userBalance, _deltaIndex0, PRECISION);
+      account.accruedToken0 += Math.mulDiv(_userBalance, _deltaIndex0, PRECISION);
     }
 
-    // 6. Update user's accrued fees for token1
+    // 6. Accrue newly earned fees for token1
     if (_globalFeeIndex1 > _userFeeIndex1) {
       uint256 _deltaIndex1 = _globalFeeIndex1 - _userFeeIndex1;
-      userAccruedToken1[_user] += Math.mulDiv(_userBalance, _deltaIndex1, PRECISION);
+      account.accruedToken1 += Math.mulDiv(_userBalance, _deltaIndex1, PRECISION);
     }
 
     // 7. Update user checkpoints to the latest global indices
-    if (_userFeeIndex0 != _globalFeeIndex0) userFeeIndexToken0[_user] = _globalFeeIndex0;
-    if (_userFeeIndex1 != _globalFeeIndex1) userFeeIndexToken1[_user] = _globalFeeIndex1;
+    if (_userFeeIndex0 != _globalFeeIndex0) account.feeIndexToken0 = _globalFeeIndex0;
+    if (_userFeeIndex1 != _globalFeeIndex1) account.feeIndexToken1 = _globalFeeIndex1;
   }
 }
