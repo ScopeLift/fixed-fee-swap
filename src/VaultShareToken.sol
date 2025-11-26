@@ -101,29 +101,11 @@ contract VaultShareToken is ERC20 {
     super._update(_from, _to, _value);
   }
 
-  /// @notice Mints new vault shares.
-  /// @param _to The address to mint shares to.
-  /// @param _amount The amount of shares to mint.
-  /// @dev Updates user fee accounting for the recipient.
-  // TODO: Can we remove this function as we can just rely on?
-  function _mintShares(address _to, uint256 _amount) internal {
-    // _updateUserFees(_to);
-    _mint(_to, _amount);
-  }
-
-  /// @notice Burns existing vault shares.
-  /// @param _from The address to burn shares from.
-  /// @param _amount The amount of shares to burn.
-  /// @dev Updates user fee accounting for the sender.
-  // TODO: Can we remove this function as we can just rely on?
-  function _burnShares(address _from, uint256 _amount) internal {
-    // _updateUserFees(_from);
-    _burn(_from, _amount);
-  }
-
   /// @notice Updates the fee indexes for token0 and token1.
-  /// @param _collectedFeeToken0 Newly collected token0 fees collected from the pool (delta since last call).
-  /// @param _collectedFeeToken1 Newly collected token1 fees collected from the pool (delta since last call).
+  /// @param _collectedFeeToken0 Newly collected token0 fees collected from the pool (delta since
+  /// last call).
+  /// @param _collectedFeeToken1 Newly collected token1 fees collected from the pool (delta since
+  /// (delta since last call).
   /// @dev Intended to be called only from the inheriting contract.
   function _updateFees(uint256 _collectedFeeToken0, uint256 _collectedFeeToken1) internal {
     // Get total supply
