@@ -19,8 +19,8 @@ contract Increment is CounterTest {
 }
 
 contract SetNumber is CounterTest {
-  function testFuzz_NumberIsSet(uint256 x) public {
-    counter.setNumber(x);
-    assertEq(counter.number(), x);
+  function testFuzz_NumberIsSet(uint256 _x) public {
+    counter.setNumber(_x);
+    assertEq(counter.number(), _x);
   }
 }
