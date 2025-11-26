@@ -54,6 +54,12 @@ contract VaultShareToken is ERC20 {
   /// @dev Same semantics as `userFeeIndexToken0`, but for token1.
   mapping(address => uint256) public userFeeIndexToken1;
 
+  /// @notice Accrued-but-not-yet-claimed token0 fees per user.
+  mapping(address => uint256) public userAccruedToken0;
+
+  /// @notice Accrued-but-not-yet-claimed token1 fees per user.
+  mapping(address => uint256) public userAccruedToken1;
+
   /*//////////////////////////////////////////////////////////////
                         CONSTRUCTOR
   //////////////////////////////////////////////////////////////*/
@@ -62,6 +68,15 @@ contract VaultShareToken is ERC20 {
   /// @param _name ERC20 name value.
   /// @param _symbol ERC20 symbol value.
   constructor(string memory _name, string memory _symbol) ERC20(_name, _symbol) {}
+
+  /*//////////////////////////////////////////////////////////////
+                        EXTERNAL FUNCTIONS
+  //////////////////////////////////////////////////////////////*/
+
+  function transfer(address _to, uint256 _value) public override returns (bool) {
+    //
+    return super.transfer(_to, _value);
+  }
 
   /*//////////////////////////////////////////////////////////////
                         INTERNAL FUNCTIONS
@@ -117,5 +132,47 @@ contract VaultShareToken is ERC20 {
     }
 
     emit FeeIndexesUpdated(feeIndexToken0, feeIndexToken1, _collectedFeeToken0, _collectedFeeToken1);
+  }
+
+  /// @notice Updates user's accrued (but not yet claimed) and user's fee indices.
+  /// @param _user The address to update fees for.
+  /// @dev
+  ///   - Called before mint, burn, transfer and claim.
+  ///   - Updates user's accrued (but not yet claimed) into `userAccruedToken0/1`.
+  ///   - Updates user's fee indices to the current global indices.
+  function _updateUserFees(address _user) internal {
+    // 1. User's balance of VaultShares tokens
+    uint256 _userBalance = balanceOf(_user);
+
+    // 2. Current global fee indices
+    uint256 _globalFeeIndex0 = feeIndexToken0;
+    uint256 _globalFeeIndex1 = feeIndexToken1;
+
+    // 3. User's last recorded fee indices
+    uint256 _userFeeIndex0 = userFeeIndexToken0[_user];
+    uint256 _userFeeIndex1 = userFeeIndexToken1[_user];
+
+    // 4. If user has no shares, just sync checkpoints and exit
+    if (_userBalance == 0) {
+      if (_userFeeIndex0 != _globalFeeIndex0) userFeeIndexToken0[_user] = _globalFeeIndex0;
+      if (_userFeeIndex1 != _globalFeeIndex1) userFeeIndexToken1[_user] = _globalFeeIndex1;
+      return;
+    }
+
+    // 5. Update user's accrued fees for token0
+    if (_globalFeeIndex0 > _userFeeIndex0) {
+      uint256 _deltaIndex0 = _globalFeeIndex0 - _userFeeIndex0;
+      userAccruedToken0[_user] += Math.mulDiv(_userBalance, _deltaIndex0, PRECISION);
+    }
+
+    // 6. Update user's accrued fees for token1
+    if (_globalFeeIndex1 > _userFeeIndex1) {
+      uint256 _deltaIndex1 = _globalFeeIndex1 - _userFeeIndex1;
+      userAccruedToken1[_user] += Math.mulDiv(_userBalance, _deltaIndex1, PRECISION);
+    }
+
+    // 7. Update user checkpoints to the latest global indices
+    if (_userFeeIndex0 != _globalFeeIndex0) userFeeIndexToken0[_user] = _globalFeeIndex0;
+    if (_userFeeIndex1 != _globalFeeIndex1) userFeeIndexToken1[_user] = _globalFeeIndex1;
   }
 }
