@@ -6,13 +6,13 @@ import {Test} from "forge-std/Test.sol";
 
 // Internal Imports
 import {VaultShareToken} from "src/VaultShareToken.sol";
-import {VaultShareTokenMock} from "test/mocks/VaultShareTokenMock.sol";
+import {VaultShareTokenHarness} from "test/harness/VaultShareTokenHarness.sol";
 
 contract VaultShareTokenTest is Test {
-  VaultShareTokenMock public vaultShareToken;
+  VaultShareTokenHarness public vaultShareToken;
 
   function setUp() public virtual {
-    vaultShareToken = new VaultShareTokenMock("Vault Share Token", "VST");
+    vaultShareToken = new VaultShareTokenHarness("Vault Share Token", "VST");
   }
 
   function _assumeSafeAddress(address _address) internal pure {
@@ -39,7 +39,7 @@ contract MintShares is VaultShareTokenTest {
     _assumeSafeAmount(_amount);
 
     assertEq(vaultShareToken.balanceOf(_account), 0);
-    vaultShareToken.mintShares(_account, _amount);
+    vaultShareToken.exposed_mintShares(_account, _amount);
     assertEq(vaultShareToken.balanceOf(_account), _amount);
   }
 }
@@ -51,10 +51,10 @@ contract BurnShares is VaultShareTokenTest {
 
     _burnAmount = bound(_burnAmount, 0, _mintAmount);
 
-    vaultShareToken.mintShares(_account, _mintAmount);
+    vaultShareToken.exposed_mintShares(_account, _mintAmount);
 
     assertEq(vaultShareToken.balanceOf(_account), _mintAmount);
-    vaultShareToken.burnShares(_account, _burnAmount);
+    vaultShareToken.exposed_burnShares(_account, _burnAmount);
     assertEq(vaultShareToken.balanceOf(_account), _mintAmount - _burnAmount);
   }
 }
