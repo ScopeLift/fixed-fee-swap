@@ -76,9 +76,7 @@ contract VaultShareToken is ERC20 {
   /// (delta since last call).
   /// @dev Intended to be called only from the inheriting vault.
   function _updateFees(uint256 _collectedFeeToken0, uint256 _collectedFeeToken1) internal {
-    RewardPerShareLib._updateFees(
-      _feeIndexes, _collectedFeeToken0, _collectedFeeToken1, totalSupply()
-    );
+    RewardPerShareLib._updateFees(_feeIndexes, _collectedFeeToken0, _collectedFeeToken1, totalSupply());
   }
 
   /// @notice Updates user's accrued (but not yet claimed) and user's fee indices.

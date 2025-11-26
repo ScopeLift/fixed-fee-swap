@@ -94,9 +94,7 @@ library RewardPerShareLib {
     // Rounding.Floor ensures that total distributed <= collected.
     // Any dust remains inside the vault (safe and intentional).
     if (_collectedFeeToken0 > 0) {
-      _feeIndexes.feeIndexToken0 += Math.mulDiv(
-        _collectedFeeToken0, PRECISION, _totalSupply, Math.Rounding.Floor
-      );
+      _feeIndexes.feeIndexToken0 += Math.mulDiv(_collectedFeeToken0, PRECISION, _totalSupply, Math.Rounding.Floor);
     }
 
     // Update the global cumulative fee index for token1
@@ -105,9 +103,7 @@ library RewardPerShareLib {
     // - no rewards are minted, only accounting updated
     // - FLOOR ensures we don’t over-distribute
     if (_collectedFeeToken1 > 0) {
-      _feeIndexes.feeIndexToken1 += Math.mulDiv(
-        _collectedFeeToken1, PRECISION, _totalSupply, Math.Rounding.Floor
-      );
+      _feeIndexes.feeIndexToken1 += Math.mulDiv(_collectedFeeToken1, PRECISION, _totalSupply, Math.Rounding.Floor);
     }
 
     emit FeeIndexesUpdated(
