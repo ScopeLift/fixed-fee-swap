@@ -55,28 +55,28 @@ contract Constructor is VaultShareTokenTest {
   }
 }
 
-contract MintShares is VaultShareTokenTest {
+contract Mint is VaultShareTokenTest {
   function testFuzz_MintsTokens(address _account, uint256 _amount) public {
     _assumeSafeAddress(_account);
     _assumeSafeAmount(_amount);
 
     assertEq(vaultShareToken.balanceOf(_account), 0);
-    vaultShareToken.exposed_mintShares(_account, _amount);
+    vaultShareToken.exposed_mint(_account, _amount);
     assertEq(vaultShareToken.balanceOf(_account), _amount);
   }
 }
 
-contract BurnShares is VaultShareTokenTest {
+contract Burn is VaultShareTokenTest {
   function testFuzz_BurnsTokens(address _account, uint256 _mintAmount, uint256 _burnAmount) public {
     _assumeSafeAddress(_account);
     _assumeSafeAmount(_mintAmount);
 
     _burnAmount = bound(_burnAmount, 0, _mintAmount);
 
-    vaultShareToken.exposed_mintShares(_account, _mintAmount);
+    vaultShareToken.exposed_mint(_account, _mintAmount);
 
     assertEq(vaultShareToken.balanceOf(_account), _mintAmount);
-    vaultShareToken.exposed_burnShares(_account, _burnAmount);
+    vaultShareToken.exposed_burn(_account, _burnAmount);
     assertEq(vaultShareToken.balanceOf(_account), _mintAmount - _burnAmount);
   }
 }
@@ -94,7 +94,7 @@ contract UpdateFees is VaultShareTokenTest {
 
     _assumeSafeAddress(_minterAccount);
 
-    vaultShareToken.exposed_mintShares(_minterAccount, _mintAmount);
+    vaultShareToken.exposed_mint(_minterAccount, _mintAmount);
 
     assertEq(vaultShareToken.feeIndexToken0(), 0);
     assertEq(vaultShareToken.feeIndexToken1(), 0);
@@ -126,7 +126,7 @@ contract UpdateFees is VaultShareTokenTest {
     _assumeSafeAddress(_minterAccountAtT1);
     _assumeSafeAddress(_minterAccountAtT2);
 
-    vaultShareToken.exposed_mintShares(_minterAccountAtT1, _mintAmountAtT1);
+    vaultShareToken.exposed_mint(_minterAccountAtT1, _mintAmountAtT1);
 
     vaultShareToken.exposed_updateFees(_collectedFeeToken0AtT1, _collectedFeeToken1AtT1);
 
@@ -136,7 +136,7 @@ contract UpdateFees is VaultShareTokenTest {
     assertEq(vaultShareToken.feeIndexToken0(), _expectedFeeIndex0);
     assertEq(vaultShareToken.feeIndexToken1(), _expectedFeeIndex1);
 
-    vaultShareToken.exposed_mintShares(_minterAccountAtT2, _mintAmountAtT2);
+    vaultShareToken.exposed_mint(_minterAccountAtT2, _mintAmountAtT2);
 
     vaultShareToken.exposed_updateFees(_collectedFeeToken0AtT2, _collectedFeeToken1AtT2);
 
@@ -158,7 +158,7 @@ contract UpdateFees is VaultShareTokenTest {
 
     _assumeSafeAddress(_minterAccount);
 
-    vaultShareToken.exposed_mintShares(_minterAccount, _mintAmount);
+    vaultShareToken.exposed_mint(_minterAccount, _mintAmount);
 
     assertEq(vaultShareToken.feeIndexToken0(), 0);
     assertEq(vaultShareToken.feeIndexToken1(), 0);
@@ -179,7 +179,7 @@ contract UpdateFees is VaultShareTokenTest {
 
     _assumeSafeAddress(_minterAccount);
 
-    vaultShareToken.exposed_mintShares(_minterAccount, _mintAmount);
+    vaultShareToken.exposed_mint(_minterAccount, _mintAmount);
 
     assertEq(vaultShareToken.feeIndexToken0(), 0);
     assertEq(vaultShareToken.feeIndexToken1(), 0);
@@ -216,7 +216,7 @@ contract UpdateFees is VaultShareTokenTest {
 
     _assumeSafeAddress(_minterAccount);
 
-    vaultShareToken.exposed_mintShares(_minterAccount, _mintAmount);
+    vaultShareToken.exposed_mint(_minterAccount, _mintAmount);
 
     uint256 _expectedFeeIndex0 = _calculateFeeIndex(_collectedFeeToken0, _mintAmount);
     uint256 _expectedFeeIndex1 = _calculateFeeIndex(_collectedFeeToken1, _mintAmount);
