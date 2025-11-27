@@ -52,23 +52,31 @@ contract LPVault {
     PoolKey memory _targetPoolKey,
     LiquidityPosition[] memory _positions
   ) {
-    if (_positions.length == 0) revert LPVault__NoPositions();
-
     POOL_MANAGER = _poolManager;
     targetPoolKey = _targetPoolKey;
     TOKEN0 = Currency.unwrap(_targetPoolKey.currency0);
     TOKEN1 = Currency.unwrap(_targetPoolKey.currency1);
+    _initializePositions(_positions);
+  }
 
+  /// @notice Initializes and validates the liquidity positions for the vault.
+  /// @dev Validates that positions have valid tick ranges and weights sum to TOTAL_WEIGHT.
+  /// @param _positions Array of liquidity positions to initialize.
+  function _initializePositions(LiquidityPosition[] memory _positions) internal virtual {
+    // Ensure at least one position is provided.
+    if (_positions.length == 0) revert LPVault__NoPositions();
+
+    // Validate positions and calculate total weight.
     uint256 _totalWeight = 0;
     for (uint256 _i = 0; _i < _positions.length; _i++) {
       if (_positions[_i].tickLower >= _positions[_i].tickUpper) {
         revert LPVault__InvalidTickRange();
       }
-
       positions.push(_positions[_i]);
       _totalWeight += _positions[_i].weight;
     }
 
+    // Ensure weights sum to exactly 100% (10,000 BIPs).
     if (_totalWeight != TOTAL_WEIGHT) revert LPVault__InvalidLiquidityDistribution();
   }
 }

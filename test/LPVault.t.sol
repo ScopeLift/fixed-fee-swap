@@ -43,13 +43,20 @@ contract LPVaultTest is Test {
   function _boundTick(int24 _tick) internal pure returns (int24) {
     return int24(bound(int256(_tick), int256(MIN_TICK), int256(MAX_TICK)));
   }
+
+  /// @dev Assumes tokens are valid and orders them correctly for pool key construction.
+  function _assumeAndOrderTokens(address _token0, address _token1)
+    internal
+    pure
+    returns (address, address)
+  {
+    vm.assume(_token0 != _token1 && _token0 != address(0) && _token1 != address(0));
+    if (_token0 > _token1) (_token0, _token1) = (_token1, _token0);
+    return (_token0, _token1);
+  }
 }
 
 contract Constructor is LPVaultTest {
-  function setUp() public override {
-    super.setUp();
-  }
-
   function testFuzz_SinglePosition(int24 _tickLower, int24 _tickUpper) public {
     _tickLower = _boundTick(_tickLower);
     _tickUpper = _boundTick(_tickUpper);
@@ -99,9 +106,6 @@ contract Constructor is LPVaultTest {
     int24 _tickSpacing,
     address _hook
   ) public {
-    vm.assume(_token0 != _token1 && _token0 != address(0) && _token1 != address(0));
-    if (_token0 > _token1) (_token0, _token1) = (_token1, _token0);
-
     _fee = uint24(bound(_fee, 0, 1_000_000));
     _tickSpacing = int24(bound(int256(_tickSpacing), 1, 16_383));
 
