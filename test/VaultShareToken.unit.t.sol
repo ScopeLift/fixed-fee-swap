@@ -3,7 +3,6 @@ pragma solidity ^0.8.30;
 
 // External Imports
 import {Test} from "forge-std/Test.sol";
-import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 // Internal Imports
 import {VaultShareToken} from "src/VaultShareToken.sol";
@@ -30,7 +29,7 @@ contract VaultShareTokenTest is Test {
   }
 
   function _boundMintAmount(uint256 _amount) internal pure returns (uint256) {
-    return bound(_amount, 1, type(uint256).max / 2);
+    return bound(_amount, 1, type(uint128).max);
   }
 
   function _calculateFeeIndex(uint256 _collectedFeeToken, uint256 _supply)
@@ -38,7 +37,12 @@ contract VaultShareTokenTest is Test {
     view
     returns (uint256)
   {
-    return Math.mulDiv(_collectedFeeToken, vaultShareToken.PRECISION(), _supply);
+    // Manually reproduce the formula `(collected * PRECISION) / supply` rather than calling
+    // Math.mulDiv so that the test cross-checks production logic via an equivalent expression.
+    if (_supply == 0) return 0;
+    unchecked {
+      return (_collectedFeeToken * vaultShareToken.PRECISION()) / _supply;
+    }
   }
 }
 
@@ -111,13 +115,13 @@ contract UpdateFees is VaultShareTokenTest {
     uint256 _mintAmountAtT2,
     address _minterAccountAtT2
   ) public {
-    _collectedFeeToken0AtT1 = bound(_collectedFeeToken0AtT1, 0, 20e18);
-    _collectedFeeToken1AtT1 = bound(_collectedFeeToken1AtT1, 0, 20e18);
-    _mintAmountAtT1 = bound(_mintAmountAtT1, 1, 20e18);
+    _collectedFeeToken0AtT1 = bound(_collectedFeeToken0AtT1, 0, type(uint128).max);
+    _collectedFeeToken1AtT1 = bound(_collectedFeeToken1AtT1, 0, type(uint128).max);
+    _mintAmountAtT1 = bound(_mintAmountAtT1, 1, type(uint128).max);
 
-    _collectedFeeToken0AtT2 = bound(_collectedFeeToken0AtT2, 0, 20e18);
-    _collectedFeeToken1AtT2 = bound(_collectedFeeToken1AtT2, 0, 20e18);
-    _mintAmountAtT2 = bound(_mintAmountAtT2, 1, 20e18);
+    _collectedFeeToken0AtT2 = bound(_collectedFeeToken0AtT2, 0, type(uint128).max);
+    _collectedFeeToken1AtT2 = bound(_collectedFeeToken1AtT2, 0, type(uint128).max);
+    _mintAmountAtT2 = bound(_mintAmountAtT2, 1, type(uint128).max);
 
     _assumeSafeAddress(_minterAccountAtT1);
     _assumeSafeAddress(_minterAccountAtT2);

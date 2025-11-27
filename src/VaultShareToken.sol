@@ -94,14 +94,26 @@ contract VaultShareToken is ERC20 {
     // No shares minted yet, so no fees to update
     if (_supply == 0) return;
 
-    // Update the global cumulative fee index for token0
+    // Update the global cumulative fee index for token0.
+    // `feeIndexToken0` represents "how much token0 each share has earned"
+    // since the vault started.
+    //
+    // We scale first to avoid precision loss:
+    //     delta = collectedFees * PRECISION / totalShares
+    //
+    // Rounding.Floor ensures that total distributed <= collected.
+    // Any dust remains inside the vault (safe and intentional).
     if (_collectedFeeToken0 > 0) {
-      feeIndexToken0 += Math.mulDiv(_collectedFeeToken0, PRECISION, _supply);
+      feeIndexToken0 += Math.mulDiv(_collectedFeeToken0, PRECISION, _supply, Math.Rounding.Floor);
     }
 
     // Update the global cumulative fee index for token1
+    // Same calculation for token1 fees:
+    // - convert collected fees to per-share units via scaling
+    // - no rewards are minted, only accounting updated
+    // - FLOOR ensures we don’t over-distribute
     if (_collectedFeeToken1 > 0) {
-      feeIndexToken1 += Math.mulDiv(_collectedFeeToken1, PRECISION, _supply);
+      feeIndexToken1 += Math.mulDiv(_collectedFeeToken1, PRECISION, _supply, Math.Rounding.Floor);
     }
 
     emit FeeIndexesUpdated(feeIndexToken0, feeIndexToken1, _collectedFeeToken0, _collectedFeeToken1);
