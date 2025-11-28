@@ -22,6 +22,28 @@ contract VaultShareTokenTest is Test {
   function _assumeSafeAmount(uint256 _amount) internal pure {
     vm.assume(_amount > 0);
   }
+
+  function _boundFeeAmount(uint256 _amount) internal view returns (uint256) {
+    uint256 _maxFee = type(uint256).max / vaultShareToken.PRECISION();
+    return bound(_amount, 0, _maxFee);
+  }
+
+  function _boundMintAmount(uint256 _amount) internal pure returns (uint256) {
+    return bound(_amount, 1, type(uint128).max);
+  }
+
+  function _calculateFeeIndex(uint256 _collectedFeeToken, uint256 _supply)
+    internal
+    view
+    returns (uint256)
+  {
+    // Manually reproduce the formula `(collected * PRECISION) / supply` rather than calling
+    // Math.mulDiv so that the test cross-checks production logic via an equivalent expression.
+    if (_supply == 0) return 0;
+    unchecked {
+      return (_collectedFeeToken * vaultShareToken.PRECISION()) / _supply;
+    }
+  }
 }
 
 contract Constructor is VaultShareTokenTest {
@@ -56,5 +78,153 @@ contract BurnShares is VaultShareTokenTest {
     assertEq(vaultShareToken.balanceOf(_account), _mintAmount);
     vaultShareToken.exposed_burnShares(_account, _burnAmount);
     assertEq(vaultShareToken.balanceOf(_account), _mintAmount - _burnAmount);
+  }
+}
+
+contract UpdateFees is VaultShareTokenTest {
+  function testFuzz_FeeIndexTokensAreUpdated(
+    uint256 _collectedFeeToken0,
+    uint256 _collectedFeeToken1,
+    uint256 _mintAmount,
+    address _minterAccount
+  ) public {
+    _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
+    _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
+    _mintAmount = _boundMintAmount(_mintAmount);
+
+    _assumeSafeAddress(_minterAccount);
+
+    vaultShareToken.exposed_mintShares(_minterAccount, _mintAmount);
+
+    assertEq(vaultShareToken.feeIndexToken0(), 0);
+    assertEq(vaultShareToken.feeIndexToken1(), 0);
+
+    vaultShareToken.exposed_updateFees(_collectedFeeToken0, _collectedFeeToken1);
+
+    assertEq(vaultShareToken.feeIndexToken0(), _calculateFeeIndex(_collectedFeeToken0, _mintAmount));
+    assertEq(vaultShareToken.feeIndexToken1(), _calculateFeeIndex(_collectedFeeToken1, _mintAmount));
+  }
+
+  function testFuzz_FeeIndexTokensAreUpdatedOnMultipleCalls(
+    uint256 _collectedFeeToken0AtT1,
+    uint256 _collectedFeeToken1AtT1,
+    uint256 _mintAmountAtT1,
+    address _minterAccountAtT1,
+    uint256 _collectedFeeToken0AtT2,
+    uint256 _collectedFeeToken1AtT2,
+    uint256 _mintAmountAtT2,
+    address _minterAccountAtT2
+  ) public {
+    _collectedFeeToken0AtT1 = bound(_collectedFeeToken0AtT1, 0, type(uint128).max);
+    _collectedFeeToken1AtT1 = bound(_collectedFeeToken1AtT1, 0, type(uint128).max);
+    _mintAmountAtT1 = bound(_mintAmountAtT1, 1, type(uint128).max);
+
+    _collectedFeeToken0AtT2 = bound(_collectedFeeToken0AtT2, 0, type(uint128).max);
+    _collectedFeeToken1AtT2 = bound(_collectedFeeToken1AtT2, 0, type(uint128).max);
+    _mintAmountAtT2 = bound(_mintAmountAtT2, 1, type(uint128).max);
+
+    _assumeSafeAddress(_minterAccountAtT1);
+    _assumeSafeAddress(_minterAccountAtT2);
+
+    vaultShareToken.exposed_mintShares(_minterAccountAtT1, _mintAmountAtT1);
+
+    vaultShareToken.exposed_updateFees(_collectedFeeToken0AtT1, _collectedFeeToken1AtT1);
+
+    uint256 _expectedFeeIndex0 = _calculateFeeIndex(_collectedFeeToken0AtT1, _mintAmountAtT1);
+    uint256 _expectedFeeIndex1 = _calculateFeeIndex(_collectedFeeToken1AtT1, _mintAmountAtT1);
+
+    assertEq(vaultShareToken.feeIndexToken0(), _expectedFeeIndex0);
+    assertEq(vaultShareToken.feeIndexToken1(), _expectedFeeIndex1);
+
+    vaultShareToken.exposed_mintShares(_minterAccountAtT2, _mintAmountAtT2);
+
+    vaultShareToken.exposed_updateFees(_collectedFeeToken0AtT2, _collectedFeeToken1AtT2);
+
+    uint256 _totalSupplyAfterT2 = _mintAmountAtT1 + _mintAmountAtT2;
+    _expectedFeeIndex0 += _calculateFeeIndex(_collectedFeeToken0AtT2, _totalSupplyAfterT2);
+    _expectedFeeIndex1 += _calculateFeeIndex(_collectedFeeToken1AtT2, _totalSupplyAfterT2);
+
+    assertEq(vaultShareToken.feeIndexToken0(), _expectedFeeIndex0);
+    assertEq(vaultShareToken.feeIndexToken1(), _expectedFeeIndex1);
+  }
+
+  function testFuzz_FeeIndex0IsNotUpdatedWhenTokenFee0IsZero(
+    uint256 _collectedFeeToken1,
+    uint256 _mintAmount,
+    address _minterAccount
+  ) public {
+    _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
+    _mintAmount = _boundMintAmount(_mintAmount);
+
+    _assumeSafeAddress(_minterAccount);
+
+    vaultShareToken.exposed_mintShares(_minterAccount, _mintAmount);
+
+    assertEq(vaultShareToken.feeIndexToken0(), 0);
+    assertEq(vaultShareToken.feeIndexToken1(), 0);
+
+    vaultShareToken.exposed_updateFees(0, _collectedFeeToken1);
+
+    assertEq(vaultShareToken.feeIndexToken0(), 0);
+    assertEq(vaultShareToken.feeIndexToken1(), _calculateFeeIndex(_collectedFeeToken1, _mintAmount));
+  }
+
+  function testFuzz_FeeIndex1IsNotUpdatedWhenTokenFee1IsZero(
+    uint256 _collectedFeeToken0,
+    uint256 _mintAmount,
+    address _minterAccount
+  ) public {
+    _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
+    _mintAmount = _boundMintAmount(_mintAmount);
+
+    _assumeSafeAddress(_minterAccount);
+
+    vaultShareToken.exposed_mintShares(_minterAccount, _mintAmount);
+
+    assertEq(vaultShareToken.feeIndexToken0(), 0);
+    assertEq(vaultShareToken.feeIndexToken1(), 0);
+
+    vaultShareToken.exposed_updateFees(_collectedFeeToken0, 0);
+
+    assertEq(vaultShareToken.feeIndexToken0(), _calculateFeeIndex(_collectedFeeToken0, _mintAmount));
+    assertEq(vaultShareToken.feeIndexToken1(), 0);
+  }
+
+  function testFuzz_FeeIndexesAreNotUpdatedWhenNoSharesMinted(
+    uint256 _collectedFeeToken0,
+    uint256 _collectedFeeToken1
+  ) public {
+    assertEq(vaultShareToken.totalSupply(), 0);
+    assertEq(vaultShareToken.feeIndexToken0(), 0);
+    assertEq(vaultShareToken.feeIndexToken1(), 0);
+
+    vaultShareToken.exposed_updateFees(_collectedFeeToken0, _collectedFeeToken1);
+
+    assertEq(vaultShareToken.feeIndexToken0(), 0);
+    assertEq(vaultShareToken.feeIndexToken1(), 0);
+  }
+
+  function testFuzz_EmitsFeeIndexesUpdatedEvent(
+    uint256 _collectedFeeToken0,
+    uint256 _collectedFeeToken1,
+    uint256 _mintAmount,
+    address _minterAccount
+  ) public {
+    _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
+    _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
+    _mintAmount = _boundMintAmount(_mintAmount);
+
+    _assumeSafeAddress(_minterAccount);
+
+    vaultShareToken.exposed_mintShares(_minterAccount, _mintAmount);
+
+    uint256 _expectedFeeIndex0 = _calculateFeeIndex(_collectedFeeToken0, _mintAmount);
+    uint256 _expectedFeeIndex1 = _calculateFeeIndex(_collectedFeeToken1, _mintAmount);
+
+    vm.expectEmit();
+    emit VaultShareToken.FeeIndexesUpdated(
+      _expectedFeeIndex0, _expectedFeeIndex1, _collectedFeeToken0, _collectedFeeToken1
+    );
+    vaultShareToken.exposed_updateFees(_collectedFeeToken0, _collectedFeeToken1);
   }
 }

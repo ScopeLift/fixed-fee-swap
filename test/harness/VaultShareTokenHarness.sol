@@ -8,12 +8,23 @@ contract VaultShareTokenHarness is VaultShareToken {
   constructor(string memory _name, string memory _symbol) VaultShareToken(_name, _symbol) {}
 
   /// @notice Exposes the internal _mintShares function for testing.
+  /// @param _to The address to mint shares to.
+  /// @param _amount The amount of shares to mint.
   function exposed_mintShares(address _to, uint256 _amount) external {
     _mintShares(_to, _amount);
   }
 
   /// @notice Exposes the internal _burnShares function for testing.
+  /// @param _from The address to burn shares from.
+  /// @param _amount The amount of shares to burn.
   function exposed_burnShares(address _from, uint256 _amount) external {
     _burnShares(_from, _amount);
+  }
+
+  /// @notice Exposes the internal _updateFees function for testing.
+  /// @param _collectedFeeToken0 Amount of token0 fees collected from the pool.
+  /// @param _collectedFeeToken1 Amount of token1 fees collected from the pool.
+  function exposed_updateFees(uint256 _collectedFeeToken0, uint256 _collectedFeeToken1) external {
+    _updateFees(_collectedFeeToken0, _collectedFeeToken1);
   }
 }
