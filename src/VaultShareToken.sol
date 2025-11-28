@@ -86,7 +86,7 @@ contract VaultShareToken is ERC20 {
   /// @notice Updates the fee indexes for token0 and token1.
   /// @param _collectedFeeToken0 Amount of token0 fees collected from the pool.
   /// @param _collectedFeeToken1 Amount of token1 fees collected from the pool.
-  /// @dev Intended to be called only from the inheriting vault.
+  /// @dev Intended to be called only from the inheriting contract.
   function _updateFees(uint256 _collectedFeeToken0, uint256 _collectedFeeToken1) internal {
     // Get total supply
     uint256 _supply = totalSupply();
