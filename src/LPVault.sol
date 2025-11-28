@@ -4,7 +4,7 @@ pragma solidity 0.8.30;
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
-import { PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
+import {PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 
 /// @title LPVault
 /// @author [ScopeLift](https://scopelift.co)
