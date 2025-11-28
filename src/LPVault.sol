@@ -4,7 +4,7 @@ pragma solidity 0.8.30;
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
-import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
+import { PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 
 /// @title LPVault
 /// @author [ScopeLift](https://scopelift.co)
@@ -15,9 +15,13 @@ contract LPVault {
 
   /// @notice Structure for liquidity position configuration.
   struct LiquidityPosition {
+    /// @notice The lower tick boundary for this position.
     int24 tickLower;
+    /// @notice The upper tick boundary for this position.
     int24 tickUpper;
-    uint256 weight; // Weight in basis points (BIPs)
+    /// @notice The weight of liquidity allocated to this position in basis points (BIPs).
+    /// @dev Must be between 0 and 10,000. All position weights must sum to exactly 10,000.
+    uint256 weight;
   }
 
   /// @notice Total weight must equal 10,000 BIPs (100%).
@@ -38,14 +42,18 @@ contract LPVault {
   /// @notice The predefined liquidity positions for this vault.
   LiquidityPosition[] public positions;
 
-  /// @notice Custom errors.
+  /// @notice Thrown when the sum of position weights doesn't equal TOTAL_WEIGHT (10,000 BIPs).
   error LPVault__InvalidLiquidityDistribution();
+
+  /// @notice Thrown when a position's tickLower is greater than or equal to tickUpper.
   error LPVault__InvalidTickRange();
+
+  /// @notice Thrown when no positions are provided during initialization.
   error LPVault__NoPositions();
 
   /// @notice Creates a new LP Vault with fixed positions.
   /// @param _poolManager The Uniswap v4 pool manager.
-  /// @param _targetPoolKey The pool to provide liquidity to.
+  /// @param _targetPoolKey The pool where liquidity is deposited.
   /// @param _positions Array of positions with tick ranges and weights (must sum to 10,000 BIPs).
   constructor(
     IPoolManager _poolManager,
@@ -60,7 +68,7 @@ contract LPVault {
   }
 
   /// @notice Initializes and validates the liquidity positions for the vault.
-  /// @dev Validates that positions have valid tick ranges and weights sum to TOTAL_WEIGHT.
+  /// @dev Validates that positions have valid tick ranges and weights sum to `TOTAL_WEIGHT`.
   /// @param _positions Array of liquidity positions to initialize.
   function _initializePositions(LiquidityPosition[] memory _positions) internal virtual {
     // Ensure at least one position is provided.
