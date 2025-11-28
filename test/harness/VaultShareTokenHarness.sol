@@ -27,10 +27,4 @@ contract VaultShareTokenHarness is VaultShareToken {
   function exposed_updateFees(uint256 _collectedFeeToken0, uint256 _collectedFeeToken1) external {
     _updateFees(_collectedFeeToken0, _collectedFeeToken1);
   }
-
-  /// @notice Exposes the internal _updateUserFees function for testing.
-  /// @param _user The address to update fees for.
-  function exposed_updateUserFees(address _user) external {
-    _updateUserFees(_user);
-  }
 }

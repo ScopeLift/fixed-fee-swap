@@ -90,6 +90,19 @@ contract VaultShareToken is ERC20 {
   constructor(string memory _name, string memory _symbol) ERC20(_name, _symbol) {}
 
   /*//////////////////////////////////////////////////////////////
+                        EXTERNAL FUNCTIONS
+  //////////////////////////////////////////////////////////////*/
+
+  /// @notice Updates user's accrued (but not yet claimed) and user's fee indices.
+  /// @param _user The address to update fees for.
+  /// @dev
+  ///   - Accrues newly earned fees into `userFees[_user].accruedToken0/1`.
+  ///   - Updates `userFees[_user].feeIndexToken0/1` to the current global indices.
+  function updateUserFees(address _user) external {
+    _updateUserFees(_user);
+  }
+
+  /*//////////////////////////////////////////////////////////////
                         INTERNAL FUNCTIONS
   //////////////////////////////////////////////////////////////*/
 
