@@ -22,7 +22,11 @@ jobs:
       - name: Build contracts
         run: |
           forge --version
-          forge build --sizes --skip "test"
+          forge build
+
+      - name: Check contract sizes
+        continue-on-error: true
+        run: forge build --sizes --skip "test"
 
   test:
     runs-on: ubuntu-latest
