@@ -222,14 +222,11 @@ contract Burn is VaultShareTokenTest {
 
     // First burn - should accrue based on initial balance (_mintAmount)
     vaultShareToken.exposed_burn(_user, _burnAmount1);
-    uint256 _balanceAfterFirstBurn = _mintAmount - _burnAmount1;
 
-    // Fees collected round 2 (user now has _balanceAfterFirstBurn shares)
+    // Fees collected round 2 (user now has _mintAmount - _burnAmount1 shares)
     vaultShareToken.exposed_updateFees(_collectedFeeToken0Round2, _collectedFeeToken1Round2);
-    uint256 _globalFeeIndex0AfterRound2 = vaultShareToken.feeIndexToken0();
-    uint256 _globalFeeIndex1AfterRound2 = vaultShareToken.feeIndexToken1();
 
-    // Second burn - should accrue based on balance before second burn (_balanceAfterFirstBurn)
+    // Second burn - should accrue based on balance before second burnn
     vaultShareToken.exposed_burn(_user, _burnAmount2);
 
     // Get user fees after both burns
@@ -238,17 +235,38 @@ contract Burn is VaultShareTokenTest {
     // User should have accrued fees from both rounds:
     // - Round 1: based on initial balance (_mintAmount)
     // - Round 2: based on balance after first burn (_balanceAfterFirstBurn)
-    uint256 _expectedAccrued0 = _calculateAccruedFees(_mintAmount, _globalFeeIndex0AfterRound1, 0)
-      + _calculateAccruedFees(
+    (uint256 _expected0, uint256 _expected1) = _expectedAccruedHelper(
+      _mintAmount, _burnAmount1, _globalFeeIndex0AfterRound1, _globalFeeIndex1AfterRound1
+    );
+
+    assertEq(_userAccruedToken0, _expected0);
+    assertEq(_userAccruedToken1, _expected1);
+  }
+
+  // HELPER FUNCTIONS (to avoid stack-too-deep)
+  function _expectedAccruedHelper(
+    uint256 _mintAmount,
+    uint256 _burnAmount1,
+    uint256 _globalFeeIndex0AfterRound1,
+    uint256 _globalFeeIndex1AfterRound1
+  ) internal view returns (uint256 _expected0, uint256 _expected1) {
+    uint256 _balanceAfterFirstBurn = _mintAmount - _burnAmount1;
+
+    // Get final indices *after* round 2
+    uint256 _globalFeeIndex0AfterRound2 = vaultShareToken.feeIndexToken0();
+    uint256 _globalFeeIndex1AfterRound2 = vaultShareToken.feeIndexToken1();
+
+    // Round 1 accrual — full balance
+    _expected0 = _calculateAccruedFees(_mintAmount, _globalFeeIndex0AfterRound1, 0) + 
+      // Round 2 accrual — balance after first burn
+      _calculateAccruedFees(
         _balanceAfterFirstBurn, _globalFeeIndex0AfterRound2, _globalFeeIndex0AfterRound1
       );
-    uint256 _expectedAccrued1 = _calculateAccruedFees(_mintAmount, _globalFeeIndex1AfterRound1, 0)
+
+    _expected1 = _calculateAccruedFees(_mintAmount, _globalFeeIndex1AfterRound1, 0)
       + _calculateAccruedFees(
         _balanceAfterFirstBurn, _globalFeeIndex1AfterRound2, _globalFeeIndex1AfterRound1
       );
-
-    assertEq(_userAccruedToken0, _expectedAccrued0);
-    assertEq(_userAccruedToken1, _expectedAccrued1);
   }
 }
 
@@ -315,13 +333,12 @@ contract Transfer is VaultShareTokenTest {
       vaultShareToken.userFees(_from);
 
     // Verify sender accrued fees from round 1 (earned while they had shares)
-    assertEq(
+    _assertSenderRound1AccruedCorrectHelper(
+      _mintAmount,
+      _globalFeeIndex0AfterRound1,
+      _globalFeeIndex1AfterRound1,
       _senderAccruedToken0AfterTransfer,
-      _calculateAccruedFees(_mintAmount, _globalFeeIndex0AfterRound1, 0)
-    );
-    assertEq(
-      _senderAccruedToken1AfterTransfer,
-      _calculateAccruedFees(_mintAmount, _globalFeeIndex1AfterRound1, 0)
+      _senderAccruedToken1AfterTransfer
     );
 
     // Step 4: New fees come in
@@ -333,41 +350,107 @@ contract Transfer is VaultShareTokenTest {
     vaultShareToken.updateUserFees(_from);
     vaultShareToken.updateUserFees(_to);
 
+    // Delegate all "after round 2" checks to a helper to avoid stack-too-deep
+    _assertAfterRound2StateHelper(
+      _from,
+      _to,
+      _mintAmount,
+      _globalFeeIndex0AfterRound1,
+      _globalFeeIndex1AfterRound1,
+      _globalFeeIndex0AfterRound2,
+      _globalFeeIndex1AfterRound2,
+      _senderAccruedToken0AfterTransfer,
+      _senderAccruedToken1AfterTransfer
+    );
+  }
+
+  // HELPER FUNCTIONS (to avoid stack-too-deep)
+  function _assertSenderRound1AccruedCorrectHelper(
+    uint256 _mintAmount,
+    uint256 _globalFeeIndex0AfterRound1,
+    uint256 _globalFeeIndex1AfterRound1,
+    uint256 _senderAccruedToken0AfterTransfer,
+    uint256 _senderAccruedToken1AfterTransfer
+  ) internal view {
+    uint256 _expectedAccrued0 = _calculateAccruedFees(_mintAmount, _globalFeeIndex0AfterRound1, 0);
+    uint256 _expectedAccrued1 = _calculateAccruedFees(_mintAmount, _globalFeeIndex1AfterRound1, 0);
+
+    assertEq(_senderAccruedToken0AfterTransfer, _expectedAccrued0);
+    assertEq(_senderAccruedToken1AfterTransfer, _expectedAccrued1);
+  }
+
+  function _assertRecipientRound2AccruedCorrectHelper(
+    uint256 _mintAmount,
+    uint256 _globalFeeIndex0AfterRound1,
+    uint256 _globalFeeIndex1AfterRound1,
+    uint256 _globalFeeIndex0AfterRound2,
+    uint256 _globalFeeIndex1AfterRound2,
+    uint256 _recipientAccruedToken0AfterRound2,
+    uint256 _recipientAccruedToken1AfterRound2
+  ) internal view {
+    uint256 _expectedAccrued0 = _calculateAccruedFees(
+      _mintAmount, _globalFeeIndex0AfterRound2, _globalFeeIndex0AfterRound1
+    );
+    uint256 _expectedAccrued1 =
+      _calculateAccruedFees(_mintAmount, _globalFeeIndex1AfterRound2, _globalFeeIndex1AfterRound1);
+
+    assertEq(_recipientAccruedToken0AfterRound2, _expectedAccrued0);
+    assertEq(_recipientAccruedToken1AfterRound2, _expectedAccrued1);
+  }
+
+  function _assertAfterRound2StateHelper(
+    address _from,
+    address _to,
+    uint256 _mintAmount,
+    uint256 _globalFeeIndex0AfterRound1,
+    uint256 _globalFeeIndex1AfterRound1,
+    uint256 _globalFeeIndex0AfterRound2,
+    uint256 _globalFeeIndex1AfterRound2,
+    uint256 _senderAccruedToken0AfterTransfer,
+    uint256 _senderAccruedToken1AfterTransfer
+  ) internal view {
     // Get sender's fees after round 2 (they have 0 balance)
-    (
-      uint256 _senderFeeIndex0AfterRound2,
-      uint256 _senderFeeIndex1AfterRound2,
-      uint256 _senderAccruedToken0AfterRound2,
-      uint256 _senderAccruedToken1AfterRound2
-    ) = vaultShareToken.userFees(_from);
+    {
+      (
+        uint256 _senderFeeIndex0AfterRound2,
+        uint256 _senderFeeIndex1AfterRound2,
+        uint256 _senderAccruedToken0AfterRound2,
+        uint256 _senderAccruedToken1AfterRound2
+      ) = vaultShareToken.userFees(_from);
+
+      // Original user (_from): global checkpoint updated, but accrued fees don't increase (0
+      // balance)
+      assertEq(_senderFeeIndex0AfterRound2, _globalFeeIndex0AfterRound2);
+      assertEq(_senderFeeIndex1AfterRound2, _globalFeeIndex1AfterRound2);
+      // Accrued fees should remain the same (no increase because balance is 0)
+      assertEq(_senderAccruedToken0AfterRound2, _senderAccruedToken0AfterTransfer);
+      assertEq(_senderAccruedToken1AfterRound2, _senderAccruedToken1AfterTransfer);
+    }
 
     // Get recipient's fees after round 2 (they have shares)
-    (
-      uint256 _recipientFeeIndex0AfterRound2,
-      uint256 _recipientFeeIndex1AfterRound2,
-      uint256 _recipientAccruedToken0AfterRound2,
-      uint256 _recipientAccruedToken1AfterRound2
-    ) = vaultShareToken.userFees(_to);
+    {
+      (
+        uint256 _recipientFeeIndex0AfterRound2,
+        uint256 _recipientFeeIndex1AfterRound2,
+        uint256 _recipientAccruedToken0AfterRound2,
+        uint256 _recipientAccruedToken1AfterRound2
+      ) = vaultShareToken.userFees(_to);
 
-    // Original user (_from): global checkpoint updated, but accrued fees don't increase (0 balance)
-    assertEq(_senderFeeIndex0AfterRound2, _globalFeeIndex0AfterRound2);
-    assertEq(_senderFeeIndex1AfterRound2, _globalFeeIndex1AfterRound2);
-    // Accrued fees should remain the same (no increase because balance is 0)
-    assertEq(_senderAccruedToken0AfterRound2, _senderAccruedToken0AfterTransfer);
-    assertEq(_senderAccruedToken1AfterRound2, _senderAccruedToken1AfterTransfer);
+      // New user (_to): global checkpoint updated AND accrued fees increase (has shares)
+      assertEq(_recipientFeeIndex0AfterRound2, _globalFeeIndex0AfterRound2);
+      assertEq(_recipientFeeIndex1AfterRound2, _globalFeeIndex1AfterRound2);
 
-    // New user (_to): global checkpoint updated AND accrued fees increase (has shares)
-    assertEq(_recipientFeeIndex0AfterRound2, _globalFeeIndex0AfterRound2);
-    assertEq(_recipientFeeIndex1AfterRound2, _globalFeeIndex1AfterRound2);
-    // Recipient should have accrued fees from round 2 (based on their balance)
-    assertEq(
-      _recipientAccruedToken0AfterRound2,
-      _calculateAccruedFees(_mintAmount, _globalFeeIndex0AfterRound2, _globalFeeIndex0AfterRound1)
-    );
-    assertEq(
-      _recipientAccruedToken1AfterRound2,
-      _calculateAccruedFees(_mintAmount, _globalFeeIndex1AfterRound2, _globalFeeIndex1AfterRound1)
-    );
+      // Recipient should have accrued fees from round 2 (based on their balance)
+      _assertRecipientRound2AccruedCorrectHelper(
+        _mintAmount,
+        _globalFeeIndex0AfterRound1,
+        _globalFeeIndex1AfterRound1,
+        _globalFeeIndex0AfterRound2,
+        _globalFeeIndex1AfterRound2,
+        _recipientAccruedToken0AfterRound2,
+        _recipientAccruedToken1AfterRound2
+      );
+    }
   }
 }
 
@@ -961,40 +1044,18 @@ contract UpdateUserFees is VaultShareTokenTest {
     uint256 _finalGlobalFeeIndex0 = vaultShareToken.feeIndexToken0();
     uint256 _finalGlobalFeeIndex1 = vaultShareToken.feeIndexToken1();
 
-    // User's current balance is (amount1 + amount2)
-    uint256 _currentBalance = _mintAmount1 + _mintAmount2;
-
     // Perform the update for the user - should use CURRENT balance (amount1 + amount2)
     vaultShareToken.updateUserFees(_user);
 
-    // Destructure the tuple after the update
-    (
-      uint256 _userFeeIndex0,
-      uint256 _userFeeIndex1,
-      uint256 _userAccruedToken0,
-      uint256 _userAccruedToken1
-    ) = vaultShareToken.userFees(_user);
-
-    // Check that the user has the correct fee indices
-    assertEq(_userFeeIndex0, _finalGlobalFeeIndex0);
-    assertEq(_userFeeIndex1, _finalGlobalFeeIndex1);
-
-    // Total accrued fees = fees from round 1 (accrued during mint using amount1) + fees from round
-    // 2 (accrued during explicit update using current balance) Round 1: accrued during second mint
-    // using balance amount1 (from index 0 to index after round 1)
-    uint256 _feesFromRound1Token0 = _calculateAccruedFees(_mintAmount1, _userFeeIndex0AfterMint, 0);
-    uint256 _feesFromRound1Token1 = _calculateAccruedFees(_mintAmount1, _userFeeIndex1AfterMint, 0);
-
-    // Round 2: accrued during explicit updateUserFees using CURRENT balance (amount1 + amount2)
-    // This verifies that explicit updateUserFees uses current balance, not historical balance
-    uint256 _feesFromRound2Token0 =
-      _calculateAccruedFees(_currentBalance, _finalGlobalFeeIndex0, _userFeeIndex0AfterMint);
-    uint256 _feesFromRound2Token1 =
-      _calculateAccruedFees(_currentBalance, _finalGlobalFeeIndex1, _userFeeIndex1AfterMint);
-
-    // Total accrued should be sum of both rounds
-    assertEq(_userAccruedToken0, _feesFromRound1Token0 + _feesFromRound2Token0);
-    assertEq(_userAccruedToken1, _feesFromRound1Token1 + _feesFromRound2Token1);
+    _assertFeeAccrualUsesCurrentBalanceNotHistoricalBalanceHelper(
+      _user,
+      _mintAmount1,
+      _mintAmount2,
+      _userFeeIndex0AfterMint,
+      _userFeeIndex1AfterMint,
+      _finalGlobalFeeIndex0,
+      _finalGlobalFeeIndex1
+    );
   }
 
   function testFuzz_UserWithSharesAccruesFeesBeforeBalanceDecreasesOnBurn(
@@ -1041,5 +1102,49 @@ contract UpdateUserFees is VaultShareTokenTest {
     // burnAmount) User's index before update is 0 (default for new user)
     assertEq(_userAccruedToken0, _calculateAccruedFees(_mintAmount, _globalFeeIndex0, 0));
     assertEq(_userAccruedToken1, _calculateAccruedFees(_mintAmount, _globalFeeIndex1, 0));
+  }
+
+  // HELPER FUNCTIONS (to avoid stack-too-deep)
+
+  function _assertFeeAccrualUsesCurrentBalanceNotHistoricalBalanceHelper(
+    address _user,
+    uint256 _mintAmount1,
+    uint256 _mintAmount2,
+    uint256 _userFeeIndex0AfterMint,
+    uint256 _userFeeIndex1AfterMint,
+    uint256 _finalGlobalFeeIndex0,
+    uint256 _finalGlobalFeeIndex1
+  ) internal view {
+    // Destructure the tuple after the update
+    (
+      uint256 _userFeeIndex0,
+      uint256 _userFeeIndex1,
+      uint256 _userAccruedToken0,
+      uint256 _userAccruedToken1
+    ) = vaultShareToken.userFees(_user);
+
+    // Check that the user has the correct fee indices
+    assertEq(_userFeeIndex0, _finalGlobalFeeIndex0);
+    assertEq(_userFeeIndex1, _finalGlobalFeeIndex1);
+
+    // User's current balance is (amount1 + amount2)
+    uint256 _currentBalance = _mintAmount1 + _mintAmount2;
+
+    // Total accrued fees = fees from round 1 (accrued during mint using amount1) + fees from round
+    // 2 (accrued during explicit update using current balance) Round 1: accrued during second mint
+    // using balance amount1 (from index 0 to index after round 1)
+    uint256 _feesFromRound1Token0 = _calculateAccruedFees(_mintAmount1, _userFeeIndex0AfterMint, 0);
+    uint256 _feesFromRound1Token1 = _calculateAccruedFees(_mintAmount1, _userFeeIndex1AfterMint, 0);
+
+    // Round 2: accrued during explicit updateUserFees using CURRENT balance (amount1 + amount2)
+    // This verifies that explicit updateUserFees uses current balance, not historical balance
+    uint256 _feesFromRound2Token0 =
+      _calculateAccruedFees(_currentBalance, _finalGlobalFeeIndex0, _userFeeIndex0AfterMint);
+    uint256 _feesFromRound2Token1 =
+      _calculateAccruedFees(_currentBalance, _finalGlobalFeeIndex1, _userFeeIndex1AfterMint);
+
+    // Total accrued should be sum of both rounds
+    assertEq(_userAccruedToken0, _feesFromRound1Token0 + _feesFromRound2Token0);
+    assertEq(_userAccruedToken1, _feesFromRound1Token1 + _feesFromRound2Token1);
   }
 }
