@@ -12,7 +12,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 ///  - Implements fee accounting via cumulative “fee-per-share” indexes.
 ///  - When new fees are collected, the vault calls `_updateFees`,
 ///    which increases the global indexes:
-///         `index += fees * PRECISION / totalSupply`
+///         `globalFeeIndexScaled += fees * PRECISION / totalSupply`
 ///
 ///  - Users accrue fees lazily:
 ///         `accrued += balance * (index - userIndex) / PRECISION`
@@ -32,17 +32,18 @@ contract VaultShareToken is ERC20 {
 
   /// @notice Per-user fee accounting state.
   /// @dev
-  ///  - `feeIndexToken{0,1}` are the user's last synced fee indices (checkpoints).
-  ///  - `accruedToken{0,1}` are earned-but-not-yet-claimed fee amounts.
+  ///  - `userFeeIndex0Scaled` and `userFeeIndex1Scaled` are the user's last synced fee indices
+  /// (checkpoints). - `userAccruedToken0` and `userAccruedToken1` are earned-but-not-yet-claimed
+  /// fee amounts.
   struct UserFees {
     /// @notice Last fee-per-share index for token0 the user has synced to.
-    uint256 feeIndexToken0;
+    uint256 userFeeIndex0Scaled;
     /// @notice Last fee-per-share index for token1 the user has synced to.
-    uint256 feeIndexToken1;
+    uint256 userFeeIndex1Scaled;
     /// @notice Accrued (but not yet claimed) fees for token0.
-    uint256 accruedToken0;
+    uint256 userAccruedToken0;
     /// @notice Accrued (but not yet claimed) fees for token1.
-    uint256 accruedToken1;
+    uint256 userAccruedToken1;
   }
 
   /*//////////////////////////////////////////////////////////////
@@ -50,13 +51,14 @@ contract VaultShareToken is ERC20 {
   //////////////////////////////////////////////////////////////*/
 
   /// @notice Emitted when the global cumulative fee index for token0 and token1 are updated.
-  /// @param newFeeIndexToken0 Updated global cumulative fee index for token0 (with PRECISION).
-  /// @param newFeeIndexToken1 Updated global cumulative fee index for token1 (with PRECISION).
+  /// @param newglobalFeeIndex0Scaled Updated global cumulative fee index for token0 (with
+  /// PRECISION). @param newglobalFeeIndex1Scaled Updated global cumulative fee index for token1
+  /// (with PRECISION).
   /// @param collectedFeeToken0 Amount of token0 fees collected from the pool.
   /// @param collectedFeeToken1 Amount of token1 fees collected from the pool.
   event FeeIndexesUpdated(
-    uint256 newFeeIndexToken0,
-    uint256 newFeeIndexToken1,
+    uint256 newglobalFeeIndex0Scaled,
+    uint256 newglobalFeeIndex1Scaled,
     uint256 collectedFeeToken0,
     uint256 collectedFeeToken1
   );
@@ -70,12 +72,12 @@ contract VaultShareToken is ERC20 {
   ///   - Scaled by PRECISION.
   ///   - Increases whenever new token0 fees are distributed via `_updateFees`.
   ///   - Represents the total amount of token0 fees accrued per 1 share since vault inception.
-  ///   - Used with `userFees[user].feeIndexToken0` to compute user-specific deltas.
-  uint256 public feeIndexToken0;
+  ///   - Used with `userFees[user].userFeeIndex0Scaled` to compute user-specific deltas.
+  uint256 public globalFeeIndex0Scaled;
 
   /// @notice Global cumulative fee index for token1.
-  /// @dev Same semantics as `feeIndexToken0`, but for token1.
-  uint256 public feeIndexToken1;
+  /// @dev Same semantics as `globalFeeIndex0Scaled`, but for token1.
+  uint256 public globalFeeIndex1Scaled;
 
   /// @notice Tracks fee accounting data per user.
   mapping(address => UserFees) public userFees;
@@ -96,8 +98,9 @@ contract VaultShareToken is ERC20 {
   /// @notice Updates user's accrued (but not yet claimed) and user's fee indices.
   /// @param _user The address to update fees for.
   /// @dev
-  ///   - Accrues newly earned fees into `userFees[_user].accruedToken0/1`.
-  ///   - Updates `userFees[_user].feeIndexToken0/1` to the current global indices.
+  ///   - Accrues newly earned fees into `userFees[_user].userAccruedToken0/userAccruedToken1`.
+  ///   - Updates `userFees[_user].userFeeIndex0Scaled/userFeeIndex1Scaled` to the current global
+  /// indices.
   function updateUserFees(address _user) external {
     _updateUserFees(_user);
   }
@@ -128,7 +131,7 @@ contract VaultShareToken is ERC20 {
     if (_supply == 0) return;
 
     // Update the global cumulative fee index for token0.
-    // `feeIndexToken0` represents "how much token0 each share has earned"
+    // `globalFeeIndex0Scaled` represents "how much token0 each share has earned"
     // since the vault started.
     //
     // We scale first to avoid precision loss:
@@ -137,7 +140,9 @@ contract VaultShareToken is ERC20 {
     // Rounding.Floor ensures that total distributed <= collected.
     // Any dust remains inside the vault (safe and intentional).
     if (_collectedFeeToken0 > 0) {
-      feeIndexToken0 += Math.mulDiv(_collectedFeeToken0, PRECISION, _supply, Math.Rounding.Floor);
+      globalFeeIndex0Scaled += Math.mulDiv(
+        _collectedFeeToken0, PRECISION, _supply, Math.Rounding.Floor
+      );
     }
 
     // Update the global cumulative fee index for token1
@@ -146,54 +151,57 @@ contract VaultShareToken is ERC20 {
     // - no rewards are minted, only accounting updated
     // - FLOOR ensures we don’t over-distribute
     if (_collectedFeeToken1 > 0) {
-      feeIndexToken1 += Math.mulDiv(_collectedFeeToken1, PRECISION, _supply, Math.Rounding.Floor);
+      globalFeeIndex1Scaled += Math.mulDiv(
+        _collectedFeeToken1, PRECISION, _supply, Math.Rounding.Floor
+      );
     }
 
-    emit FeeIndexesUpdated(feeIndexToken0, feeIndexToken1, _collectedFeeToken0, _collectedFeeToken1);
+    emit FeeIndexesUpdated(
+      globalFeeIndex0Scaled, globalFeeIndex1Scaled, _collectedFeeToken0, _collectedFeeToken1
+    );
   }
 
   /// @notice Updates user's accrued (but not yet claimed) and user's fee indices.
   /// @param _user The address to update fees for.
   /// @dev
   ///   - Should be called before mint, burn, transfer and claim.
-  ///   - Accrues newly earned fees into `userFees[_user].accruedToken0/1`.
-  ///   - Updates `userFees[_user].feeIndexToken0/1` to the current global indices.
+  ///   - Accrues newly earned fees into `userFees[_user].userAccruedToken0/userAccruedToken1`.
+  ///   - Updates `userFees[_user].userFeeIndex0Scaled/userFeeIndex1Scaled` to the current global
+  /// indices.
   function _updateUserFees(address _user) internal {
     // 1. User's balance of VaultShares tokens
     uint256 _userBalance = balanceOf(_user);
 
     // 2. Current global fee indices
-    uint256 _globalFeeIndex0 = feeIndexToken0;
-    uint256 _globalFeeIndex1 = feeIndexToken1;
+    uint256 _globalFeeIndex0 = globalFeeIndex0Scaled;
+    uint256 _globalFeeIndex1 = globalFeeIndex1Scaled;
 
     // 3. User's last recorded fee indices
     UserFees storage account = userFees[_user];
-    uint256 _userFeeIndex0 = account.feeIndexToken0;
-    uint256 _userFeeIndex1 = account.feeIndexToken1;
+    uint256 _userFeeIndex0 = account.userFeeIndex0Scaled;
+    uint256 _userFeeIndex1 = account.userFeeIndex1Scaled;
 
     // 4. If user has no shares, they cannot earn new fees going forward.
     // Just sync their fee indices so they don't retro-earn when they
     // receive shares in the future.
     if (_userBalance == 0) {
-      if (_userFeeIndex0 != _globalFeeIndex0) account.feeIndexToken0 = _globalFeeIndex0;
-      if (_userFeeIndex1 != _globalFeeIndex1) account.feeIndexToken1 = _globalFeeIndex1;
+      if (_userFeeIndex0 != _globalFeeIndex0) account.userFeeIndex0Scaled = _globalFeeIndex0;
+      if (_userFeeIndex1 != _globalFeeIndex1) account.userFeeIndex1Scaled = _globalFeeIndex1;
       return;
     }
 
     // 5. Accrue newly earned fees for token0
     if (_globalFeeIndex0 > _userFeeIndex0) {
       uint256 _deltaIndex0 = _globalFeeIndex0 - _userFeeIndex0;
-      account.accruedToken0 += Math.mulDiv(_userBalance, _deltaIndex0, PRECISION);
+      account.userAccruedToken0 += Math.mulDiv(_userBalance, _deltaIndex0, PRECISION);
+      account.userFeeIndex0Scaled = _globalFeeIndex0;
     }
 
     // 6. Accrue newly earned fees for token1
     if (_globalFeeIndex1 > _userFeeIndex1) {
       uint256 _deltaIndex1 = _globalFeeIndex1 - _userFeeIndex1;
-      account.accruedToken1 += Math.mulDiv(_userBalance, _deltaIndex1, PRECISION);
+      account.userAccruedToken1 += Math.mulDiv(_userBalance, _deltaIndex1, PRECISION);
+      account.userFeeIndex1Scaled = _globalFeeIndex1;
     }
-
-    // 7. Update user checkpoints to the latest global indices
-    if (_userFeeIndex0 != _globalFeeIndex0) account.feeIndexToken0 = _globalFeeIndex0;
-    if (_userFeeIndex1 != _globalFeeIndex1) account.feeIndexToken1 = _globalFeeIndex1;
   }
 }
