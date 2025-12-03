@@ -7,16 +7,30 @@ import {Test} from "forge-std/Test.sol";
 // Internal Imports
 import {VaultShareToken} from "src/VaultShareToken.sol";
 import {VaultShareTokenHarness} from "test/harness/VaultShareTokenHarness.sol";
+import {ERC20Mock} from "test/mock/ERC20Mock.sol";
 
 contract VaultShareTokenTest is Test {
   VaultShareTokenHarness public vaultShareToken;
+  ERC20Mock public token0;
+  ERC20Mock public token1;
 
   function setUp() public virtual {
     vaultShareToken = new VaultShareTokenHarness("Vault Share Token", "VST");
+    token0 = new ERC20Mock("Token 0", "T0");
+    token1 = new ERC20Mock("Token 1", "T1");
   }
 
   function _assumeSafeAddress(address _address) internal pure {
     vm.assume(_address != address(0));
+  }
+
+  /// @notice Assumes the address is a safe EOA (Externally Owned Account).
+  /// @param _address The address to check.
+  /// @dev Excludes contract addresses, which is necessary for native ETH transfers.
+  function _assumeSafeEOA(address _address) internal view {
+    vm.assume(_address != address(0));
+    // Exclude contract addresses (for native ETH transfers)
+    vm.assume(_address.code.length == 0);
   }
 
   function _assumeSafeAmount(uint256 _amount) internal pure {
@@ -1081,5 +1095,171 @@ contract UpdateUserFees is VaultShareTokenTest {
     // burnAmount) User's index before update is 0 (default for new user)
     assertEq(_userAccruedToken0, _calculateAccruedFees(_mintAmount, _globalFeeIndex0, 0));
     assertEq(_userAccruedToken1, _calculateAccruedFees(_mintAmount, _globalFeeIndex1, 0));
+  }
+}
+
+contract Claim is VaultShareTokenTest {
+  function testFuzz_transfersTokens(
+    address _user,
+    uint256 _mintAmount,
+    uint256 _collectedFeeToken0,
+    uint256 _collectedFeeToken1
+  ) public {
+    _assumeSafeEOA(_user);
+    _mintAmount = _boundMintAmount(_mintAmount);
+    _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
+    _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
+
+    // Mint and send fees for token0 and token1 into the vault
+    vm.deal(address(vaultShareToken), _collectedFeeToken0); // Native token
+    token1.mint(address(vaultShareToken), _collectedFeeToken1); // ERC20 token
+
+    // User mints shares
+    vaultShareToken.exposed_mint(_user, _mintAmount);
+
+    // Fees collected (global indices increase)
+    vaultShareToken.exposed_updateFees(_collectedFeeToken0, _collectedFeeToken1);
+
+    // Sync user fees to latest global indices
+    vaultShareToken.updateUserFees(_user);
+
+    // Assert balance of token in vault and user for token0 and token1
+    assertEq(address(vaultShareToken).balance, _collectedFeeToken0);
+    assertEq(token1.balanceOf(address(vaultShareToken)), _collectedFeeToken1);
+    assertEq(_user.balance, 0);
+    assertEq(token1.balanceOf(_user), 0);
+
+    // Get accrued amounts before claiming
+    (,, uint256 _accruedToken0BeforeClaiming, uint256 _accruedToken1BeforeClaiming) =
+      vaultShareToken.userFees(_user);
+
+    // User claims fees
+    (uint256 _claimedToken0, uint256 _claimedToken1) =
+      vaultShareToken.claim(_user, address(0), address(token1));
+
+    // Verify claimed amounts match accrued amounts
+    assertEq(_claimedToken0, _accruedToken0BeforeClaiming);
+    assertEq(_claimedToken1, _accruedToken1BeforeClaiming);
+
+    // Verify tokens were transferred to user
+    assertEq(_user.balance, _claimedToken0);
+    assertEq(token1.balanceOf(_user), _claimedToken1);
+
+    // Verify vault balance equals the dust (collected - claimed) due to Floor rounding
+    // This dust is intentional and safe - it remains in the vault
+    assertEq(address(vaultShareToken).balance, _collectedFeeToken0 - _claimedToken0);
+    assertEq(token1.balanceOf(address(vaultShareToken)), _collectedFeeToken1 - _claimedToken1);
+  }
+
+  function testFuzz_emitsFeesClaimedEvent(
+    address _user,
+    uint256 _mintAmount,
+    uint256 _collectedFeeToken0,
+    uint256 _collectedFeeToken1
+  ) public {
+    _assumeSafeAddress(_user);
+    _mintAmount = _boundMintAmount(_mintAmount);
+    _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
+    _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
+
+    // Mint and send fees for token0 and token1 into the vault
+    token0.mint(address(vaultShareToken), _collectedFeeToken0);
+    token1.mint(address(vaultShareToken), _collectedFeeToken1);
+
+    // User mints shares
+    vaultShareToken.exposed_mint(_user, _mintAmount);
+
+    // Fees collected (global indices increase)
+    vaultShareToken.exposed_updateFees(_collectedFeeToken0, _collectedFeeToken1);
+
+    // Sync user fees to latest global indices
+    vaultShareToken.updateUserFees(_user);
+
+    // Get accrued amounts before claiming
+    (,, uint256 _accruedToken0BeforeClaiming, uint256 _accruedToken1BeforeClaiming) =
+      vaultShareToken.userFees(_user);
+
+    // User claims fees
+    vm.expectEmit();
+    emit VaultShareToken.FeesClaimed(
+      _user,
+      address(token0),
+      address(token1),
+      _accruedToken0BeforeClaiming,
+      _accruedToken1BeforeClaiming
+    );
+    vaultShareToken.claim(_user, address(token0), address(token1));
+  }
+
+  function testFuzz_ClaimsFeesAlsoSyncsToLatestGlobalIndices(
+    address _user,
+    uint256 _mintAmount,
+    uint256 _collectedFeeToken0,
+    uint256 _collectedFeeToken1
+  ) public {
+    _assumeSafeAddress(_user);
+    _mintAmount = _boundMintAmount(_mintAmount);
+    _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
+    _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
+
+    // Mint and send fees for token0 and token1 into the vault
+    token0.mint(address(vaultShareToken), _collectedFeeToken0);
+    token1.mint(address(vaultShareToken), _collectedFeeToken1);
+
+    // User mints shares
+    vaultShareToken.exposed_mint(_user, _mintAmount);
+
+    // Fees collected (global indices increase)
+    vaultShareToken.exposed_updateFees(_collectedFeeToken0, _collectedFeeToken1);
+
+    // Get user fees before claiming
+    (uint256 _userFeeIndex0BeforeClaiming, uint256 _userFeeIndex1BeforeClaiming,,) =
+      vaultShareToken.userFees(_user);
+
+    // Verify that userFees are not synced to latest global indices
+    assertEq(_userFeeIndex0BeforeClaiming, 0);
+    assertEq(_userFeeIndex1BeforeClaiming, 0);
+
+    // User claims fees
+    vaultShareToken.claim(_user, address(token0), address(token1));
+
+    // Verify user fees are synced to latest global indices
+    (uint256 _userFeeIndex0AfterClaiming, uint256 _userFeeIndex1AfterClaiming,,) =
+      vaultShareToken.userFees(_user);
+    assertEq(_userFeeIndex0AfterClaiming, vaultShareToken.globalFeeIndex0Scaled());
+    assertEq(_userFeeIndex1AfterClaiming, vaultShareToken.globalFeeIndex1Scaled());
+  }
+
+  function testFuzz_ResetsAccruedFeesAfterClaiming(
+    address _user,
+    uint256 _mintAmount,
+    uint256 _collectedFeeToken0,
+    uint256 _collectedFeeToken1
+  ) public {
+    _assumeSafeAddress(_user);
+    _mintAmount = _boundMintAmount(_mintAmount);
+    _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
+    _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
+
+    // Mint and send fees for token0 and token1 into the vault
+    token0.mint(address(vaultShareToken), _collectedFeeToken0);
+    token1.mint(address(vaultShareToken), _collectedFeeToken1);
+
+    // User mints shares
+    vaultShareToken.exposed_mint(_user, _mintAmount);
+
+    // Fees collected (global indices increase)
+    vaultShareToken.exposed_updateFees(_collectedFeeToken0, _collectedFeeToken1);
+
+    // Sync user fees to latest global indices
+    vaultShareToken.updateUserFees(_user);
+
+    // User claims fees
+    vaultShareToken.claim(_user, address(token0), address(token1));
+
+    // Verify accrued fees are reset to 0
+    (,, uint256 _accruedToken0After, uint256 _accruedToken1After) = vaultShareToken.userFees(_user);
+    assertEq(_accruedToken0After, 0);
+    assertEq(_accruedToken1After, 0);
   }
 }

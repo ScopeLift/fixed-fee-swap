@@ -3,6 +3,8 @@ pragma solidity ^0.8.30;
 
 // External imports
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title VaultShareToken
@@ -47,6 +49,13 @@ contract VaultShareToken is ERC20 {
   }
 
   /*//////////////////////////////////////////////////////////////
+                          ERRORS
+  //////////////////////////////////////////////////////////////*/
+
+  /// @notice Thrown when a transfer fails.
+  error VaultShareToken_TransferFailed();
+
+  /*//////////////////////////////////////////////////////////////
                           EVENTS
   //////////////////////////////////////////////////////////////*/
 
@@ -61,6 +70,20 @@ contract VaultShareToken is ERC20 {
     uint256 newglobalFeeIndex1Scaled,
     uint256 collectedFeeToken0,
     uint256 collectedFeeToken1
+  );
+
+  /// @notice Emitted when a user claims their accrued fees.
+  /// @param user The address that claimed fees.
+  /// @param token0 The address of the token0 to claim fees for.
+  /// @param token1 The address of the token1 to claim fees for.
+  /// @param token0Amount Amount of token0 fees claimed.
+  /// @param token1Amount Amount of token1 fees claimed.
+  event FeesClaimed(
+    address indexed user,
+    address indexed token0,
+    address indexed token1,
+    uint256 token0Amount,
+    uint256 token1Amount
   );
 
   /*//////////////////////////////////////////////////////////////
@@ -90,6 +113,23 @@ contract VaultShareToken is ERC20 {
   /// @param _name ERC20 name value.
   /// @param _symbol ERC20 symbol value.
   constructor(string memory _name, string memory _symbol) ERC20(_name, _symbol) {}
+
+  /*//////////////////////////////////////////////////////////////
+                        EXTERNAL FUNCTIONS
+  //////////////////////////////////////////////////////////////*/
+
+  /// @notice Claims accrued (but not yet claimed) fees for a user
+  /// @param _user The address to claim fees for.
+  /// @param _token0 The address of the token0 to claim fees for.
+  /// @param _token1 The address of the token1 to claim fees for.
+  /// @return _claimedToken0 Amount of token0 fees claimed.
+  /// @return _claimedToken1 Amount of token1 fees claimed.
+  function claim(address _user, address _token0, address _token1)
+    external
+    returns (uint256 _claimedToken0, uint256 _claimedToken1)
+  {
+    (_claimedToken0, _claimedToken1) = _claim(_user, _token0, _token1);
+  }
 
   /*//////////////////////////////////////////////////////////////
                         INTERNAL FUNCTIONS
@@ -188,6 +228,49 @@ contract VaultShareToken is ERC20 {
       uint256 _deltaIndex1 = globalFeeIndex1Scaled - _userFeeIndex1;
       account.userAccruedToken1 += Math.mulDiv(_userBalance, _deltaIndex1, PRECISION);
       account.userFeeIndex1Scaled = globalFeeIndex1Scaled;
+    }
+  }
+
+  /// @notice Claims accrued fees for a user after syncing to the latest global indices.
+  /// @param _user The address to claim fees for.
+  /// @param _token0 The address of the token0 to claim fees for.
+  /// @param _token1 The address of the token1 to claim fees for.
+  /// @return _claimedToken0 Amount of token0 fees claimed.
+  /// @return _claimedToken1 Amount of token1 fees claimed.
+  function _claim(address _user, address _token0, address _token1)
+    internal
+    returns (uint256 _claimedToken0, uint256 _claimedToken1)
+  {
+    // Update user fees to ensure we're syncing to the latest global indices
+    _updateUserFees(_user);
+
+    // Get the accrued amounts before resetting
+    UserFees storage account = userFees[_user];
+    _claimedToken0 = account.userAccruedToken0;
+    _claimedToken1 = account.userAccruedToken1;
+
+    // Reset accrued amounts to 0
+    account.userAccruedToken0 = 0;
+    account.userAccruedToken1 = 0;
+
+    // Emit event for transparency
+    emit FeesClaimed(_user, _token0, _token1, _claimedToken0, _claimedToken1);
+
+    // Transfer tokens to the user
+    _transferAmount(_token0, _user, _claimedToken0);
+    _transferAmount(_token1, _user, _claimedToken1);
+  }
+
+  /// @notice Transfers an amount of tokens to a user.
+  /// @param _token The address of the token to transfer.
+  /// @param _to The address to transfer the tokens to.
+  /// @param _amount The amount of tokens to transfer.
+  function _transferAmount(address _token, address _to, uint256 _amount) internal {
+    if (_token == address(0)) {
+      (bool _success,) = payable(_to).call{value: _amount}("");
+      if (!_success) revert VaultShareToken_TransferFailed();
+    } else {
+      SafeERC20.safeTransfer(IERC20(_token), _to, _amount);
     }
   }
 }
