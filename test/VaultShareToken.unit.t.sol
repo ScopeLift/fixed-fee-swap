@@ -26,9 +26,16 @@ contract VaultShareTokenTest is Test {
 
   /// @notice Assumes the address is a safe EOA (Externally Owned Account).
   /// @param _address The address to check.
-  /// @dev Excludes contract addresses, which is necessary for native ETH transfers.
+  /// @dev Excludes contract addresses, precompile addresses, and known problematic addresses (like
+  /// console), which is necessary for native ETH transfers.
   function _assumeSafeEOA(address _address) internal view {
     vm.assume(_address != address(0));
+    // Exclude the console address (used by forge-std for logging, cannot receive ETH)
+    vm.assume(_address != address(0x000000000000000000636F6e736F6c652e6c6f67));
+    // Exclude precompile addresses (0x01-0x0F) which cannot receive ETH
+    // This covers standard Ethereum precompiles (0x01-0x09) and additional ones in test
+    // environments
+    vm.assume(_address > address(0x0F));
     // Exclude contract addresses (for native ETH transfers)
     vm.assume(_address.code.length == 0);
   }
@@ -1098,6 +1105,12 @@ contract UpdateUserFees is VaultShareTokenTest {
   }
 }
 
+/// @notice Contract that rejects ETH transfers (no payable fallback or receive function).
+contract NonPayableContract {
+  // Intentionally no receive() or fallback() payable functions
+
+  }
+
 contract Claim is VaultShareTokenTest {
   function testFuzz_transfersTokens(
     address _user,
@@ -1110,6 +1123,10 @@ contract Claim is VaultShareTokenTest {
     _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
     _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
 
+    // Store initial balances to verify the delta after claiming
+    uint256 _initialUserEthBalance = _user.balance;
+    uint256 _initialUserToken1Balance = token1.balanceOf(_user);
+
     // Mint and send fees for token0 and token1 into the vault
     vm.deal(address(vaultShareToken), _collectedFeeToken0); // Native token
     token1.mint(address(vaultShareToken), _collectedFeeToken1); // ERC20 token
@@ -1121,13 +1138,11 @@ contract Claim is VaultShareTokenTest {
     vaultShareToken.exposed_updateFees(_collectedFeeToken0, _collectedFeeToken1);
 
     // Sync user fees to latest global indices
-    vaultShareToken.updateUserFees(_user);
+    vaultShareToken.exposed_updateUserFees(_user);
 
-    // Assert balance of token in vault and user for token0 and token1
+    // Assert balance of tokens in vault
     assertEq(address(vaultShareToken).balance, _collectedFeeToken0);
     assertEq(token1.balanceOf(address(vaultShareToken)), _collectedFeeToken1);
-    assertEq(_user.balance, 0);
-    assertEq(token1.balanceOf(_user), 0);
 
     // Get accrued amounts before claiming
     (,, uint256 _accruedToken0BeforeClaiming, uint256 _accruedToken1BeforeClaiming) =
@@ -1141,9 +1156,9 @@ contract Claim is VaultShareTokenTest {
     assertEq(_claimedToken0, _accruedToken0BeforeClaiming);
     assertEq(_claimedToken1, _accruedToken1BeforeClaiming);
 
-    // Verify tokens were transferred to user
-    assertEq(_user.balance, _claimedToken0);
-    assertEq(token1.balanceOf(_user), _claimedToken1);
+    // Verify tokens were transferred to user (check delta from initial balance)
+    assertEq(_user.balance, _initialUserEthBalance + _claimedToken0);
+    assertEq(token1.balanceOf(_user), _initialUserToken1Balance + _claimedToken1);
 
     // Verify vault balance equals the dust (collected - claimed) due to Floor rounding
     // This dust is intentional and safe - it remains in the vault
@@ -1173,7 +1188,7 @@ contract Claim is VaultShareTokenTest {
     vaultShareToken.exposed_updateFees(_collectedFeeToken0, _collectedFeeToken1);
 
     // Sync user fees to latest global indices
-    vaultShareToken.updateUserFees(_user);
+    vaultShareToken.exposed_updateUserFees(_user);
 
     // Get accrued amounts before claiming
     (,, uint256 _accruedToken0BeforeClaiming, uint256 _accruedToken1BeforeClaiming) =
@@ -1252,7 +1267,7 @@ contract Claim is VaultShareTokenTest {
     vaultShareToken.exposed_updateFees(_collectedFeeToken0, _collectedFeeToken1);
 
     // Sync user fees to latest global indices
-    vaultShareToken.updateUserFees(_user);
+    vaultShareToken.exposed_updateUserFees(_user);
 
     // User claims fees
     vaultShareToken.claim(_user, address(token0), address(token1));
@@ -1261,5 +1276,39 @@ contract Claim is VaultShareTokenTest {
     (,, uint256 _accruedToken0After, uint256 _accruedToken1After) = vaultShareToken.userFees(_user);
     assertEq(_accruedToken0After, 0);
     assertEq(_accruedToken1After, 0);
+  }
+
+  function test_RevertIf_NativeEthTransferFails(uint256 _mintAmount, uint256 _collectedFeeToken0)
+    public
+  {
+    _mintAmount = _boundMintAmount(_mintAmount);
+    _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
+    // Ensure we have some accrued fees to claim
+    vm.assume(_collectedFeeToken0 > 0 && _mintAmount > 0);
+
+    // Deploy a contract that rejects ETH transfers
+    NonPayableContract _nonPayableContract = new NonPayableContract();
+
+    // Mint and send native ETH fees to the vault
+    vm.deal(address(vaultShareToken), _collectedFeeToken0);
+
+    // User (non-payable contract) mints shares
+    vaultShareToken.exposed_mint(address(_nonPayableContract), _mintAmount);
+
+    // Fees collected (global indices increase)
+    vaultShareToken.exposed_updateFees(_collectedFeeToken0, 0);
+
+    // Sync user fees to latest global indices
+    vaultShareToken.exposed_updateUserFees(address(_nonPayableContract));
+
+    // Get accrued amount before claiming
+    (,, uint256 _accruedToken0BeforeClaiming,) =
+      vaultShareToken.userFees(address(_nonPayableContract));
+    // Ensure there are accrued fees to claim
+    vm.assume(_accruedToken0BeforeClaiming > 0);
+
+    // Attempt to claim should revert with VaultShareToken_TransferFailed
+    vm.expectRevert(VaultShareToken.VaultShareToken_TransferFailed.selector);
+    vaultShareToken.claim(address(_nonPayableContract), address(0), address(token1));
   }
 }
