@@ -92,20 +92,6 @@ contract VaultShareToken is ERC20 {
   constructor(string memory _name, string memory _symbol) ERC20(_name, _symbol) {}
 
   /*//////////////////////////////////////////////////////////////
-                        EXTERNAL FUNCTIONS
-  //////////////////////////////////////////////////////////////*/
-
-  /// @notice Updates user's accrued (but not yet claimed) and user's fee indices.
-  /// @param _user The address to update fees for.
-  /// @dev
-  ///   - Accrues newly earned fees into `userFees[_user].userAccruedToken0/userAccruedToken1`.
-  ///   - Updates `userFees[_user].userFeeIndex0Scaled/userFeeIndex1Scaled` to the current global
-  /// indices.
-  function updateUserFees(address _user) external {
-    _updateUserFees(_user);
-  }
-
-  /*//////////////////////////////////////////////////////////////
                         INTERNAL FUNCTIONS
   //////////////////////////////////////////////////////////////*/
 
@@ -172,36 +158,36 @@ contract VaultShareToken is ERC20 {
     // 1. User's balance of VaultShares tokens
     uint256 _userBalance = balanceOf(_user);
 
-    // 2. Current global fee indices
-    uint256 _globalFeeIndex0 = globalFeeIndex0Scaled;
-    uint256 _globalFeeIndex1 = globalFeeIndex1Scaled;
-
-    // 3. User's last recorded fee indices
+    // 2. User's last recorded fee indices
     UserFees storage account = userFees[_user];
     uint256 _userFeeIndex0 = account.userFeeIndex0Scaled;
     uint256 _userFeeIndex1 = account.userFeeIndex1Scaled;
 
-    // 4. If user has no shares, they cannot earn new fees going forward.
+    // 3. If user has no shares, they cannot earn new fees going forward.
     // Just sync their fee indices so they don't retro-earn when they
     // receive shares in the future.
     if (_userBalance == 0) {
-      if (_userFeeIndex0 != _globalFeeIndex0) account.userFeeIndex0Scaled = _globalFeeIndex0;
-      if (_userFeeIndex1 != _globalFeeIndex1) account.userFeeIndex1Scaled = _globalFeeIndex1;
+      if (_userFeeIndex0 != globalFeeIndex0Scaled) {
+        account.userFeeIndex0Scaled = globalFeeIndex0Scaled;
+      }
+      if (_userFeeIndex1 != globalFeeIndex1Scaled) {
+        account.userFeeIndex1Scaled = globalFeeIndex1Scaled;
+      }
       return;
     }
 
-    // 5. Accrue newly earned fees for token0
-    if (_globalFeeIndex0 > _userFeeIndex0) {
-      uint256 _deltaIndex0 = _globalFeeIndex0 - _userFeeIndex0;
+    // 4. Accrue newly earned fees for token0
+    if (globalFeeIndex0Scaled > _userFeeIndex0) {
+      uint256 _deltaIndex0 = globalFeeIndex0Scaled - _userFeeIndex0;
       account.userAccruedToken0 += Math.mulDiv(_userBalance, _deltaIndex0, PRECISION);
-      account.userFeeIndex0Scaled = _globalFeeIndex0;
+      account.userFeeIndex0Scaled = globalFeeIndex0Scaled;
     }
 
-    // 6. Accrue newly earned fees for token1
-    if (_globalFeeIndex1 > _userFeeIndex1) {
-      uint256 _deltaIndex1 = _globalFeeIndex1 - _userFeeIndex1;
+    // 5. Accrue newly earned fees for token1
+    if (globalFeeIndex1Scaled > _userFeeIndex1) {
+      uint256 _deltaIndex1 = globalFeeIndex1Scaled - _userFeeIndex1;
       account.userAccruedToken1 += Math.mulDiv(_userBalance, _deltaIndex1, PRECISION);
-      account.userFeeIndex1Scaled = _globalFeeIndex1;
+      account.userFeeIndex1Scaled = globalFeeIndex1Scaled;
     }
   }
 }

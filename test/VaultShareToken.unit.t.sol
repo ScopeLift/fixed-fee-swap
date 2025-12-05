@@ -23,13 +23,17 @@ contract VaultShareTokenTest is Test {
     vm.assume(_amount != 0);
   }
 
-  function _boundFeeAmount(uint256 _amount) internal view returns (uint256) {
+  function _boundFeeAmount(uint256 _amount) internal pure returns (uint256) {
     // Bound fees so that, even with minimal supply and multiple fee rounds,
     // the cumulative fee index updates cannot overflow uint256.
     //
     // Each update adds ~ collectedFee * PRECISION / totalSupply.
-    // We divide by an extra safety factor (4) so several maximal rounds remain safe.
-    uint256 _maxFeePerRound = type(uint256).max / vaultShareToken.PRECISION() / 4;
+    // To prevent overflow in `collectedFee * PRECISION`, we need:
+    //   collectedFee * PRECISION <= type(uint256).max
+    //   collectedFee <= type(uint256).max / PRECISION
+    //
+    // Using uint192.max provides a simpler, safe bound,
+    uint256 _maxFeePerRound = type(uint192).max;
     return bound(_amount, 1, _maxFeePerRound);
   }
 
@@ -343,8 +347,8 @@ contract Transfer is VaultShareTokenTest {
     uint256 _globalFeeIndex1AfterRound2 = vaultShareToken.globalFeeIndex1Scaled();
 
     // Update both users' fees to reflect the new fee collection via the public hook
-    vaultShareToken.updateUserFees(_params.from);
-    vaultShareToken.updateUserFees(_params.to);
+    vaultShareToken.exposed_updateUserFees(_params.from);
+    vaultShareToken.exposed_updateUserFees(_params.to);
 
     // Get sender's fees after round 2 (they have 0 balance)
     {
@@ -553,7 +557,7 @@ contract UpdateUserFees is VaultShareTokenTest {
     _assumeSafeAddress(_user);
 
     // Perform the update for the user without vault shares
-    vaultShareToken.updateUserFees(_user);
+    vaultShareToken.exposed_updateUserFees(_user);
 
     // Get the global fee indices (should be 0 initially)
     uint256 _globalFeeIndex0 = vaultShareToken.globalFeeIndex0Scaled();
@@ -585,7 +589,7 @@ contract UpdateUserFees is VaultShareTokenTest {
     _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
 
     // First, sync the user without shares when global indices are 0
-    vaultShareToken.updateUserFees(_userWithoutVaultShares);
+    vaultShareToken.exposed_updateUserFees(_userWithoutVaultShares);
 
     // Mint shares for another user and collect fees to change global indices
     vaultShareToken.exposed_mint(_userWithVaultShares, _mintAmount);
@@ -596,7 +600,7 @@ contract UpdateUserFees is VaultShareTokenTest {
     uint256 _globalFeeIndex1 = vaultShareToken.globalFeeIndex1Scaled();
 
     // Perform the update for the user without vault shares
-    vaultShareToken.updateUserFees(_userWithoutVaultShares);
+    vaultShareToken.exposed_updateUserFees(_userWithoutVaultShares);
 
     // Destructure the tuple again after the update
     (
@@ -614,7 +618,7 @@ contract UpdateUserFees is VaultShareTokenTest {
     _assumeSafeAddress(_user);
 
     // First sync: user indices should sync to global indices (which are 0)
-    vaultShareToken.updateUserFees(_user);
+    vaultShareToken.exposed_updateUserFees(_user);
 
     (uint256 _userFeeIndex0AfterFirstSync, uint256 _userFeeIndex1AfterFirstSync,,) =
       vaultShareToken.userFees(_user);
@@ -624,7 +628,7 @@ contract UpdateUserFees is VaultShareTokenTest {
     assertEq(_userFeeIndex1AfterFirstSync, 0);
 
     // Second sync: indices should remain the same (already synced, no unnecessary update)
-    vaultShareToken.updateUserFees(_user);
+    vaultShareToken.exposed_updateUserFees(_user);
 
     (uint256 _userFeeIndex0AfterSecondSync, uint256 _userFeeIndex1AfterSecondSync,,) =
       vaultShareToken.userFees(_user);
@@ -649,7 +653,7 @@ contract UpdateUserFees is VaultShareTokenTest {
     _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
 
     // Sync user without shares when global indices are 0
-    vaultShareToken.updateUserFees(_userWithoutVaultShares);
+    vaultShareToken.exposed_updateUserFees(_userWithoutVaultShares);
 
     // Mint shares for another user and collect fees to change global indices
     vaultShareToken.exposed_mint(_userWithVaultShares, _mintAmount);
@@ -657,7 +661,7 @@ contract UpdateUserFees is VaultShareTokenTest {
 
     // Update user without shares - even though global index > user index, accrued should remain 0
     // because user has no balance
-    vaultShareToken.updateUserFees(_userWithoutVaultShares);
+    vaultShareToken.exposed_updateUserFees(_userWithoutVaultShares);
 
     (,, uint256 _userAccruedToken0, uint256 _userAccruedToken1) =
       vaultShareToken.userFees(_userWithoutVaultShares);
@@ -693,7 +697,7 @@ contract UpdateUserFees is VaultShareTokenTest {
     uint256 _userFeeIndex1Before = 0;
 
     // Perform the update for the user
-    vaultShareToken.updateUserFees(_user);
+    vaultShareToken.exposed_updateUserFees(_user);
 
     // Destructure the tuple again after the update
     (
@@ -730,7 +734,7 @@ contract UpdateUserFees is VaultShareTokenTest {
     vaultShareToken.exposed_updateFees(_collectedFeeToken0, _collectedFeeToken1);
 
     // Perform the update for the user
-    vaultShareToken.updateUserFees(_user);
+    vaultShareToken.exposed_updateUserFees(_user);
 
     // Destructure the tuple again after the update
     (
@@ -741,7 +745,7 @@ contract UpdateUserFees is VaultShareTokenTest {
     ) = vaultShareToken.userFees(_user);
 
     // Again perform the update for the user
-    vaultShareToken.updateUserFees(_user);
+    vaultShareToken.exposed_updateUserFees(_user);
 
     // Destructure the tuple again after the update
     (
@@ -779,7 +783,7 @@ contract UpdateUserFees is VaultShareTokenTest {
     uint256 _userFeeIndex0Before = 0;
 
     // Perform the update for the user
-    vaultShareToken.updateUserFees(_user);
+    vaultShareToken.exposed_updateUserFees(_user);
 
     // Destructure the tuple again after the update
     (
@@ -819,7 +823,7 @@ contract UpdateUserFees is VaultShareTokenTest {
     uint256 _userFeeIndex1Before = 0;
 
     // Perform the update for the user
-    vaultShareToken.updateUserFees(_user);
+    vaultShareToken.exposed_updateUserFees(_user);
 
     // Destructure the tuple again after the update
     (
@@ -871,7 +875,7 @@ contract UpdateUserFees is VaultShareTokenTest {
     uint256 _userFeeIndex1Before = 0;
 
     // Perform the update for the user - should accrue for BOTH rounds (delta from 0 to final)
-    vaultShareToken.updateUserFees(_user);
+    vaultShareToken.exposed_updateUserFees(_user);
 
     // Destructure the tuple after the update
     (
@@ -995,7 +999,7 @@ contract UpdateUserFees is VaultShareTokenTest {
     uint256 _finalGlobalFeeIndex1 = vaultShareToken.globalFeeIndex1Scaled();
 
     // Perform the update for the user - should use CURRENT balance (amount1 + amount2)
-    vaultShareToken.updateUserFees(_params.user);
+    vaultShareToken.exposed_updateUserFees(_params.user);
 
     // Get user fees after update
     (
