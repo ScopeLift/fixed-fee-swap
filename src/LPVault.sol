@@ -40,11 +40,23 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     uint128 liquidity;
   }
 
+  /// @notice Enum to distinguish callback actions.
+  enum CallbackAction {
+    Deposit,
+    Withdraw
+  }
+
   /// @notice Struct for passing deposit callback data.
   struct DepositCallbackData {
     address sender;
     uint256 amount0Max;
     uint256 amount1Max;
+  }
+
+  /// @notice Struct for passing withdraw callback data.
+  struct WithdrawCallbackData {
+    address receiver;
+    uint128[] liquidityToRemove;
   }
 
   /// @notice Total weight must equal 10,000 BIPs (100%).
@@ -77,6 +89,9 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   /// @notice Thrown when the total liquidity is zero.
   error LPVault__ZeroLiquidity();
 
+  /// @notice Thrown when attempting to withdraw zero shares.
+  error LPVault__ZeroShares();
+
   /// @notice Thrown when the callback is called by a non-pool manager.
   error LPVault__OnlyPoolManager();
 
@@ -95,6 +110,20 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   /// @param amount0 The amount of token0 deposited.
   /// @param amount1 The amount of token1 deposited.
   event Deposited(address indexed depositor, uint256 shares, uint256 amount0, uint256 amount1);
+
+  /// @notice Emitted when a withdrawal is made.
+  /// @param withdrawer The address that burned shares.
+  /// @param receiver The address that received the tokens.
+  /// @param shares The amount of vault shares burned.
+  /// @param amount0 The amount of token0 withdrawn.
+  /// @param amount1 The amount of token1 withdrawn.
+  event Withdraw(
+    address indexed withdrawer,
+    address indexed receiver,
+    uint256 shares,
+    uint256 amount0,
+    uint256 amount1
+  );
 
   /// @notice Creates a new LP Vault with fixed positions.
   /// @param _poolManager The Uniswap v4 pool manager.
@@ -163,7 +192,12 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   {
     bytes memory _result = POOL_MANAGER.unlock(
       abi.encode(
-        DepositCallbackData({sender: msg.sender, amount0Max: _amount0Max, amount1Max: _amount1Max})
+        CallbackAction.Deposit,
+        abi.encode(
+          DepositCallbackData({
+            sender: msg.sender, amount0Max: _amount0Max, amount1Max: _amount1Max
+          })
+        )
       )
     );
 
@@ -189,11 +223,73 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     emit Deposited(msg.sender, _shares, _amount0Used, _amount1Used);
   }
 
+  /// @notice Withdraws tokens from the vault by burning shares.
+  /// @param _shares The amount of vault shares to burn.
+  /// @param _receiver The address to receive the withdrawn tokens.
+  /// @return _amount0 The amount of token0 received.
+  /// @return _amount1 The amount of token1 received.
+  function withdraw(uint256 _shares, address _receiver)
+    external
+    virtual
+    returns (uint256 _amount0, uint256 _amount1)
+  {
+    if (_shares == 0) revert LPVault__ZeroShares();
+
+    // Calculate liquidity to remove from each position proportionally.
+    uint128[] memory _liquidityToRemove = new uint128[](positions.length);
+
+    // Calculate liquidity to remove from each position.
+    // Position 0 uses shares directly (1:1 mapping), while other positions
+    // are calculated proportionally based on their liquidity relative to total supply.
+    for (uint256 _i = 0; _i < positions.length; _i++) {
+      if (_i == 0) {
+        _liquidityToRemove[0] = uint128(_shares);
+        continue;
+      }
+      _liquidityToRemove[_i] = uint128((_shares * positions[_i].liquidity) / totalSupply());
+    }
+
+    // Burn shares before making external calls (reentrancy protection).
+    _burn(msg.sender, _shares);
+
+    bytes memory _result = POOL_MANAGER.unlock(
+      abi.encode(
+        CallbackAction.Withdraw,
+        abi.encode(
+          WithdrawCallbackData({receiver: _receiver, liquidityToRemove: _liquidityToRemove})
+        )
+      )
+    );
+
+    (_amount0, _amount1) = abi.decode(_result, (uint256, uint256));
+
+    // Update per-position liquidity after successful liquidity removal.
+    for (uint256 _i = 0; _i < positions.length; _i++) {
+      positions[_i].liquidity -= _liquidityToRemove[_i];
+    }
+
+    emit Withdraw(msg.sender, _receiver, _shares, _amount0, _amount1);
+  }
+
   /// @inheritdoc IUnlockCallback
   function unlockCallback(bytes calldata _data) external virtual returns (bytes memory) {
     if (msg.sender != address(POOL_MANAGER)) revert LPVault__OnlyPoolManager();
 
-    DepositCallbackData memory _callbackData = abi.decode(_data, (DepositCallbackData));
+    (CallbackAction _action, bytes memory _actionData) = abi.decode(_data, (CallbackAction, bytes));
+
+    if (_action == CallbackAction.Deposit) return _handleDepositCallback(_actionData);
+    return _handleWithdrawCallback(_actionData);
+  }
+
+  /// @notice Handles the deposit callback logic.
+  /// @param _actionData The encoded deposit callback data.
+  /// @return The encoded result containing liquidity per position and amounts used.
+  function _handleDepositCallback(bytes memory _actionData)
+    internal
+    virtual
+    returns (bytes memory)
+  {
+    DepositCallbackData memory _callbackData = abi.decode(_actionData, (DepositCallbackData));
 
     (uint128[] memory _liquidityPerPosition, int256 _totalDelta0, int256 _totalDelta1) =
       _addLiquidityToPositions(_callbackData.amount0Max, _callbackData.amount1Max);
@@ -202,6 +298,25 @@ contract LPVault is VaultShareToken, IUnlockCallback {
       _settleDeltas(_totalDelta0, _totalDelta1, _callbackData.sender);
 
     return abi.encode(_liquidityPerPosition, _amount0Used, _amount1Used);
+  }
+
+  /// @notice Handles the withdraw callback logic.
+  /// @param _actionData The encoded withdraw callback data.
+  /// @return The encoded result containing amounts received.
+  function _handleWithdrawCallback(bytes memory _actionData)
+    internal
+    virtual
+    returns (bytes memory)
+  {
+    WithdrawCallbackData memory _callbackData = abi.decode(_actionData, (WithdrawCallbackData));
+
+    (int256 _totalDelta0, int256 _totalDelta1) =
+      _removeLiquidityFromPositions(_callbackData.liquidityToRemove);
+
+    (uint256 _amount0Received, uint256 _amount1Received) =
+      _settleWithdrawDeltas(_totalDelta0, _totalDelta1, _callbackData.receiver);
+
+    return abi.encode(_amount0Received, _amount1Received);
   }
 
   /// @notice Adds liquidity to all positions based on the provided token amounts.
@@ -301,5 +416,60 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     POOL_MANAGER.sync(_currency);
     IERC20(Currency.unwrap(_currency)).safeTransferFrom(_payer, address(POOL_MANAGER), _amount);
     POOL_MANAGER.settle();
+  }
+
+  /// @notice Removes liquidity from all positions based on the provided amounts.
+  /// @param _liquidityToRemove Array of liquidity to remove from each position.
+  /// @return _totalDelta0 The total delta for token0 (positive = pool owes us).
+  /// @return _totalDelta1 The total delta for token1 (positive = pool owes us).
+  function _removeLiquidityFromPositions(uint128[] memory _liquidityToRemove)
+    internal
+    virtual
+    returns (int256 _totalDelta0, int256 _totalDelta1)
+  {
+    for (uint256 _i = 0; _i < positions.length; _i++) {
+      uint128 _liquidity = _liquidityToRemove[_i];
+
+      if (_liquidity == 0) continue;
+
+      LiquidityPosition memory _position = positions[_i];
+
+      (BalanceDelta _delta,) = POOL_MANAGER.modifyLiquidity(
+        targetPoolKey,
+        ModifyLiquidityParams({
+          tickLower: _position.tickLower,
+          tickUpper: _position.tickUpper,
+          liquidityDelta: -int256(uint256(_liquidity)),
+          salt: bytes32(0)
+        }),
+        ""
+      );
+
+      _totalDelta0 += _delta.amount0();
+      _totalDelta1 += _delta.amount1();
+    }
+  }
+
+  /// @notice Settles token deltas for withdrawals with the pool manager.
+  /// @dev Positive deltas mean pool owes us tokens (we receive them).
+  /// @param _delta0 The delta for token0.
+  /// @param _delta1 The delta for token1.
+  /// @param _receiver The address to send tokens to.
+  /// @return _amount0Received The amount of token0 received.
+  /// @return _amount1Received The amount of token1 received.
+  function _settleWithdrawDeltas(int256 _delta0, int256 _delta1, address _receiver)
+    internal
+    virtual
+    returns (uint256 _amount0Received, uint256 _amount1Received)
+  {
+    // Take tokens owed to us by the pool (positive delta).
+    if (_delta0 > 0) {
+      _amount0Received = uint256(_delta0);
+      POOL_MANAGER.take(targetPoolKey.currency0, _receiver, _amount0Received);
+    }
+    if (_delta1 > 0) {
+      _amount1Received = uint256(_delta1);
+      POOL_MANAGER.take(targetPoolKey.currency1, _receiver, _amount1Received);
+    }
   }
 }

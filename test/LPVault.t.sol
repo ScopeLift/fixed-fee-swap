@@ -82,6 +82,11 @@ contract LPVaultTest is Test, Deployers {
     if (_token0 > _token1) (_token0, _token1) = (_token1, _token0);
     return (_token0, _token1);
   }
+
+  /// @dev Assumes address is safe for use as depositor or receiver in tests.
+  function _assumeSafeAddress(address _addr) internal view {
+    vm.assume(_addr != address(0) && _addr != address(manager) && _addr != address(vault));
+  }
 }
 
 contract Constructor is LPVaultTest {
@@ -442,5 +447,184 @@ contract Deposit is LPVaultTest {
     vm.prank(_caller);
     vm.expectRevert(LPVault.LPVault__OnlyPoolManager.selector);
     vault.unlockCallback(abi.encode(_callbackData));
+  }
+}
+
+contract Withdraw is LPVaultTest {
+  function _setupDepositor(address _depositor) internal {
+    deal(Currency.unwrap(currency0), _depositor, 1e18 ether);
+    deal(Currency.unwrap(currency1), _depositor, 1e18 ether);
+
+    vm.startPrank(_depositor);
+    MockERC20(Currency.unwrap(currency0)).approve(address(vault), type(uint256).max);
+    MockERC20(Currency.unwrap(currency1)).approve(address(vault), type(uint256).max);
+    vm.stopPrank();
+  }
+
+  function _deposit(address _depositor, uint256 _amount0, uint256 _amount1)
+    internal
+    returns (uint256 _shares, uint256 _amount0Used, uint256 _amount1Used)
+  {
+    _setupDepositor(_depositor);
+    _amount0 = bound(_amount0, 1e6, 1e18);
+    _amount1 = bound(_amount1, 1e6, 1e18);
+
+    vm.prank(_depositor);
+    (_shares, _amount0Used, _amount1Used) = vault.deposit(_amount0, _amount1);
+  }
+
+  function testFuzz_WithdrawBurnsSharesAndTransfersTokens(
+    address _depositor,
+    uint256 _amount0,
+    uint256 _amount1,
+    address _receiver
+  ) public {
+    _assumeSafeAddress(_depositor);
+    _assumeSafeAddress(_receiver);
+    vm.assume(_depositor != _receiver);
+
+    (uint256 _shares, uint256 _amount0Deposited, uint256 _amount1Deposited) =
+      _deposit(_depositor, _amount0, _amount1);
+
+    uint256 _receiverToken0Before = MockERC20(Currency.unwrap(currency0)).balanceOf(_receiver);
+    uint256 _receiverToken1Before = MockERC20(Currency.unwrap(currency1)).balanceOf(_receiver);
+
+    // Withdraw all shares.
+    vm.prank(_depositor);
+    (uint256 _amount0Received, uint256 _amount1Received) = vault.withdraw(_shares, _receiver);
+
+    // Verify shares were burned.
+    assertEq(vault.balanceOf(_depositor), 0);
+    assertEq(vault.totalSupply(), 0);
+
+    // Verify receiver got tokens.
+    assertEq(
+      MockERC20(Currency.unwrap(currency0)).balanceOf(_receiver),
+      _receiverToken0Before + _amount0Received
+    );
+    assertEq(
+      MockERC20(Currency.unwrap(currency1)).balanceOf(_receiver),
+      _receiverToken1Before + _amount1Received
+    );
+
+    // Verify amounts received match deposited (within rounding tolerance).
+    assertApproxEqAbs(_amount0Received, _amount0Deposited, 1);
+    assertApproxEqAbs(_amount1Received, _amount1Deposited, 1);
+
+    // Verify position liquidity is zero after full withdrawal.
+    (,,, uint128 _positionLiquidity) = vault.positions(0);
+    assertEq(_positionLiquidity, 0);
+  }
+
+  function testFuzz_WithdrawEmitsEvent(
+    address _depositor,
+    uint256 _amount0,
+    uint256 _amount1,
+    address _receiver
+  ) public {
+    _assumeSafeAddress(_depositor);
+    vm.assume(_receiver != address(0));
+
+    (uint256 _shares,,) = _deposit(_depositor, _amount0, _amount1);
+
+    vm.prank(_depositor);
+    vm.expectEmit(true, true, false, false);
+    emit LPVault.Withdraw(_depositor, _receiver, _shares, 0, 0);
+    vault.withdraw(_shares, _receiver);
+  }
+
+  function testFuzz_PartialWithdraw(
+    address _depositor,
+    uint256 _amount0,
+    uint256 _amount1,
+    uint256 _withdrawPercent,
+    address _receiver
+  ) public {
+    _assumeSafeAddress(_depositor);
+    _assumeSafeAddress(_receiver);
+    _withdrawPercent = bound(_withdrawPercent, 1, 99);
+
+    (uint256 _shares,,) = _deposit(_depositor, _amount0, _amount1);
+
+    uint256 _sharesToWithdraw = (_shares * _withdrawPercent) / 100;
+    uint256 _expectedRemainingShares = _shares - _sharesToWithdraw;
+
+    uint256 _receiverToken0Before = MockERC20(Currency.unwrap(currency0)).balanceOf(_receiver);
+    uint256 _receiverToken1Before = MockERC20(Currency.unwrap(currency1)).balanceOf(_receiver);
+
+    vm.prank(_depositor);
+    (uint256 _amount0Received, uint256 _amount1Received) =
+      vault.withdraw(_sharesToWithdraw, _receiver);
+
+    assertEq(vault.balanceOf(_depositor), _expectedRemainingShares);
+    assertEq(vault.totalSupply(), _expectedRemainingShares);
+    assertEq(
+      MockERC20(Currency.unwrap(currency0)).balanceOf(_receiver),
+      _receiverToken0Before + _amount0Received
+    );
+    assertEq(
+      MockERC20(Currency.unwrap(currency1)).balanceOf(_receiver),
+      _receiverToken1Before + _amount1Received
+    );
+  }
+
+  function testFuzz_MultipleDepositsThenWithdraw(
+    address _depositor,
+    uint256 _amount0,
+    uint256 _amount1,
+    address _receiver
+  ) public {
+    _assumeSafeAddress(_depositor);
+    vm.assume(_receiver != address(0));
+
+    // First deposit.
+    (uint256 _shares1, uint256 _amount0Used1, uint256 _amount1Used1) =
+      _deposit(_depositor, _amount0, _amount1);
+
+    // Second deposit - accumulate into first deposit variables.
+    {
+      (uint256 _shares2, uint256 _amount0Used2, uint256 _amount1Used2) =
+        _deposit(_depositor, _amount0, _amount1);
+      _shares1 += _shares2;
+      _amount0Used1 += _amount0Used2;
+      _amount1Used1 += _amount1Used2;
+    }
+
+    // Withdraw all.
+    vm.prank(_depositor);
+    (uint256 _amount0Received, uint256 _amount1Received) = vault.withdraw(_shares1, _receiver);
+
+    // Verify all shares burned.
+    assertEq(vault.balanceOf(_depositor), 0);
+    assertEq(vault.totalSupply(), 0);
+
+    // Verify amounts received match total deposited (within rounding tolerance).
+    assertApproxEqAbs(_amount0Received, _amount0Used1, 2);
+    assertApproxEqAbs(_amount1Received, _amount1Used1, 2);
+  }
+
+  function testFuzz_RevertIf_ZeroShares(address _depositor, address _receiver) public {
+    _assumeSafeAddress(_depositor);
+    vm.assume(_receiver != address(0));
+
+    vm.prank(_depositor);
+    vm.expectRevert(LPVault.LPVault__ZeroShares.selector);
+    vault.withdraw(0, _receiver);
+  }
+
+  function testFuzz_RevertIf_InsufficientShares(
+    address _depositor,
+    uint256 _amount0,
+    uint256 _amount1,
+    address _receiver
+  ) public {
+    _assumeSafeAddress(_depositor);
+    vm.assume(_receiver != address(0));
+
+    (uint256 _shares,,) = _deposit(_depositor, _amount0, _amount1);
+
+    vm.prank(_depositor);
+    vm.expectRevert();
+    vault.withdraw(_shares + 1, _receiver);
   }
 }
