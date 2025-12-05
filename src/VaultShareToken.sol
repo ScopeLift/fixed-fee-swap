@@ -265,6 +265,8 @@ contract VaultShareToken is ERC20 {
   /// @param _token The address of the token to transfer.
   /// @param _to The address to transfer the tokens to.
   /// @param _amount The amount of tokens to transfer.
+  /// @dev Following Uniswap v4's convention: address(0) represents native ETH.
+  ///      See: https://github.com/Uniswap/v4-core/blob/main/src/types/Currency.sol#L37-L38
   function _transferAmount(address _token, address _to, uint256 _amount) internal {
     if (_token == address(0)) {
       (bool _success,) = payable(_to).call{value: _amount}("");
