@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
-import {PoolKey} from "v4-core/src/types/PoolKey.sol";
-import {Currency} from "v4-core/src/types/Currency.sol";
-import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
-import {IUnlockCallback} from "v4-core/src/interfaces/callback/IUnlockCallback.sol";
-import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
-import {ModifyLiquidityParams} from "v4-core/src/types/PoolOperation.sol";
-import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
-import {TickMath} from "v4-core/src/libraries/TickMath.sol";
-import {SafeCast} from "v4-core/src/libraries/SafeCast.sol";
-import {LiquidityAmounts} from "v4-periphery/src/libraries/LiquidityAmounts.sol";
+import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {PoolKey} from "v4-core/types/PoolKey.sol";
+import {Currency} from "v4-core/types/Currency.sol";
+import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
+import {IUnlockCallback} from "v4-core/interfaces/callback/IUnlockCallback.sol";
+import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
+import {ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
+import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
+import {TickMath} from "v4-core/libraries/TickMath.sol";
+import {SafeCast} from "v4-core/libraries/SafeCast.sol";
+import {LiquidityAmounts} from "v4-periphery/libraries/LiquidityAmounts.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
@@ -35,6 +35,13 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     /// @notice The weight of liquidity allocated to this position in basis points (BIPs).
     /// @dev Must be between 0 and 10,000. All position weights must sum to exactly 10,000.
     uint256 weight;
+  }
+
+  /// @notice Struct for passing deposit callback data.
+  struct DepositCallbackData {
+    address sender;
+    uint256 amount0Max;
+    uint256 amount1Max;
   }
 
   /// @notice Total weight must equal 10,000 BIPs (100%).
@@ -73,19 +80,21 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   /// @notice Thrown when the callback is called by a non-pool manager.
   error LPVault__OnlyPoolManager();
 
+  /// @notice Emitted when the pool manager is set during construction.
+  /// @param poolManager The address of the Uniswap v4 pool manager.
+  event PoolManagerSet(address indexed poolManager);
+
+  /// @notice Emitted when the vault tokens are set during construction.
+  /// @param token0 The address of token0.
+  /// @param token1 The address of token1.
+  event TokensSet(address indexed token0, address indexed token1);
+
   /// @notice Emitted when a deposit is made.
   /// @param depositor The address that deposited and received shares.
   /// @param shares The amount of vault shares minted.
   /// @param amount0 The amount of token0 deposited.
   /// @param amount1 The amount of token1 deposited.
   event Deposit(address indexed depositor, uint256 shares, uint256 amount0, uint256 amount1);
-
-  /// @notice Struct for passing deposit callback data.
-  struct DepositCallbackData {
-    address sender;
-    uint256 amount0Max;
-    uint256 amount1Max;
-  }
 
   /// @notice Creates a new LP Vault with fixed positions.
   /// @param _poolManager The Uniswap v4 pool manager.
@@ -101,9 +110,13 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     string memory _symbol
   ) VaultShareToken(_name, _symbol) {
     POOL_MANAGER = _poolManager;
+    emit PoolManagerSet(address(_poolManager));
+
     targetPoolKey = _targetPoolKey;
     TOKEN0 = Currency.unwrap(_targetPoolKey.currency0);
     TOKEN1 = Currency.unwrap(_targetPoolKey.currency1);
+    emit TokensSet(TOKEN0, TOKEN1);
+
     _initializePositions(_positions);
   }
 
@@ -128,7 +141,7 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     if (_totalWeight != TOTAL_WEIGHT) revert LPVault__InvalidLiquidityDistribution();
   }
 
-  /// @notice Deposits tokens into the vault, distributing liquidity across positions.
+  /// @notice Deposits tokens into the vault, distributing liquidity across positions by weight.
   /// @param _amount0Max The maximum amount of token0 to deposit.
   /// @param _amount1Max The maximum amount of token1 to deposit.
   /// @return _shares The amount of vault shares minted.

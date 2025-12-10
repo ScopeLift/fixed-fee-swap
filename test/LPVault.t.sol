@@ -2,19 +2,19 @@
 pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
-import {Deployers} from "v4-core/test/utils/Deployers.sol";
+import {Deployers} from "v4-core-test/utils/Deployers.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {LPVault} from "src/LPVault.sol";
-import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
-import {PoolKey} from "v4-core/src/types/PoolKey.sol";
-import {PoolId} from "v4-core/src/types/PoolId.sol";
-import {Currency} from "v4-core/src/types/Currency.sol";
-import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
-import {PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
-import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
-import {TickMath} from "v4-core/src/libraries/TickMath.sol";
-import {LiquidityAmounts} from "v4-periphery/src/libraries/LiquidityAmounts.sol";
-import {SqrtPriceMath} from "v4-core/src/libraries/SqrtPriceMath.sol";
+import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {PoolKey} from "v4-core/types/PoolKey.sol";
+import {PoolId} from "v4-core/types/PoolId.sol";
+import {Currency} from "v4-core/types/Currency.sol";
+import {IHooks} from "v4-core/interfaces/IHooks.sol";
+import {PoolIdLibrary} from "v4-core/types/PoolId.sol";
+import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
+import {TickMath} from "v4-core/libraries/TickMath.sol";
+import {LiquidityAmounts} from "v4-periphery/libraries/LiquidityAmounts.sol";
+import {SqrtPriceMath} from "v4-core/libraries/SqrtPriceMath.sol";
 
 contract LPVaultTest is Test, Deployers {
   using PoolIdLibrary for PoolKey;
@@ -204,6 +204,26 @@ contract Constructor is LPVaultTest {
     vm.expectRevert(LPVault.LPVault__InvalidTickRange.selector);
     new LPVault(manager, defaultPoolKey, _positions, DEFAULT_NAME, DEFAULT_SYMBOL);
   }
+
+  function test_EmitsPoolManagerSetEvent() public {
+    LPVault.LiquidityPosition[] memory _positions = new LPVault.LiquidityPosition[](1);
+    _positions[0] =
+      LPVault.LiquidityPosition({tickLower: -100, tickUpper: 100, weight: TOTAL_WEIGHT});
+
+    vm.expectEmit();
+    emit LPVault.PoolManagerSet(address(manager));
+    new LPVault(manager, defaultPoolKey, _positions, DEFAULT_NAME, DEFAULT_SYMBOL);
+  }
+
+  function test_EmitsTokensSetEvent() public {
+    LPVault.LiquidityPosition[] memory _positions = new LPVault.LiquidityPosition[](1);
+    _positions[0] =
+      LPVault.LiquidityPosition({tickLower: -100, tickUpper: 100, weight: TOTAL_WEIGHT});
+
+    vm.expectEmit();
+    emit LPVault.TokensSet(Currency.unwrap(currency0), Currency.unwrap(currency1));
+    new LPVault(manager, defaultPoolKey, _positions, DEFAULT_NAME, DEFAULT_SYMBOL);
+  }
 }
 
 contract Deposit is LPVaultTest {
@@ -299,9 +319,12 @@ contract Deposit is LPVaultTest {
     _amount0 = bound(_amount0, 1, 1e13 ether);
     _amount1 = bound(_amount1, 1, 1e13 ether);
 
+    (uint128 _expectedShares, uint256 _expectedAmount0, uint256 _expectedAmount1) =
+      _calculateExpectedDeposit(_amount0, _amount1);
+
     vm.prank(depositor);
-    vm.expectEmit(true, false, false, false);
-    emit LPVault.Deposit(depositor, 0, 0, 0);
+    vm.expectEmit();
+    emit LPVault.Deposit(depositor, _expectedShares, _expectedAmount0, _expectedAmount1);
     vault.deposit(_amount0, _amount1);
   }
 
