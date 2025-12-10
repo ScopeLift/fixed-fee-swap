@@ -27,6 +27,7 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   using SafeERC20 for IERC20;
 
   /// @notice Structure for liquidity position configuration.
+  /// @dev Packed into a single storage slot (24 bytes total).
   struct LiquidityPosition {
     /// @notice The lower tick boundary for this position.
     int24 tickLower;
@@ -34,7 +35,9 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     int24 tickUpper;
     /// @notice The weight of liquidity allocated to this position in basis points (BIPs).
     /// @dev Must be between 0 and 10,000. All position weights must sum to exactly 10,000.
-    uint256 weight;
+    uint16 weight;
+    /// @notice The current liquidity held in this position.
+    uint128 liquidity;
   }
 
   /// @notice Struct for passing deposit callback data.
@@ -45,7 +48,7 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   }
 
   /// @notice Total weight must equal 10,000 BIPs (100%).
-  uint256 public constant TOTAL_WEIGHT = 10_000;
+  uint16 public constant TOTAL_WEIGHT = 10_000;
 
   /// @notice The Uniswap v4 PoolManager.
   IPoolManager public immutable POOL_MANAGER;
@@ -61,9 +64,6 @@ contract LPVault is VaultShareToken, IUnlockCallback {
 
   /// @notice The predefined liquidity positions for this vault.
   LiquidityPosition[] public positions;
-
-  /// @notice Liquidity held in each position (indexed same as positions array).
-  uint128[] public positionLiquidity;
 
   /// @notice Thrown when the sum of position weights doesn't equal TOTAL_WEIGHT (10,000 BIPs).
   error LPVault__InvalidLiquidityDistribution();
@@ -134,7 +134,6 @@ contract LPVault is VaultShareToken, IUnlockCallback {
         revert LPVault__InvalidTickRange();
       }
       positions.push(_positions[_i]);
-      positionLiquidity.push(0);
       _totalWeight += _positions[_i].weight;
     }
 
@@ -171,7 +170,7 @@ contract LPVault is VaultShareToken, IUnlockCallback {
 
     // Update per-position liquidity.
     for (uint256 _i = 0; _i < _liquidityPerPosition.length; _i++) {
-      positionLiquidity[_i] += _liquidityPerPosition[_i];
+      positions[_i].liquidity += _liquidityPerPosition[_i];
     }
 
     _mint(msg.sender, _shares);

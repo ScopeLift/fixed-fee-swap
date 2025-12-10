@@ -23,7 +23,7 @@ contract LPVaultTest is Test, Deployers {
   int24 constant MIN_TICK = -887_272;
   int24 constant MAX_TICK = 887_272;
 
-  uint256 constant TOTAL_WEIGHT = 10_000;
+  uint16 constant TOTAL_WEIGHT = 10_000;
   uint24 constant DEFAULT_FEE = 3000;
   int24 constant DEFAULT_TICK_SPACING = 60;
 
@@ -54,7 +54,9 @@ contract LPVaultTest is Test, Deployers {
     manager.initialize(defaultPoolKey, SQRT_PRICE_1_1);
 
     defaultPositions.push(
-      LPVault.LiquidityPosition({tickLower: -120, tickUpper: 120, weight: TOTAL_WEIGHT})
+      LPVault.LiquidityPosition({
+        tickLower: -120, tickUpper: 120, weight: TOTAL_WEIGHT, liquidity: 0
+      })
     );
 
     vault = new LPVault(manager, defaultPoolKey, defaultPositions, DEFAULT_NAME, DEFAULT_SYMBOL);
@@ -84,7 +86,7 @@ contract Constructor is LPVaultTest {
 
     LPVault.LiquidityPosition[] memory _positions = new LPVault.LiquidityPosition[](1);
     _positions[0] = LPVault.LiquidityPosition({
-      tickLower: _tickLower, tickUpper: _tickUpper, weight: TOTAL_WEIGHT
+      tickLower: _tickLower, tickUpper: _tickUpper, weight: TOTAL_WEIGHT, liquidity: 0
     });
 
     LPVault _newVault =
@@ -94,28 +96,31 @@ contract Constructor is LPVaultTest {
     assertEq(_newVault.TOKEN0(), Currency.unwrap(currency0));
     assertEq(_newVault.TOKEN1(), Currency.unwrap(currency1));
 
-    (int24 storedTickLower, int24 storedTickUpper, uint256 storedWeight) = _newVault.positions(0);
+    (int24 storedTickLower, int24 storedTickUpper, uint16 storedWeight,) = _newVault.positions(0);
     assertEq(storedTickLower, _tickLower);
     assertEq(storedTickUpper, _tickUpper);
     assertEq(storedWeight, TOTAL_WEIGHT);
   }
 
-  function testFuzz_MultiplePositionsWithWeights(uint256 _weight1, uint256 _weight2) public {
-    _weight1 = bound(_weight1, 1, 9998);
-    _weight2 = bound(_weight2, 1, 9999 - _weight1);
-    uint256 _weight3 = TOTAL_WEIGHT - _weight1 - _weight2;
+  function testFuzz_MultiplePositionsWithWeights(uint16 _weight1, uint16 _weight2) public {
+    _weight1 = uint16(bound(_weight1, 1, 9998));
+    _weight2 = uint16(bound(_weight2, 1, 9999 - _weight1));
+    uint16 _weight3 = TOTAL_WEIGHT - _weight1 - _weight2;
 
     LPVault.LiquidityPosition[] memory _positions = new LPVault.LiquidityPosition[](3);
-    _positions[0] = LPVault.LiquidityPosition({tickLower: -300, tickUpper: -200, weight: _weight1});
-    _positions[1] = LPVault.LiquidityPosition({tickLower: -200, tickUpper: -100, weight: _weight2});
-    _positions[2] = LPVault.LiquidityPosition({tickLower: -100, tickUpper: 0, weight: _weight3});
+    _positions[0] =
+      LPVault.LiquidityPosition({tickLower: -300, tickUpper: -200, weight: _weight1, liquidity: 0});
+    _positions[1] =
+      LPVault.LiquidityPosition({tickLower: -200, tickUpper: -100, weight: _weight2, liquidity: 0});
+    _positions[2] =
+      LPVault.LiquidityPosition({tickLower: -100, tickUpper: 0, weight: _weight3, liquidity: 0});
 
     LPVault _newVault =
       new LPVault(manager, defaultPoolKey, _positions, DEFAULT_NAME, DEFAULT_SYMBOL);
 
-    (,, uint256 position0Weight) = _newVault.positions(0);
-    (,, uint256 position1Weight) = _newVault.positions(1);
-    (,, uint256 position2Weight) = _newVault.positions(2);
+    (,, uint16 position0Weight,) = _newVault.positions(0);
+    (,, uint16 position1Weight,) = _newVault.positions(1);
+    (,, uint16 position2Weight,) = _newVault.positions(2);
     assertEq(position0Weight, _weight1);
     assertEq(position1Weight, _weight2);
     assertEq(position2Weight, _weight3);
@@ -140,8 +145,9 @@ contract Constructor is LPVaultTest {
     });
 
     LPVault.LiquidityPosition[] memory _positions = new LPVault.LiquidityPosition[](1);
-    _positions[0] =
-      LPVault.LiquidityPosition({tickLower: -100, tickUpper: 100, weight: TOTAL_WEIGHT});
+    _positions[0] = LPVault.LiquidityPosition({
+      tickLower: -100, tickUpper: 100, weight: TOTAL_WEIGHT, liquidity: 0
+    });
 
     LPVault _newVault = new LPVault(manager, _poolKey, _positions, DEFAULT_NAME, DEFAULT_SYMBOL);
 
@@ -167,25 +173,28 @@ contract Constructor is LPVaultTest {
     new LPVault(manager, defaultPoolKey, _positions, DEFAULT_NAME, DEFAULT_SYMBOL);
   }
 
-  function testFuzz_RevertIf_WeightDoesNotSumToFullWeight(uint256 _weight) public {
+  function testFuzz_RevertIf_WeightDoesNotSumToFullWeight(uint16 _weight) public {
     vm.assume(_weight != TOTAL_WEIGHT);
 
     LPVault.LiquidityPosition[] memory _positions = new LPVault.LiquidityPosition[](1);
-    _positions[0] = LPVault.LiquidityPosition({tickLower: -100, tickUpper: 100, weight: _weight});
+    _positions[0] =
+      LPVault.LiquidityPosition({tickLower: -100, tickUpper: 100, weight: _weight, liquidity: 0});
 
     vm.expectRevert(LPVault.LPVault__InvalidLiquidityDistribution.selector);
     new LPVault(manager, defaultPoolKey, _positions, DEFAULT_NAME, DEFAULT_SYMBOL);
   }
 
-  function testFuzz_RevertIf_MultiplePositionsWeightMismatch(uint256 _weight1, uint256 _weight2)
+  function testFuzz_RevertIf_MultiplePositionsWeightMismatch(uint16 _weight1, uint16 _weight2)
     public
   {
-    _weight1 = bound(_weight1, 0, 9999);
-    _weight2 = bound(_weight2, 0, 9999 - _weight1);
+    _weight1 = uint16(bound(_weight1, 0, 9999));
+    _weight2 = uint16(bound(_weight2, 0, 9999 - _weight1));
 
     LPVault.LiquidityPosition[] memory _positions = new LPVault.LiquidityPosition[](2);
-    _positions[0] = LPVault.LiquidityPosition({tickLower: -200, tickUpper: -100, weight: _weight1});
-    _positions[1] = LPVault.LiquidityPosition({tickLower: -100, tickUpper: 0, weight: _weight2});
+    _positions[0] =
+      LPVault.LiquidityPosition({tickLower: -200, tickUpper: -100, weight: _weight1, liquidity: 0});
+    _positions[1] =
+      LPVault.LiquidityPosition({tickLower: -100, tickUpper: 0, weight: _weight2, liquidity: 0});
 
     vm.expectRevert(LPVault.LPVault__InvalidLiquidityDistribution.selector);
     new LPVault(manager, defaultPoolKey, _positions, DEFAULT_NAME, DEFAULT_SYMBOL);
@@ -198,7 +207,7 @@ contract Constructor is LPVaultTest {
 
     LPVault.LiquidityPosition[] memory _positions = new LPVault.LiquidityPosition[](1);
     _positions[0] = LPVault.LiquidityPosition({
-      tickLower: _tickLower, tickUpper: _tickUpper, weight: TOTAL_WEIGHT
+      tickLower: _tickLower, tickUpper: _tickUpper, weight: TOTAL_WEIGHT, liquidity: 0
     });
 
     vm.expectRevert(LPVault.LPVault__InvalidTickRange.selector);
@@ -207,8 +216,9 @@ contract Constructor is LPVaultTest {
 
   function test_EmitsPoolManagerSetEvent() public {
     LPVault.LiquidityPosition[] memory _positions = new LPVault.LiquidityPosition[](1);
-    _positions[0] =
-      LPVault.LiquidityPosition({tickLower: -100, tickUpper: 100, weight: TOTAL_WEIGHT});
+    _positions[0] = LPVault.LiquidityPosition({
+      tickLower: -100, tickUpper: 100, weight: TOTAL_WEIGHT, liquidity: 0
+    });
 
     vm.expectEmit();
     emit LPVault.PoolManagerSet(address(manager));
@@ -217,8 +227,9 @@ contract Constructor is LPVaultTest {
 
   function test_EmitsTokensSetEvent() public {
     LPVault.LiquidityPosition[] memory _positions = new LPVault.LiquidityPosition[](1);
-    _positions[0] =
-      LPVault.LiquidityPosition({tickLower: -100, tickUpper: 100, weight: TOTAL_WEIGHT});
+    _positions[0] = LPVault.LiquidityPosition({
+      tickLower: -100, tickUpper: 100, weight: TOTAL_WEIGHT, liquidity: 0
+    });
 
     vm.expectEmit();
     emit LPVault.TokensSet(Currency.unwrap(currency0), Currency.unwrap(currency1));
