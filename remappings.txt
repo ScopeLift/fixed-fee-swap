@@ -1,4 +1,5 @@
 v4-core/=lib/v4-periphery/lib/v4-core/src/
+v4-core-test/=lib/v4-periphery/lib/v4-core/test/
 v4-periphery/=lib/v4-periphery/
 forge-std/=lib/forge-std/src/
 solmate/=lib/v4-periphery/lib/v4-core/lib/solmate/

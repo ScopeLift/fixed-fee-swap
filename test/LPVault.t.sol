@@ -2,7 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
-import {Deployers} from "lib/v4-periphery/lib/v4-core/test/utils/Deployers.sol";
+import {Deployers} from "v4-core-test/utils/Deployers.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {LPVault} from "src/LPVault.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
@@ -228,6 +228,16 @@ contract Constructor is LPVaultTest {
 
     vm.expectEmit();
     emit LPVault.PoolManagerSet(address(manager));
+    new LPVault(manager, defaultPoolKey, _positions, DEFAULT_NAME, DEFAULT_SYMBOL);
+  }
+
+  function test_EmitsTokensSetEvent() public {
+    LPVault.LiquidityPosition[] memory _positions = new LPVault.LiquidityPosition[](1);
+    _positions[0] =
+      LPVault.LiquidityPosition({tickLower: -100, tickUpper: 100, weight: BIPS, liquidity: 0});
+
+    vm.expectEmit();
+    emit LPVault.TokensSet(Currency.unwrap(currency0), Currency.unwrap(currency1));
     new LPVault(manager, defaultPoolKey, _positions, DEFAULT_NAME, DEFAULT_SYMBOL);
   }
 }
