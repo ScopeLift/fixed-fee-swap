@@ -62,8 +62,8 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   /// @notice The predefined liquidity positions for this vault.
   LiquidityPosition[] public positions;
 
-  /// @notice The total liquidity managed by this vault across all positions.
-  uint128 public totalLiquidity;
+  /// @notice Liquidity held in each position (indexed same as positions array).
+  uint128[] public positionLiquidity;
 
   /// @notice Thrown when the sum of position weights doesn't equal TOTAL_WEIGHT (10,000 BIPs).
   error LPVault__InvalidLiquidityDistribution();
@@ -134,6 +134,7 @@ contract LPVault is VaultShareToken, IUnlockCallback {
         revert LPVault__InvalidTickRange();
       }
       positions.push(_positions[_i]);
+      positionLiquidity.push(0);
       _totalWeight += _positions[_i].weight;
     }
 
@@ -158,21 +159,21 @@ contract LPVault is VaultShareToken, IUnlockCallback {
       )
     );
 
-    (uint128 _totalLiquidity, uint256 _amount0, uint256 _amount1) =
-      abi.decode(_result, (uint128, uint256, uint256));
+    (uint128[] memory _liquidityPerPosition, uint256 _amount0, uint256 _amount1) =
+      abi.decode(_result, (uint128[], uint256, uint256));
 
-    if (_totalLiquidity == 0) revert LPVault__ZeroLiquidity();
+    uint128 _newLiquidity = _liquidityPerPosition[0];
+    if (_newLiquidity == 0) revert LPVault__ZeroLiquidity();
 
-    // Calculate shares to mint.
-    uint256 _currentSupply = totalSupply();
-    if (_currentSupply == 0) {
-      _shares = _totalLiquidity;
-    } else {
-      // shares = (newLiquidity * totalSupply) / existingTotalLiquidity.
-      _shares = (uint256(_totalLiquidity) * _currentSupply) / totalLiquidity;
+    // Use the first position's liquidity as the share amount since it serves as the reference
+    // for proportional distribution across all positions based on their weights.
+    _shares = uint256(_newLiquidity);
+
+    // Update per-position liquidity.
+    for (uint256 _i = 0; _i < _liquidityPerPosition.length; _i++) {
+      positionLiquidity[_i] += _liquidityPerPosition[_i];
     }
 
-    totalLiquidity += _totalLiquidity;
     _mintShares(msg.sender, _shares);
 
     _amount0Used = _amount0;
@@ -186,34 +187,38 @@ contract LPVault is VaultShareToken, IUnlockCallback {
 
     DepositCallbackData memory _callbackData = abi.decode(_data, (DepositCallbackData));
 
-    (uint128 _totalLiquidity, int256 _totalDelta0, int256 _totalDelta1) =
+    (uint128[] memory _liquidityPerPosition, int256 _totalDelta0, int256 _totalDelta1) =
       _addLiquidityToPositions(_callbackData.amount0Max, _callbackData.amount1Max);
 
     (uint256 _amount0Used, uint256 _amount1Used) =
       _settleDeltas(_totalDelta0, _totalDelta1, _callbackData.sender);
 
-    return abi.encode(_totalLiquidity, _amount0Used, _amount1Used);
+    return abi.encode(_liquidityPerPosition, _amount0Used, _amount1Used);
   }
 
   /// @notice Adds liquidity to all positions based on the provided token amounts.
   /// @param _amount0Max The maximum amount of token0 to distribute across positions.
   /// @param _amount1Max The maximum amount of token1 to distribute across positions.
-  /// @return _totalLiquidity The total liquidity added across all positions.
+  /// @return _liquidityPerPosition Array of liquidity added to each position.
   /// @return _totalDelta0 The total delta for token0 (negative = owed to pool).
   /// @return _totalDelta1 The total delta for token1 (negative = owed to pool).
   function _addLiquidityToPositions(uint256 _amount0Max, uint256 _amount1Max)
     internal
     virtual
-    returns (uint128 _totalLiquidity, int256 _totalDelta0, int256 _totalDelta1)
+    returns (uint128[] memory _liquidityPerPosition, int256 _totalDelta0, int256 _totalDelta1)
   {
     PoolId _poolId = targetPoolKey.toId();
     (uint160 _sqrtPriceX96,,,) = POOL_MANAGER.getSlot0(_poolId);
+
+    _liquidityPerPosition = new uint128[](positions.length);
 
     for (uint256 _i = 0; _i < positions.length; _i++) {
       LiquidityPosition memory _position = positions[_i];
 
       uint128 _liquidity =
         _calculateLiquidityForPosition(_position, _sqrtPriceX96, _amount0Max, _amount1Max);
+
+      _liquidityPerPosition[_i] = _liquidity;
 
       if (_liquidity == 0) continue;
 
@@ -228,7 +233,6 @@ contract LPVault is VaultShareToken, IUnlockCallback {
         ""
       );
 
-      _totalLiquidity += _liquidity;
       _totalDelta0 += _delta.amount0();
       _totalDelta1 += _delta.amount1();
     }
