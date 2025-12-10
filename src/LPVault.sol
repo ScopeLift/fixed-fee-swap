@@ -232,6 +232,8 @@ contract LPVault is VaultShareToken, IUnlockCallback {
 
       _liquidityPerPosition[_i] = _liquidity;
 
+      if (_liquidity == 0) continue;
+
       (BalanceDelta _delta,) = POOL_MANAGER.modifyLiquidity(
         targetPoolKey,
         ModifyLiquidityParams({
