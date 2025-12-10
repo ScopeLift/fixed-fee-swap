@@ -174,7 +174,7 @@ contract LPVault is VaultShareToken, IUnlockCallback {
       positionLiquidity[_i] += _liquidityPerPosition[_i];
     }
 
-    _mintShares(msg.sender, _shares);
+    _mint(msg.sender, _shares);
 
     _amount0Used = _amount0;
     _amount1Used = _amount1;
