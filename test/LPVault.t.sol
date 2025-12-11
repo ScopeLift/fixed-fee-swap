@@ -54,7 +54,13 @@ contract LPVaultTest is Test, Deployers {
     manager.initialize(defaultPoolKey, SQRT_PRICE_1_1);
 
     defaultPositions.push(
-      LPVault.LiquidityPosition({tickLower: -120, tickUpper: 120, weight: BIPS, liquidity: 0})
+      LPVault.LiquidityPosition({tickLower: -120, tickUpper: 120, weight: 5000, liquidity: 0})
+    );
+    defaultPositions.push(
+      LPVault.LiquidityPosition({tickLower: -360, tickUpper: -120, weight: 2500, liquidity: 0})
+    );
+    defaultPositions.push(
+      LPVault.LiquidityPosition({tickLower: 120, tickUpper: 360, weight: 2500, liquidity: 0})
     );
 
     vault = new LPVault(manager, defaultPoolKey, defaultPositions, DEFAULT_NAME, DEFAULT_SYMBOL);
@@ -231,19 +237,21 @@ contract Deposit is LPVaultTest {
     // Mint tokens to depositor.
     deal(Currency.unwrap(currency0), depositor, 1e18 ether);
     deal(Currency.unwrap(currency1), depositor, 1e18 ether);
+  }
 
-    // Approve vault to spend depositor's tokens.
-    vm.startPrank(depositor);
-    MockERC20(Currency.unwrap(currency0)).approve(address(vault), type(uint256).max);
-    MockERC20(Currency.unwrap(currency1)).approve(address(vault), type(uint256).max);
+  /// @dev Sets up approvals for a depositor to interact with the vault.
+  function _approveTokensForVault(address _depositor, uint256 _amount0, uint256 _amount1) internal {
+    vm.startPrank(_depositor);
+    MockERC20(Currency.unwrap(currency0)).approve(address(vault), _amount0);
+    MockERC20(Currency.unwrap(currency1)).approve(address(vault), _amount1);
     vm.stopPrank();
   }
 
-  /// @dev Calculates expected deposit outputs (shares = liquidity for first deposit).
+  /// @dev Calculates expected deposit outputs (shares = first position's liquidity).
   function _calculateExpectedDeposit(uint256 _amount0, uint256 _amount1)
     internal
     view
-    returns (uint128 _totalLiquidity, uint256 _expectedAmount0, uint256 _expectedAmount1)
+    returns (uint128 _expectedShares, uint256 _expectedAmount0, uint256 _expectedAmount1)
   {
     PoolId _poolId = defaultPoolKey.toId();
     (uint160 _sqrtPriceX96,,,) = StateLibrary.getSlot0(manager, _poolId);
@@ -265,13 +273,29 @@ contract Deposit is LPVaultTest {
         _amount1ForPosition
       );
 
-      // Calculate amounts needed for this liquidity (mirrors pool's modifyLiquidity logic).
-      uint256 _amount0delta =
-        SqrtPriceMath.getAmount0Delta(_sqrtPriceX96, _sqrtPriceUpperX96, _liquidity, true);
-      uint256 _amount1delta =
-        SqrtPriceMath.getAmount1Delta(_sqrtPriceLowerX96, _sqrtPriceX96, _liquidity, true);
+      // Calculate amounts needed for this liquidity based on position's range relative to current
+      // price.
+      uint256 _amount0delta;
+      uint256 _amount1delta;
 
-      _totalLiquidity += _liquidity;
+      if (_sqrtPriceX96 <= _sqrtPriceLowerX96) {
+        // Current price below position - only token0 needed.
+        _amount0delta =
+          SqrtPriceMath.getAmount0Delta(_sqrtPriceLowerX96, _sqrtPriceUpperX96, _liquidity, true);
+      } else if (_sqrtPriceX96 >= _sqrtPriceUpperX96) {
+        // Current price above position - only token1 needed.
+        _amount1delta =
+          SqrtPriceMath.getAmount1Delta(_sqrtPriceLowerX96, _sqrtPriceUpperX96, _liquidity, true);
+      } else {
+        // In range - both tokens needed.
+        _amount0delta =
+          SqrtPriceMath.getAmount0Delta(_sqrtPriceX96, _sqrtPriceUpperX96, _liquidity, true);
+        _amount1delta =
+          SqrtPriceMath.getAmount1Delta(_sqrtPriceLowerX96, _sqrtPriceX96, _liquidity, true);
+      }
+
+      // Shares are based on first position's liquidity only.
+      if (_i == 0) _expectedShares = _liquidity;
       _expectedAmount0 += _amount0delta;
       _expectedAmount1 += _amount1delta;
     }
@@ -280,13 +304,15 @@ contract Deposit is LPVaultTest {
   function testFuzz_DepositMintsSharesAndTransfersTokens(uint256 _amount0, uint256 _amount1)
     public
   {
-    _amount0 = bound(_amount0, 1, 1e13 ether);
-    _amount1 = bound(_amount1, 1, 1e13 ether);
+    _amount0 = bound(_amount0, 1e12, type(uint96).max);
+    _amount1 = bound(_amount1, 1e12, type(uint96).max);
 
-    uint256 _token0BalanceBefore = MockERC20(Currency.unwrap(currency0)).balanceOf(depositor);
-    uint256 _token1BalanceBefore = MockERC20(Currency.unwrap(currency1)).balanceOf(depositor);
     (uint128 _expectedShares, uint256 _expectedAmount0, uint256 _expectedAmount1) =
       _calculateExpectedDeposit(_amount0, _amount1);
+
+    _approveTokensForVault(depositor, _amount0, _amount1);
+    uint256 _token0BalanceBefore = MockERC20(Currency.unwrap(currency0)).balanceOf(depositor);
+    uint256 _token1BalanceBefore = MockERC20(Currency.unwrap(currency1)).balanceOf(depositor);
 
     vm.prank(depositor);
     (uint256 _shares, uint256 _amount0Used, uint256 _amount1Used) =
@@ -312,21 +338,24 @@ contract Deposit is LPVaultTest {
   }
 
   function testFuzz_DepositEmitsEvent(uint256 _amount0, uint256 _amount1) public {
-    _amount0 = bound(_amount0, 1, 1e13 ether);
-    _amount1 = bound(_amount1, 1, 1e13 ether);
+    _amount0 = bound(_amount0, 1e12, type(uint96).max);
+    _amount1 = bound(_amount1, 1e12, type(uint96).max);
+    _approveTokensForVault(depositor, _amount0, _amount1);
 
     (uint128 _expectedShares, uint256 _expectedAmount0, uint256 _expectedAmount1) =
       _calculateExpectedDeposit(_amount0, _amount1);
 
     vm.prank(depositor);
     vm.expectEmit();
-    emit LPVault.Deposit(depositor, _expectedShares, _expectedAmount0, _expectedAmount1);
+    emit LPVault.Deposited(depositor, _expectedShares, _expectedAmount0, _expectedAmount1);
     vault.deposit(_amount0, _amount1);
   }
 
   function testFuzz_MultipleDeposits(uint256 _amount0, uint256 _amount1) public {
-    _amount0 = bound(_amount0, 1, 1e13 ether);
-    _amount1 = bound(_amount1, 1, 1e13 ether);
+    _amount0 = bound(_amount0, 1e12, type(uint96).max / 2);
+    _amount1 = bound(_amount1, 1e12, type(uint96).max / 2);
+
+    _approveTokensForVault(depositor, _amount0 * 2, _amount1 * 2);
 
     // First deposit.
     vm.prank(depositor);

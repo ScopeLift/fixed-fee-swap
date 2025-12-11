@@ -88,7 +88,7 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   /// @param shares The amount of vault shares minted.
   /// @param amount0 The amount of token0 deposited.
   /// @param amount1 The amount of token1 deposited.
-  event Deposit(address indexed depositor, uint256 shares, uint256 amount0, uint256 amount1);
+  event Deposited(address indexed depositor, uint256 shares, uint256 amount0, uint256 amount1);
 
   /// @notice Creates a new LP Vault with fixed positions.
   /// @param _poolManager The Uniswap v4 pool manager.
@@ -172,7 +172,7 @@ contract LPVault is VaultShareToken, IUnlockCallback {
 
     _amount0Used = _amount0;
     _amount1Used = _amount1;
-    emit Deposit(msg.sender, _shares, _amount0Used, _amount1Used);
+    emit Deposited(msg.sender, _shares, _amount0Used, _amount1Used);
   }
 
   /// @inheritdoc IUnlockCallback
