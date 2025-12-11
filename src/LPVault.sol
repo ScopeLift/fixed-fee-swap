@@ -48,7 +48,7 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   }
 
   /// @notice Total weight must equal 10,000 BIPs (100%).
-  uint16 public constant TOTAL_WEIGHT = 10_000;
+  uint16 public constant BIPS = 10_000;
 
   /// @notice The Uniswap v4 PoolManager.
   IPoolManager public immutable POOL_MANAGER;
@@ -65,7 +65,7 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   /// @notice The predefined liquidity positions for this vault.
   LiquidityPosition[] public positions;
 
-  /// @notice Thrown when the sum of position weights doesn't equal TOTAL_WEIGHT (10,000 BIPs).
+  /// @notice Thrown when the sum of position weights doesn't equal BIPS (10,000 BIPs).
   error LPVault__InvalidLiquidityDistribution();
 
   /// @notice Thrown when a position's tickLower is greater than or equal to tickUpper.
@@ -83,11 +83,6 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   /// @notice Emitted when the pool manager is set during construction.
   /// @param poolManager The address of the Uniswap v4 pool manager.
   event PoolManagerSet(address indexed poolManager);
-
-  /// @notice Emitted when the vault tokens are set during construction.
-  /// @param token0 The address of token0.
-  /// @param token1 The address of token1.
-  event TokensSet(address indexed token0, address indexed token1);
 
   /// @notice Emitted when a deposit is made.
   /// @param depositor The address that deposited and received shares.
@@ -115,13 +110,12 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     targetPoolKey = _targetPoolKey;
     TOKEN0 = Currency.unwrap(_targetPoolKey.currency0);
     TOKEN1 = Currency.unwrap(_targetPoolKey.currency1);
-    emit TokensSet(TOKEN0, TOKEN1);
 
     _initializePositions(_positions);
   }
 
   /// @notice Initializes and validates the liquidity positions for the vault.
-  /// @dev Validates that positions have valid tick ranges and weights sum to `TOTAL_WEIGHT`.
+  /// @dev Validates that positions have valid tick ranges and weights sum to `BIPS`.
   /// @param _positions Array of liquidity positions to initialize.
   function _initializePositions(LiquidityPosition[] memory _positions) internal virtual {
     // Ensure at least one position is provided.
@@ -138,12 +132,14 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     }
 
     // Ensure weights sum to exactly 100% (10,000 BIPs).
-    if (_totalWeight != TOTAL_WEIGHT) revert LPVault__InvalidLiquidityDistribution();
+    if (_totalWeight != BIPS) revert LPVault__InvalidLiquidityDistribution();
   }
 
   /// @notice Deposits tokens into the vault, distributing liquidity across positions by weight.
   /// @param _amount0Max The maximum amount of token0 to deposit.
   /// @param _amount1Max The maximum amount of token1 to deposit.
+  /// @dev Mints the maximum shares possible given the provided token amounts. Any tokens not used
+  /// for liquidity provision will be returned to the depositor.
   /// @return _shares The amount of vault shares minted.
   /// @return _amount0Used The actual amount of token0 used.
   /// @return _amount1Used The actual amount of token1 used.
@@ -249,8 +245,8 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     uint256 _amount0Max,
     uint256 _amount1Max
   ) internal pure virtual returns (uint128 _liquidity) {
-    uint256 _amount0ForPosition = (_amount0Max * _position.weight) / TOTAL_WEIGHT;
-    uint256 _amount1ForPosition = (_amount1Max * _position.weight) / TOTAL_WEIGHT;
+    uint256 _amount0ForPosition = (_amount0Max * _position.weight) / BIPS;
+    uint256 _amount1ForPosition = (_amount1Max * _position.weight) / BIPS;
 
     uint160 _sqrtPriceLowerX96 = TickMath.getSqrtPriceAtTick(_position.tickLower);
     uint160 _sqrtPriceUpperX96 = TickMath.getSqrtPriceAtTick(_position.tickUpper);
