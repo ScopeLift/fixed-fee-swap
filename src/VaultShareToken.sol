@@ -90,6 +90,14 @@ contract VaultShareToken is ERC20 {
                             STATE VARIABLES
   //////////////////////////////////////////////////////////////*/
 
+  /// @notice The token address in which token0 fees are collected / distributed.
+  /// @dev Use address(0) to represent native ETH following Uniswap v4 `Currency` convention.
+  address public immutable FEE_TOKEN0;
+
+  /// @notice The token address in which token1 fees are collected / distributed.
+  /// @dev Use address(0) to represent native ETH following Uniswap v4 `Currency` convention.
+  address public immutable FEE_TOKEN1;
+
   /// @notice Global cumulative fee index for token0.
   /// @dev
   ///   - Scaled by PRECISION.
@@ -112,23 +120,25 @@ contract VaultShareToken is ERC20 {
   /// @notice Initializes the Vault share token metadata.
   /// @param _name ERC20 name value.
   /// @param _symbol ERC20 symbol value.
-  constructor(string memory _name, string memory _symbol) ERC20(_name, _symbol) {}
+  /// @param _feeToken0 The address of the token0 for which fees are being accrued for.
+  /// @param _feeToken1 The address of the token1 for which fees are being accrued for.
+  constructor(string memory _name, string memory _symbol, address _feeToken0, address _feeToken1)
+    ERC20(_name, _symbol)
+  {
+    FEE_TOKEN0 = _feeToken0;
+    FEE_TOKEN1 = _feeToken1;
+  }
 
   /*//////////////////////////////////////////////////////////////
                         EXTERNAL FUNCTIONS
   //////////////////////////////////////////////////////////////*/
 
-  /// @notice Claims accrued (but not yet claimed) fees for a user
-  /// @param _user The address to claim fees for.
-  /// @param _token0 The address of the token0 to claim fees for.
-  /// @param _token1 The address of the token1 to claim fees for.
-  /// @return _claimedToken0 Amount of token0 fees claimed.
-  /// @return _claimedToken1 Amount of token1 fees claimed.
-  function claim(address _user, address _token0, address _token1)
-    external
-    returns (uint256 _claimedToken0, uint256 _claimedToken1)
-  {
-    (_claimedToken0, _claimedToken1) = _claim(_user, _token0, _token1);
+  /// @notice Claims accrued (but not yet claimed) fees for a `_user`.
+  /// @param _user Address whose accrued fees will be claimed.
+  /// @return _claimedToken0 Amount of FEE_TOKEN_0 transferred to `_user`.
+  /// @return _claimedToken1 Amount of FEE_TOKEN_1 transferred to `_user`.
+  function claim(address _user) external returns (uint256 _claimedToken0, uint256 _claimedToken1) {
+    (_claimedToken0, _claimedToken1) = _claim(_user);
   }
 
   /*//////////////////////////////////////////////////////////////
@@ -233,14 +243,9 @@ contract VaultShareToken is ERC20 {
 
   /// @notice Claims accrued fees for a user after syncing to the latest global indices.
   /// @param _user The address to claim fees for.
-  /// @param _token0 The address of the token0 to claim fees for.
-  /// @param _token1 The address of the token1 to claim fees for.
-  /// @return _claimedToken0 Amount of token0 fees claimed.
-  /// @return _claimedToken1 Amount of token1 fees claimed.
-  function _claim(address _user, address _token0, address _token1)
-    internal
-    returns (uint256 _claimedToken0, uint256 _claimedToken1)
-  {
+  /// @return _claimedToken0 Amount of FEE_TOKEN_0 that was transferred.
+  /// @return _claimedToken1 Amount of FEE_TOKEN_1 that was transferred.
+  function _claim(address _user) internal returns (uint256 _claimedToken0, uint256 _claimedToken1) {
     // Update user fees to ensure we're syncing to the latest global indices
     _updateUserFees(_user);
 
@@ -254,11 +259,11 @@ contract VaultShareToken is ERC20 {
     account.userAccruedToken1 = 0;
 
     // Emit event for transparency
-    emit FeesClaimed(_user, _token0, _token1, _claimedToken0, _claimedToken1);
+    emit FeesClaimed(_user, FEE_TOKEN0, FEE_TOKEN1, _claimedToken0, _claimedToken1);
 
     // Transfer tokens to the user
-    _transferAmount(_token0, _user, _claimedToken0);
-    _transferAmount(_token1, _user, _claimedToken1);
+    _transferAmount(FEE_TOKEN0, _user, _claimedToken0);
+    _transferAmount(FEE_TOKEN1, _user, _claimedToken1);
   }
 
   /// @notice Transfers an amount of tokens to a user.

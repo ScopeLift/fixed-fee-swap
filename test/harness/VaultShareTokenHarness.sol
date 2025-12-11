@@ -5,7 +5,9 @@ import {VaultShareToken} from "src/VaultShareToken.sol";
 
 /// @notice Mock of the VaultShareToken contract for testing.
 contract VaultShareTokenHarness is VaultShareToken {
-  constructor(string memory _name, string memory _symbol) VaultShareToken(_name, _symbol) {}
+  constructor(string memory _name, string memory _symbol, address _feeToken0, address _feeToken1)
+    VaultShareToken(_name, _symbol, _feeToken0, _feeToken1)
+  {}
 
   /// @notice Exposes the internal _mint function for testing.
   /// @param _to The address to mint shares to.
