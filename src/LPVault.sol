@@ -7,11 +7,10 @@ import {Currency} from "v4-core/types/Currency.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {IUnlockCallback} from "v4-core/interfaces/callback/IUnlockCallback.sol";
 import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
-import {ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {SafeCast} from "v4-core/libraries/SafeCast.sol";
-import {LiquidityAmounts} from "v4-periphery/libraries/LiquidityAmounts.sol";
+import {LiquidityAmounts} from "v4-periphery/src/libraries/LiquidityAmounts.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
@@ -211,7 +210,7 @@ contract LPVault is VaultShareToken, IUnlockCallback {
       LiquidityPosition memory _position = positions[_i];
 
       uint128 _liquidity =
-        _calculateLiquidityForPosition(_position, _sqrtPriceX96, _amount0Max, _amount1Max);
+        _calculateLiquidityForAmounts(_position, _sqrtPriceX96, _amount0Max, _amount1Max);
 
       _liquidityPerPosition[_i] = _liquidity;
 
@@ -219,7 +218,7 @@ contract LPVault is VaultShareToken, IUnlockCallback {
 
       (BalanceDelta _delta,) = POOL_MANAGER.modifyLiquidity(
         targetPoolKey,
-        ModifyLiquidityParams({
+        IPoolManager.ModifyLiquidityParams({
           tickLower: _position.tickLower,
           tickUpper: _position.tickUpper,
           liquidityDelta: int256(uint256(_liquidity)),
@@ -239,7 +238,7 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   /// @param _amount0Max The maximum amount of token0 available.
   /// @param _amount1Max The maximum amount of token1 available.
   /// @return _liquidity The calculated liquidity for this position.
-  function _calculateLiquidityForPosition(
+  function _calculateLiquidityForAmounts(
     LiquidityPosition memory _position,
     uint160 _sqrtPriceX96,
     uint256 _amount0Max,
