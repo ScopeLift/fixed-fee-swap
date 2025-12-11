@@ -285,10 +285,6 @@ contract LPVault is VaultShareToken, IUnlockCallback {
       _amount1Used = uint256(-_delta1);
       _settleToken(targetPoolKey.currency1, _payer, _amount1Used);
     }
-
-    // Take any excess tokens back (positive delta means pool owes us).
-    if (_delta0 > 0) POOL_MANAGER.take(targetPoolKey.currency0, _payer, uint256(_delta0));
-    if (_delta1 > 0) POOL_MANAGER.take(targetPoolKey.currency1, _payer, uint256(_delta1));
   }
 
   /// @notice Settles a token payment to the pool manager.
