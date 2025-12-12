@@ -3,7 +3,7 @@ pragma solidity ^0.8.30;
 
 import {VaultShareToken} from "src/VaultShareToken.sol";
 
-/// @notice Mock of the VaultShareToken contract for testing.
+/// @notice Test harness for VaultShareToken.
 contract VaultShareTokenHarness is VaultShareToken {
   constructor(string memory _name, string memory _symbol, address _feeToken0, address _feeToken1)
     VaultShareToken(_name, _symbol, _feeToken0, _feeToken1)
