@@ -60,6 +60,12 @@ contract FixedFeeSwapHook is BaseHook {
   /// @param ytAmount The amount of yield token minted to the user.
   event Deposit(address indexed user, uint256 vsAmount, uint256 ptAmount, uint256 ytAmount);
 
+  /// @notice Emitted when a user redeems their principal and yield tokens back into the vault share
+  /// token. @param user The address of the user who redeemed.
+  /// @param vstAmount The amount of vault share token redeemed.
+  /// @param maturityReached Whether the maturity has been reached.
+  event Redeem(address indexed user, uint256 vstAmount, bool maturityReached);
+
   /*//////////////////////////////////////////////////////////////
                         STATE VARIABLES
   //////////////////////////////////////////////////////////////*/
@@ -174,5 +180,46 @@ contract FixedFeeSwapHook is BaseHook {
     YIELD_TOKEN.mint(msg.sender, _ytAmount);
 
     emit Deposit(msg.sender, _amount, _ptAmount, _ytAmount);
+  }
+
+  /// @notice Redeems the principal and yield tokens back into the vault share token.
+  /// @param _amount The amount of principal and yield tokens to redeem.
+  /// @return _vstAmount The amount of vault share token redeemed.
+  /// @dev
+  ///  - The caller must have approved the hook to spend the PT and YT tokens.
+  ///  - If called before maturity, the caller must have at least `_amount` PT and YT tokens.
+  ///  - If called at/after maturity, the caller must have at least `_amount` PT tokens.
+  ///  - Note:
+  ///    - Before maturity, the YT will be non-zero, so 1 PT + 1 YT = 1 VST.
+  ///    - At maturity, the YT will be 0, so 1 PT = 1 VST.
+  function redeem(uint256 _amount) external returns (uint256 _vstAmount) {
+    if (_amount == 0) revert FixedFeeSwapHook_InvalidAmount();
+
+    bool _maturityReached = block.timestamp >= MATURITY;
+
+    if (PRINCIPAL_TOKEN.balanceOf(msg.sender) < _amount) {
+      revert FixedFeeSwapHook_InsufficientBalance();
+    }
+
+    // Before maturity: burn both PT and YT (1 PT + 1 YT = 1 VST)
+    // At/after maturity: only burn PT (1 PT = 1 VST, YT is worthless)
+    if (!_maturityReached) {
+      if (YIELD_TOKEN.balanceOf(msg.sender) < _amount) {
+        revert FixedFeeSwapHook_InsufficientBalance();
+      }
+
+      YIELD_TOKEN.burn(msg.sender, _amount);
+
+      // TODO: Claim fees from YT and send to msg.sender
+    }
+
+    // Burn PT tokens
+    PRINCIPAL_TOKEN.burn(msg.sender, _amount);
+
+    // Transfer VaultShareToken from the hook to the caller
+    _vstAmount = _amount;
+    VAULT_SHARE_TOKEN.transfer(msg.sender, _vstAmount);
+
+    emit Redeem(msg.sender, _vstAmount, _maturityReached);
   }
 }
