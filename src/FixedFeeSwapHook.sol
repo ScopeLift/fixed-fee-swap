@@ -32,6 +32,9 @@ contract FixedFeeSwapHook is BaseHook {
   /// @notice Thrown when split is attempted with an invalid vault share token.
   error FixedFeeSwapHook_InvalidVaultShareToken();
 
+  /// @notice Thrown when action is attempted with an insufficient balance.
+  error FixedFeeSwapHook_InsufficientBalance();
+
   /*//////////////////////////////////////////////////////////////
                         EVENTS
   //////////////////////////////////////////////////////////////*/
@@ -151,6 +154,10 @@ contract FixedFeeSwapHook is BaseHook {
     if (block.timestamp >= MATURITY) revert FixedFeeSwapHook_SplitAfterMaturity();
 
     if (_amount == 0) revert FixedFeeSwapHook_InvalidAmount();
+
+    if (VAULT_SHARE_TOKEN.balanceOf(msg.sender) < _amount) {
+      revert FixedFeeSwapHook_InsufficientBalance();
+    }
 
     // Transfer VaultShareToken from caller to the hook
     VAULT_SHARE_TOKEN.transferFrom(msg.sender, address(this), _amount);

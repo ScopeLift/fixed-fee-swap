@@ -274,11 +274,7 @@ contract Deposit is FixedFeeSwapHookTest {
 
     // Attempt to deposit more than user has
     vm.prank(user);
-    vm.expectRevert(
-      abi.encodeWithSelector(
-        IERC20Errors.ERC20InsufficientBalance.selector, user, _userBalance, _amount
-      )
-    );
+    vm.expectRevert(FixedFeeSwapHookBase.FixedFeeSwapHook_InsufficientBalance.selector);
     fixedFeeSwapHook.deposit(_amount);
   }
 }
