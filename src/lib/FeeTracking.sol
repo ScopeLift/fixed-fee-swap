@@ -4,9 +4,22 @@ pragma solidity ^0.8.30;
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title FeeTracking
-/// @notice Library for tracking and distributing fees across token holders using lazy accounting.
-/// @dev This library implements a cumulative fee-per-share index system that allows efficient
-/// fee distribution without looping over all holders. Both VaultShareToken and YieldToken can use this.
+/// @author [ScopeLift](https://scopelift.co)
+/// @notice Fee accounting library for pro-rata distribution of collected fees to token holders.
+/// @dev Implements a cumulative “fee-per-share” index (a.k.a. reward index) model:
+///  - Global fee indexes track the total fees earned per share over time.
+///  - Each user stores a checkpoint of the last index they synced to.
+///  - User earnings are accrued lazily on interaction (mint, burn, transfer, claim),
+///    avoiding any iteration over holders.
+///
+/// This design guarantees:
+///  - O(1) fee accounting per operation
+///  - No over-distribution (rounding always favors the system)
+///  - Correct proportional rewards based on share ownership at sync time
+///
+/// The library is token-agnostic and can be reused by multiple ERC20-like
+/// accounting tokens (e.g. VaultShareToken, YieldToken) that need
+/// deterministic, gas-efficient fee distribution.
 library FeeTracking {
   /// @notice Precision for the fee accumulators (to prevent precision loss).
   uint256 public constant PRECISION = 1e18;
@@ -40,36 +53,6 @@ library FeeTracking {
   }
 
   /*//////////////////////////////////////////////////////////////
-                          EVENTS
-  //////////////////////////////////////////////////////////////*/
-
-  /// @notice Emitted when the global cumulative fee index for token0 and token1 are updated.
-  /// @param newglobalFeeIndex0Scaled Updated global cumulative fee index for token0 (with PRECISION).
-  /// @param newglobalFeeIndex1Scaled Updated global cumulative fee index for token1 (with PRECISION).
-  /// @param collectedFeeToken0 Amount of token0 fees collected from the pool.
-  /// @param collectedFeeToken1 Amount of token1 fees collected from the pool.
-  event FeeIndexesUpdated(
-    uint256 newglobalFeeIndex0Scaled,
-    uint256 newglobalFeeIndex1Scaled,
-    uint256 collectedFeeToken0,
-    uint256 collectedFeeToken1
-  );
-
-  /// @notice Emitted when a user claims their accrued fees.
-  /// @param user The address that claimed fees.
-  /// @param token0 The address of the token0 to claim fees for.
-  /// @param token1 The address of the token1 to claim fees for.
-  /// @param token0Amount Amount of token0 fees claimed.
-  /// @param token1Amount Amount of token1 fees claimed.
-  event FeesClaimed(
-    address indexed user,
-    address indexed token0,
-    address indexed token1,
-    uint256 token0Amount,
-    uint256 token1Amount
-  );
-
-  /*//////////////////////////////////////////////////////////////
                         INTERNAL FUNCTIONS
   //////////////////////////////////////////////////////////////*/
 
@@ -93,6 +76,14 @@ library FeeTracking {
     if (_totalSupply == 0) return;
 
     // Update the global cumulative fee index for token0.
+    // `globalFeeIndex0Scaled` represents "how much token0 each share has earned"
+    // since the vault started.
+    //
+    // We scale first to avoid precision loss:
+    //     delta = collectedFees * PRECISION / totalShares
+    //
+    // Rounding.Floor ensures that total distributed <= collected.
+    // Any dust remains inside the vault (safe and intentional).
     if (_collectedFeeToken0 > 0) {
       _globalFees.globalFeeIndex0Scaled += Math.mulDiv(
         _collectedFeeToken0, PRECISION, _totalSupply, Math.Rounding.Floor
@@ -100,18 +91,15 @@ library FeeTracking {
     }
 
     // Update the global cumulative fee index for token1
+    // Same calculation for token1 fees:
+    // - convert collected fees to per-share units via scaling
+    // - no rewards are minted, only accounting updated
+    // - FLOOR ensures we don't over-distribute
     if (_collectedFeeToken1 > 0) {
       _globalFees.globalFeeIndex1Scaled += Math.mulDiv(
         _collectedFeeToken1, PRECISION, _totalSupply, Math.Rounding.Floor
       );
     }
-
-    emit FeeIndexesUpdated(
-      _globalFees.globalFeeIndex0Scaled,
-      _globalFees.globalFeeIndex1Scaled,
-      _collectedFeeToken0,
-      _collectedFeeToken1
-    );
   }
 
   /// @notice Updates a user's accrued fees based on their current balance.
@@ -122,16 +110,19 @@ library FeeTracking {
   /// @dev
   ///  - Should be called before mint, burn, transfer and claim.
   ///  - Accrues newly earned fees into `_userFees.userAccruedToken0/_userFees.userAccruedToken1`.
-  ///  - Updates `_userFees.userFeeIndex0Scaled/_userFees.userFeeIndex1Scaled` to the current global indices.
-  ///  - If user has no balance, syncs their indices so they don't retro-earn when they receive tokens.
+  ///  - Updates `_userFees.userFeeIndex0Scaled/_userFees.userFeeIndex1Scaled` to the current global
+  ///    indices.
+  ///  - If user has no balance, syncs their indices so they don't retro-earn when they
+  ///    receive tokens in the future.
   function _updateUserFees(
     UserFees storage _userFees,
     uint256 _userBalance,
     uint256 _globalIndex0,
     uint256 _globalIndex1
   ) internal {
-    // If user has no balance, sync their indices to current global indices
-    // so they don't retro-earn when they receive tokens in the future
+    // If user has no shares, they cannot earn new fees going forward.
+    // Just sync their fee indices so they don't retro-earn when they
+    // receive shares in the future.
     if (_userBalance == 0) {
       if (_userFees.userFeeIndex0Scaled != _globalIndex0) {
         _userFees.userFeeIndex0Scaled = _globalIndex0;
@@ -157,18 +148,6 @@ library FeeTracking {
     }
   }
 
-  /// @notice Gets the user's accrued fees without resetting them.
-  /// @param _userFees Storage reference to user's fee state.
-  /// @return token0Amount Accrued token0 fees.
-  /// @return token1Amount Accrued token1 fees.
-  function _getAccruedFees(UserFees storage _userFees)
-    internal
-    view
-    returns (uint256 token0Amount, uint256 token1Amount)
-  {
-    return (_userFees.userAccruedToken0, _userFees.userAccruedToken1);
-  }
-
   /// @notice Resets the user's accrued fees to zero and returns the amounts.
   /// @param _userFees Storage reference to user's fee state.
   /// @return token0Amount Accrued token0 fees before reset.
@@ -181,26 +160,5 @@ library FeeTracking {
     token1Amount = _userFees.userAccruedToken1;
     _userFees.userAccruedToken0 = 0;
     _userFees.userAccruedToken1 = 0;
-  }
-
-  /// @notice Claims accrued fees for a user after syncing to the latest global indices.
-  /// @param _userFees Storage reference to user's fee state.
-  /// @param _user The address to claim fees for (for event emission).
-  /// @param _feeToken0 The address of token0 (for event emission).
-  /// @param _feeToken1 The address of token1 (for event emission).
-  /// @return token0Amount Amount of token0 fees claimed.
-  /// @return token1Amount Amount of token1 fees claimed.
-  /// @dev Note: This function does NOT transfer tokens. The calling contract must handle transfers.
-  function _claimFees(
-    UserFees storage _userFees,
-    address _user,
-    address _feeToken0,
-    address _feeToken1
-  ) internal returns (uint256 token0Amount, uint256 token1Amount) {
-    // Get and reset accrued fees
-    (token0Amount, token1Amount) = _resetAccruedFees(_userFees);
-
-    // Emit event for transparency
-    emit FeesClaimed(_user, _feeToken0, _feeToken1, token0Amount, token1Amount);
   }
 }
