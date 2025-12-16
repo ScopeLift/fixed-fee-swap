@@ -2,7 +2,7 @@
 pragma solidity ^0.8.30;
 
 // External imports
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
@@ -103,13 +103,39 @@ contract Constructor is FixedFeeSwapHookTest {
     _assumeSafeAddress(_poolManager);
     _assumeSafeMaturity(_maturity);
 
-    // We ignore the PT and YT token addresses as they are deployed in the constructor
-    vm.expectEmit(true, false, false, false);
-    emit FixedFeeSwapHookBase.Initialized(
-      _poolManager, address(vaultShareToken), address(0), address(0), _maturity
-    );
+    // Record logs to capture the event
+    vm.recordLogs();
 
-    new FixedFeeSwapHookHarness(IPoolManager(_poolManager), vaultShareToken, _maturity);
+    // Deploy the hook (this will emit the Initialized event)
+    FixedFeeSwapHookHarness _hook =
+      new FixedFeeSwapHookHarness(IPoolManager(_poolManager), vaultShareToken, _maturity);
+
+    // Get the actual PT and YT addresses from the deployed hook
+    address _ptAddress = address(_hook.PRINCIPAL_TOKEN());
+    address _ytAddress = address(_hook.YIELD_TOKEN());
+
+    // Verify the event was emitted with correct values
+    Vm.Log[] memory logs = vm.getRecordedLogs();
+    assertEq(logs.length, 1);
+
+    // Decode and verify the event
+    // Only poolManager is indexed, so topics[0] = signature, topics[1] = poolManager
+    bytes32 _eventSignature = keccak256("Initialized(address,address,address,address,uint256)");
+    assertEq(logs[0].topics[0], _eventSignature);
+    assertEq(address(uint160(uint256(logs[0].topics[1]))), _poolManager);
+
+    // Decode the event data using abi.decode
+    (
+      address _vstAddress,
+      address _ptAddressFromEvent,
+      address _ytAddressFromEvent,
+      uint256 _maturityFromEvent
+    ) = abi.decode(logs[0].data, (address, address, address, uint256));
+
+    assertEq(_vstAddress, address(vaultShareToken));
+    assertEq(_ptAddressFromEvent, _ptAddress);
+    assertEq(_ytAddressFromEvent, _ytAddress);
+    assertEq(_maturityFromEvent, _maturity);
   }
 
   function test_RevertIf_ManagerIsZero(address _vaultShareToken, uint256 _maturity) public {
