@@ -10,10 +10,14 @@ import {YieldToken} from "src/YieldToken.sol";
 contract YieldTokenTest is Test {
   YieldToken internal yieldToken;
   address internal hook;
+  address internal feeToken0;
+  address internal feeToken1;
 
   function setUp() public virtual {
     hook = makeAddr("hook");
-    yieldToken = new YieldToken("Yield Token", "YT", hook);
+    feeToken0 = makeAddr("feeToken0");
+    feeToken1 = makeAddr("feeToken1");
+    yieldToken = new YieldToken("Yield Token", "YT", hook, feeToken0, feeToken1);
   }
 
   function _assumeSafeAddress(address _addr) internal pure {
