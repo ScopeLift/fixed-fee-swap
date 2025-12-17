@@ -15,6 +15,7 @@ import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {LiquidityAmounts} from "v4-periphery/src/libraries/LiquidityAmounts.sol";
 import {SqrtPriceMath} from "v4-core/libraries/SqrtPriceMath.sol";
+import {Position} from "v4-core/libraries/Position.sol";
 
 contract LPVaultTest is Test, Deployers {
   using PoolIdLibrary for PoolKey;
@@ -419,7 +420,7 @@ contract Deposit is LPVaultTest {
 
   function test_RevertIf_ZeroLiquidity() public {
     vm.prank(depositor);
-    vm.expectRevert(LPVault.LPVault__ZeroLiquidity.selector);
+    vm.expectRevert(Position.CannotUpdateEmptyPosition.selector);
     vault.deposit(0, 0);
   }
 
