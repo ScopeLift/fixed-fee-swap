@@ -3,9 +3,9 @@ pragma solidity 0.8.30;
 
 // External imports
 import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
-import {Hooks} from "v4-core/src/libraries/Hooks.sol";
+import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
-import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
+import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 
 // Internal imports
 import {PrincipalToken} from "src/PrincipalToken.sol";

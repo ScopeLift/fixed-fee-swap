@@ -103,7 +103,14 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     LiquidityPosition[] memory _positions,
     string memory _name,
     string memory _symbol
-  ) VaultShareToken(_name, _symbol) {
+  )
+    VaultShareToken(
+      _name,
+      _symbol,
+      Currency.unwrap(_targetPoolKey.currency0),
+      Currency.unwrap(_targetPoolKey.currency1)
+    )
+  {
     POOL_MANAGER = _poolManager;
     emit PoolManagerSet(address(_poolManager));
 
