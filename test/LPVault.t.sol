@@ -63,6 +63,7 @@ contract LPVaultTest is Test, Deployers {
       LPVault.LiquidityPosition({tickLower: 120, tickUpper: 360, weight: 2500, liquidity: 0})
     );
 
+    vm.prank(makeAddr("deployer"));
     vault = new LPVault(manager, defaultPoolKey, defaultPositions, DEFAULT_NAME, DEFAULT_SYMBOL);
   }
 
@@ -233,10 +234,6 @@ contract Deposit is LPVaultTest {
 
   function setUp() public override {
     super.setUp();
-
-    // Mint tokens to depositor.
-    deal(Currency.unwrap(currency0), depositor, 1e18 ether);
-    deal(Currency.unwrap(currency1), depositor, 1e18 ether);
   }
 
   /// @dev Sets up approvals for a depositor to interact with the vault.
@@ -306,6 +303,8 @@ contract Deposit is LPVaultTest {
   {
     _amount0 = bound(_amount0, 1e12, type(uint96).max);
     _amount1 = bound(_amount1, 1e12, type(uint96).max);
+    deal(Currency.unwrap(currency0), depositor, _amount0);
+    deal(Currency.unwrap(currency1), depositor, _amount1);
 
     (uint128 _expectedShares, uint256 _expectedAmount0, uint256 _expectedAmount1) =
       _calculateExpectedDeposit(_amount0, _amount1);
@@ -337,9 +336,53 @@ contract Deposit is LPVaultTest {
     );
   }
 
+  function testFuzz_DepositDistributesLiquidityAcrossPositions(uint256 _amount0, uint256 _amount1)
+    public
+  {
+    _amount0 = bound(_amount0, 1e12, type(uint96).max);
+    _amount1 = bound(_amount1, 1e12, type(uint96).max);
+    deal(Currency.unwrap(currency0), depositor, _amount0);
+    deal(Currency.unwrap(currency1), depositor, _amount1);
+    _approveTokensForVault(depositor, _amount0, _amount1);
+
+    PoolId _poolId = defaultPoolKey.toId();
+    (uint160 _sqrtPriceX96,,,) = StateLibrary.getSlot0(manager, _poolId);
+
+    // Calculate expected liquidity for each position.
+    uint128[] memory _expectedLiquidity = new uint128[](defaultPositions.length);
+    for (uint256 _i = 0; _i < defaultPositions.length; _i++) {
+      LPVault.LiquidityPosition memory _position = defaultPositions[_i];
+
+      uint256 _amount0ForPosition = (_amount0 * _position.weight) / BIPS;
+      uint256 _amount1ForPosition = (_amount1 * _position.weight) / BIPS;
+
+      uint160 _sqrtPriceLowerX96 = TickMath.getSqrtPriceAtTick(_position.tickLower);
+      uint160 _sqrtPriceUpperX96 = TickMath.getSqrtPriceAtTick(_position.tickUpper);
+
+      _expectedLiquidity[_i] = LiquidityAmounts.getLiquidityForAmounts(
+        _sqrtPriceX96,
+        _sqrtPriceLowerX96,
+        _sqrtPriceUpperX96,
+        _amount0ForPosition,
+        _amount1ForPosition
+      );
+    }
+
+    vm.prank(depositor);
+    vault.deposit(_amount0, _amount1);
+
+    // Verify each position's liquidity was updated correctly.
+    for (uint256 _i = 0; _i < defaultPositions.length; _i++) {
+      (,,, uint128 _storedLiquidity) = vault.positions(_i);
+      assertEq(_storedLiquidity, _expectedLiquidity[_i]);
+    }
+  }
+
   function testFuzz_DepositEmitsEvent(uint256 _amount0, uint256 _amount1) public {
     _amount0 = bound(_amount0, 1e12, type(uint96).max);
     _amount1 = bound(_amount1, 1e12, type(uint96).max);
+    deal(Currency.unwrap(currency0), depositor, _amount0);
+    deal(Currency.unwrap(currency1), depositor, _amount1);
     _approveTokensForVault(depositor, _amount0, _amount1);
 
     (uint128 _expectedShares, uint256 _expectedAmount0, uint256 _expectedAmount1) =
@@ -354,7 +397,8 @@ contract Deposit is LPVaultTest {
   function testFuzz_MultipleDeposits(uint256 _amount0, uint256 _amount1) public {
     _amount0 = bound(_amount0, 1e12, type(uint96).max / 2);
     _amount1 = bound(_amount1, 1e12, type(uint96).max / 2);
-
+    deal(Currency.unwrap(currency0), depositor, _amount0 * 2);
+    deal(Currency.unwrap(currency1), depositor, _amount1 * 2);
     _approveTokensForVault(depositor, _amount0 * 2, _amount1 * 2);
 
     // First deposit.
