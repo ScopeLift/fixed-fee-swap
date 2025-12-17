@@ -209,12 +209,14 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     for (uint256 _i = 0; _i < positions.length; _i++) {
       LiquidityPosition memory _position = positions[_i];
 
-      uint128 _liquidity =
-        _calculateLiquidityForAmounts(_position, _sqrtPriceX96, _amount0Max, _amount1Max);
+      uint256 _amount0ForPosition = (_amount0Max * _position.weight) / BIPS;
+      uint256 _amount1ForPosition = (_amount1Max * _position.weight) / BIPS;
+
+      uint128 _liquidity = _calculateLiquidityForAmounts(
+        _position, _sqrtPriceX96, _amount0ForPosition, _amount1ForPosition
+      );
 
       _liquidityPerPosition[_i] = _liquidity;
-
-      if (_liquidity == 0) continue;
 
       (BalanceDelta _delta,) = POOL_MANAGER.modifyLiquidity(
         targetPoolKey,
@@ -232,30 +234,23 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     }
   }
 
-  /// @notice Calculates the liquidity for a single position based on token amounts and weight.
+  /// @notice Calculates the liquidity for a single position based on token amounts.
   /// @param _position The liquidity position configuration.
   /// @param _sqrtPriceX96 The current sqrt price of the pool.
-  /// @param _amount0Max The maximum amount of token0 available.
-  /// @param _amount1Max The maximum amount of token1 available.
+  /// @param _amount0 The amount of token0 for this position.
+  /// @param _amount1 The amount of token1 for this position.
   /// @return _liquidity The calculated liquidity for this position.
   function _calculateLiquidityForAmounts(
     LiquidityPosition memory _position,
     uint160 _sqrtPriceX96,
-    uint256 _amount0Max,
-    uint256 _amount1Max
+    uint256 _amount0,
+    uint256 _amount1
   ) internal pure virtual returns (uint128 _liquidity) {
-    uint256 _amount0ForPosition = (_amount0Max * _position.weight) / BIPS;
-    uint256 _amount1ForPosition = (_amount1Max * _position.weight) / BIPS;
-
     uint160 _sqrtPriceLowerX96 = TickMath.getSqrtPriceAtTick(_position.tickLower);
     uint160 _sqrtPriceUpperX96 = TickMath.getSqrtPriceAtTick(_position.tickUpper);
 
     _liquidity = LiquidityAmounts.getLiquidityForAmounts(
-      _sqrtPriceX96,
-      _sqrtPriceLowerX96,
-      _sqrtPriceUpperX96,
-      _amount0ForPosition,
-      _amount1ForPosition
+      _sqrtPriceX96, _sqrtPriceLowerX96, _sqrtPriceUpperX96, _amount0, _amount1
     );
   }
 
