@@ -2,7 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
-import {Deployers} from "lib/v4-core/test/utils/Deployers.sol";
+import {Deployers} from "lib/v4-periphery/lib/v4-core/test/utils/Deployers.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {LPVault} from "src/LPVault.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";

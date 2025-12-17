@@ -7,6 +7,7 @@ import {Currency} from "v4-core/types/Currency.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {IUnlockCallback} from "v4-core/interfaces/callback/IUnlockCallback.sol";
 import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
+import {ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {SafeCast} from "v4-core/libraries/SafeCast.sol";
@@ -220,7 +221,7 @@ contract LPVault is VaultShareToken, IUnlockCallback {
 
       (BalanceDelta _delta,) = POOL_MANAGER.modifyLiquidity(
         targetPoolKey,
-        IPoolManager.ModifyLiquidityParams({
+        ModifyLiquidityParams({
           tickLower: _position.tickLower,
           tickUpper: _position.tickUpper,
           liquidityDelta: int256(uint256(_liquidity)),
