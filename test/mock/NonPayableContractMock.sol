@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+pragma solidity ^0.8.26;
 
 /// @title NonPayableContractMock
 /// @notice A mock contract that rejects ETH transfers for testing purposes.
