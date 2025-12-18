@@ -85,16 +85,18 @@ contract LPVaultTest is Test, Deployers {
 }
 
 contract Constructor is LPVaultTest {
-  function testFuzz_SinglePosition(int24 _tickLower, int24 _tickUpper) public {
+  function testFuzz_SinglePosition(int24 _tickLower, int24 _tickUpper, address _deployer) public {
     _tickLower = _boundTick(_tickLower);
     _tickUpper = _boundTick(_tickUpper);
     vm.assume(_tickLower < _tickUpper);
+	vm.assume(_deployer != address(0));
 
     LPVault.LiquidityPosition[] memory _positions = new LPVault.LiquidityPosition[](1);
     _positions[0] = LPVault.LiquidityPosition({
       tickLower: _tickLower, tickUpper: _tickUpper, weight: BIPS, liquidity: 0
     });
 
+    vm.prank(_deployer);
     LPVault _newVault =
       new LPVault(manager, defaultPoolKey, _positions, DEFAULT_NAME, DEFAULT_SYMBOL);
 
@@ -233,10 +235,6 @@ contract Constructor is LPVaultTest {
 contract Deposit is LPVaultTest {
   address depositor = makeAddr("depositor");
 
-  function setUp() public override {
-    super.setUp();
-  }
-
   /// @dev Sets up approvals for a depositor to interact with the vault.
   function _approveTokensForVault(address _depositor, uint256 _amount0, uint256 _amount1) internal {
     vm.startPrank(_depositor);
@@ -299,7 +297,7 @@ contract Deposit is LPVaultTest {
     }
   }
 
-  function testFuzz_DepositMintsSharesAndTransfersTokens(uint256 _amount0, uint256 _amount1)
+  function testFuzz_MintsSharesAndTransfersTokens(uint256 _amount0, uint256 _amount1)
     public
   {
     _amount0 = bound(_amount0, 1e12, type(uint96).max);
@@ -337,7 +335,7 @@ contract Deposit is LPVaultTest {
     );
   }
 
-  function testFuzz_DepositDistributesLiquidityAcrossPositions(uint256 _amount0, uint256 _amount1)
+  function testFuzz_DistributesLiquidityAcrossPositions(uint256 _amount0, uint256 _amount1)
     public
   {
     _amount0 = bound(_amount0, 1e12, type(uint96).max);
@@ -379,7 +377,7 @@ contract Deposit is LPVaultTest {
     }
   }
 
-  function testFuzz_DepositEmitsEvent(uint256 _amount0, uint256 _amount1) public {
+  function testFuzz_DepositEmitsDepositedEvent(uint256 _amount0, uint256 _amount1) public {
     _amount0 = bound(_amount0, 1e12, type(uint96).max);
     _amount1 = bound(_amount1, 1e12, type(uint96).max);
     deal(Currency.unwrap(currency0), depositor, _amount0);

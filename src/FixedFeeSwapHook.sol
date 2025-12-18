@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.30;
+pragma solidity 0.8.26;
 
 // External imports
 import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
