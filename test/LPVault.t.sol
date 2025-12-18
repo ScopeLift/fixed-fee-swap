@@ -89,7 +89,7 @@ contract Constructor is LPVaultTest {
     _tickLower = _boundTick(_tickLower);
     _tickUpper = _boundTick(_tickUpper);
     vm.assume(_tickLower < _tickUpper);
-	vm.assume(_deployer != address(0));
+    vm.assume(_deployer != address(0));
 
     LPVault.LiquidityPosition[] memory _positions = new LPVault.LiquidityPosition[](1);
     _positions[0] = LPVault.LiquidityPosition({
@@ -297,9 +297,7 @@ contract Deposit is LPVaultTest {
     }
   }
 
-  function testFuzz_MintsSharesAndTransfersTokens(uint256 _amount0, uint256 _amount1)
-    public
-  {
+  function testFuzz_MintsSharesAndTransfersTokens(uint256 _amount0, uint256 _amount1) public {
     _amount0 = bound(_amount0, 1e12, type(uint96).max);
     _amount1 = bound(_amount1, 1e12, type(uint96).max);
     deal(Currency.unwrap(currency0), depositor, _amount0);
@@ -335,9 +333,7 @@ contract Deposit is LPVaultTest {
     );
   }
 
-  function testFuzz_DistributesLiquidityAcrossPositions(uint256 _amount0, uint256 _amount1)
-    public
-  {
+  function testFuzz_DistributesLiquidityAcrossPositions(uint256 _amount0, uint256 _amount1) public {
     _amount0 = bound(_amount0, 1e12, type(uint96).max);
     _amount1 = bound(_amount1, 1e12, type(uint96).max);
     deal(Currency.unwrap(currency0), depositor, _amount0);
