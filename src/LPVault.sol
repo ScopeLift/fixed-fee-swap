@@ -229,7 +229,7 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   {
     if (_shares == 0 || _shares > balanceOf(msg.sender)) revert LPVault__InvalidShares();
 
-    // Calculate liquidity to remove from each position proportionally.
+    // Calculate liquidity to remove from each position proportionally and update liquidity.
     uint128[] memory _liquidityToRemove = new uint128[](positions.length);
 
     // Calculate liquidity to remove from each position.
@@ -238,9 +238,10 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     for (uint256 _i = 0; _i < positions.length; _i++) {
       if (_i == 0) {
         _liquidityToRemove[0] = uint128(_shares);
-        continue;
+      } else {
+        _liquidityToRemove[_i] = uint128((_shares * positions[_i].liquidity) / totalSupply());
       }
-      _liquidityToRemove[_i] = uint128((_shares * positions[_i].liquidity) / totalSupply());
+      positions[_i].liquidity -= _liquidityToRemove[_i];
     }
 
     // Burn shares before making external calls (reentrancy protection).
@@ -256,11 +257,6 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     );
 
     (_amount0, _amount1) = abi.decode(_result, (uint256, uint256));
-
-    // Update per-position liquidity after successful liquidity removal.
-    for (uint256 _i = 0; _i < positions.length; _i++) {
-      positions[_i].liquidity -= _liquidityToRemove[_i];
-    }
 
     emit Withdraw(msg.sender, _receiver, _shares, _amount0, _amount1);
   }

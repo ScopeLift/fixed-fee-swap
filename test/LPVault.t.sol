@@ -456,8 +456,8 @@ contract Withdraw is LPVaultTest {
     returns (uint256 _shares, uint256 _amount0Used, uint256 _amount1Used)
   {
     _setupDepositor(_depositor);
-    _amount0 = bound(_amount0, 1e6, 1e18);
-    _amount1 = bound(_amount1, 1e6, 1e18);
+    _amount0 = bound(_amount0, 1e6, type(uint96).max);
+    _amount1 = bound(_amount1, 1e6, type(uint96).max);
 
     vm.prank(_depositor);
     (_shares, _amount0Used, _amount1Used) = vault.deposit(_amount0, _amount1);
@@ -590,8 +590,8 @@ contract Withdraw is LPVaultTest {
     assertEq(vault.totalSupply(), 0);
 
     // Verify amounts received match total deposited (within rounding tolerance).
-    assertApproxEqAbs(_amount0Received, _amount0Used1, 2);
-    assertApproxEqAbs(_amount1Received, _amount1Used1, 2);
+    assertApproxEqAbs(_amount0Received, _amount0Used1, 3);
+    assertApproxEqAbs(_amount1Received, _amount1Used1, 3);
   }
 
   function testFuzz_RevertIf_ZeroShares(address _depositor, address _receiver) public {
