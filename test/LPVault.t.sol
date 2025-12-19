@@ -599,7 +599,7 @@ contract Withdraw is LPVaultTest {
     vm.assume(_receiver != address(0));
 
     vm.prank(_depositor);
-    vm.expectRevert(LPVault.LPVault__ZeroShares.selector);
+    vm.expectRevert(LPVault.LPVault__InvalidShares.selector);
     vault.withdraw(0, _receiver);
   }
 

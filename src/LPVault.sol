@@ -89,8 +89,8 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   /// @notice Thrown when the total liquidity is zero.
   error LPVault__ZeroLiquidity();
 
-  /// @notice Thrown when attempting to withdraw zero shares.
-  error LPVault__ZeroShares();
+  /// @notice Thrown when the shares amount is invalid (zero or exceeds balance).
+  error LPVault__InvalidShares();
 
   /// @notice Thrown when the callback is called by a non-pool manager.
   error LPVault__OnlyPoolManager();
@@ -172,8 +172,8 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   }
 
   /// @notice Deposits tokens into the vault, distributing liquidity across positions by weight.
-  /// @param _amount0Max The maximum amount of token0 to deposit.
-  /// @param _amount1Max The maximum amount of token1 to deposit.
+  /// @param _amount0Max The maximum amount of token0 to deposit across all positions.
+  /// @param _amount1Max The maximum amount of token1 to deposit across all positions.
   /// @dev Mints the maximum shares possible given the provided token amounts. Any tokens not used
   /// for liquidity provision will be returned to the depositor.
   /// @return _shares The amount of vault shares minted.
@@ -227,7 +227,7 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     virtual
     returns (uint256 _amount0, uint256 _amount1)
   {
-    if (_shares == 0) revert LPVault__ZeroShares();
+    if (_shares == 0 || _shares > balanceOf(msg.sender)) revert LPVault__InvalidShares();
 
     // Calculate liquidity to remove from each position proportionally.
     uint128[] memory _liquidityToRemove = new uint128[](positions.length);
