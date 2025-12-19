@@ -6,20 +6,13 @@ import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 // Internal imports
 import {PrincipalToken} from "src/PrincipalToken.sol";
 import {YieldToken} from "src/YieldToken.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
-import {FeeTracking} from "src/lib/FeeTracking.sol";
 
 contract FixedFeeSwapHook is BaseHook {
-  using FeeTracking for FeeTracking.GlobalFees;
-  using FeeTracking for FeeTracking.UserFees;
-  using SafeERC20 for IERC20;
-
   /*//////////////////////////////////////////////////////////////
                         ERRORS
   //////////////////////////////////////////////////////////////*/
@@ -41,9 +34,6 @@ contract FixedFeeSwapHook is BaseHook {
 
   /// @notice Thrown when action is attempted with an insufficient balance.
   error FixedFeeSwapHook_InsufficientBalance();
-
-  /// @notice Thrown when a transfer fails.
-  error FixedFeeSwapHook_TransferFailed();
 
   /*//////////////////////////////////////////////////////////////
                         EVENTS
@@ -81,23 +71,7 @@ contract FixedFeeSwapHook is BaseHook {
   /// @param ytFinalIndex1 Final YT global fee index for token1 at maturity.
   event MaturityCheckpointed(uint256 ytFinalIndex0, uint256 ytFinalIndex1);
 
-  /// @notice Emitted when PT fee indexes are updated.
-  /// @param newglobalFeeIndex0Scaled Updated global cumulative fee index for token0.
-  /// @param newglobalFeeIndex1Scaled Updated global cumulative fee index for token1.
-  /// @param collectedFeeToken0 Amount of token0 fees collected from the pool.
-  /// @param collectedFeeToken1 Amount of token1 fees collected from the pool.
-  event PTFeeIndexesUpdated(
-    uint256 newglobalFeeIndex0Scaled,
-    uint256 newglobalFeeIndex1Scaled,
-    uint256 collectedFeeToken0,
-    uint256 collectedFeeToken1
-  );
-
-  /// @notice Emitted when a user claims their accrued PT fees.
-  /// @param user The address that claimed fees.
-  /// @param token0Amount Amount of token0 fees claimed.
-  /// @param token1Amount Amount of token1 fees claimed.
-  event PTFeesClaimed(address indexed user, uint256 token0Amount, uint256 token1Amount);
+  // Note: PT fee tracking is handled inside `PrincipalToken` (like `YieldToken`).
 
   /*//////////////////////////////////////////////////////////////
                         STATE VARIABLES
@@ -116,12 +90,6 @@ contract FixedFeeSwapHook is BaseHook {
   /// vault share token)
   uint256 public immutable MATURITY;
 
-  /// @notice Global fee tracking state for Principal Token.
-  FeeTracking.GlobalFees private _ptGlobalFees;
-
-  /// @notice Tracks fee accounting data per user for Principal Token.
-  mapping(address => FeeTracking.UserFees) public ptUserFees;
-
   /// @notice The token address in which token0 fees are collected / distributed.
   /// @dev Use address(0) to represent native ETH following Uniswap v4 `Currency` convention.
   address private immutable FEE_TOKEN0;
@@ -129,6 +97,9 @@ contract FixedFeeSwapHook is BaseHook {
   /// @notice The token address in which token1 fees are collected / distributed.
   /// @dev Use address(0) to represent native ETH following Uniswap v4 `Currency` convention.
   address private immutable FEE_TOKEN1;
+
+  /// @notice Whether maturity has been checkpointed (PT baseline set).
+  bool public isMaturityCheckpointed;
 
   /*//////////////////////////////////////////////////////////////
                         CONSTRUCTOR
@@ -151,13 +122,16 @@ contract FixedFeeSwapHook is BaseHook {
     string memory _underlyingSymbol = VAULT_SHARE_TOKEN.symbol();
     string memory _maturityStr = Strings.toString(_maturity);
 
+    FEE_TOKEN0 = VAULT_SHARE_TOKEN.FEE_TOKEN0();
+    FEE_TOKEN1 = VAULT_SHARE_TOKEN.FEE_TOKEN1();
+
     PRINCIPAL_TOKEN = new PrincipalToken(
       string.concat("Principal ", _underlyingName),
       string.concat("PT-", _underlyingSymbol, "-", _maturityStr),
-      address(this)
+      address(this),
+      FEE_TOKEN0,
+      FEE_TOKEN1
     );
-    FEE_TOKEN0 = VAULT_SHARE_TOKEN.FEE_TOKEN0();
-    FEE_TOKEN1 = VAULT_SHARE_TOKEN.FEE_TOKEN1();
 
     YIELD_TOKEN = new YieldToken(
       string.concat("Yield ", _underlyingName),
@@ -261,18 +235,19 @@ contract FixedFeeSwapHook is BaseHook {
       // Claim fees from YT and send to msg.sender
       YIELD_TOKEN.claim(msg.sender);
       YIELD_TOKEN.burn(msg.sender, _amount);
-
     } else {
-      // After maturity: check if user has YT balance (they might not have redeemed before maturity)
-      // If they do, burn YT and claim accrued YT fees (earned before maturity)
+      // After maturity: check if user has YT balance (they might not have redeemed before
+      // maturity). If they do, claim and burn YT (fees earned pre-maturity are still claimable).
       uint256 _ytBalance = YIELD_TOKEN.balanceOf(msg.sender);
       if (_ytBalance > 0) {
         YIELD_TOKEN.claim(msg.sender);
         YIELD_TOKEN.burn(msg.sender, _ytBalance);
       }
 
-      // Claim PT fees (earned after maturity)
-      _claimPTFees(msg.sender);
+      // After maturity: PT accrues fees. We checkpoint once at maturity to set PT's baseline,
+      // then allow claiming PT fees here (so rewards are only claimable when PT is burned).
+      _checkpointMaturity();
+      PRINCIPAL_TOKEN.claim(msg.sender);
     }
 
     // Burn PT tokens
@@ -292,48 +267,16 @@ contract FixedFeeSwapHook is BaseHook {
     _checkpointMaturity();
   }
 
-  /// @notice Updates the PT fee indexes when new fees are collected after maturity.
-  /// @param _collectedFeeToken0 Newly collected token0 fees (delta since last call).
-  /// @param _collectedFeeToken1 Newly collected token1 fees (delta since last call).
-  /// @dev Can only be called after maturity has been checkpointed.
-  ///      Routes fees to PT holders instead of YT holders.
-  ///      Will automatically checkpoint maturity if not already done.
-  function updatePTFees(uint256 _collectedFeeToken0, uint256 _collectedFeeToken1) external {
-    if (!_hasMaturityReached()) revert FixedFeeSwapHook_InvalidMaturity();
-    
-    // Ensure maturity is checkpointed (can be done lazily on first fee update)
-    // Check if PT indexes are initialized (non-zero means checkpointed)
-    if (_ptGlobalFees.globalFeeIndex0Scaled == 0 && _ptGlobalFees.globalFeeIndex1Scaled == 0) {
-      _checkpointMaturity();
+  /// @notice Routes collected fees to the correct token depending on maturity.
+  /// @dev Before maturity -> YT accrues fees. At/after maturity -> PT accrues fees.
+  function updateFees(uint256 _collectedFeeToken0, uint256 _collectedFeeToken1) external {
+    if (!_hasMaturityReached()) {
+      YIELD_TOKEN.updateFees(_collectedFeeToken0, _collectedFeeToken1);
+      return;
     }
 
-    _ptGlobalFees._updateFees(_collectedFeeToken0, _collectedFeeToken1, PRINCIPAL_TOKEN.totalSupply());
-
-    emit PTFeeIndexesUpdated(
-      _ptGlobalFees.globalFeeIndex0Scaled,
-      _ptGlobalFees.globalFeeIndex1Scaled,
-      _collectedFeeToken0,
-      _collectedFeeToken1
-    );
-  }
-
-  /// @notice Global cumulative fee index for PT token0.
-  /// @dev Scaled by PRECISION. Only meaningful after maturity is checkpointed.
-  function ptGlobalFeeIndex0Scaled() external view returns (uint256) {
-    return _ptGlobalFees.globalFeeIndex0Scaled;
-  }
-
-  /// @notice Global cumulative fee index for PT token1.
-  /// @dev Scaled by PRECISION. Only meaningful after maturity is checkpointed.
-  function ptGlobalFeeIndex1Scaled() external view returns (uint256) {
-    return _ptGlobalFees.globalFeeIndex1Scaled;
-  }
-
-  /// @notice Whether maturity has been checkpointed.
-  /// @dev Derived by checking if PT global fee indexes have been initialized (non-zero).
-  function maturityCheckpointed() external view returns (bool) {
-    if (!_hasMaturityReached()) return false;
-    return _ptGlobalFees.globalFeeIndex0Scaled > 0 || _ptGlobalFees.globalFeeIndex1Scaled > 0;
+    _checkpointMaturity();
+    PRINCIPAL_TOKEN.updateFees(_collectedFeeToken0, _collectedFeeToken1);
   }
 
   /*//////////////////////////////////////////////////////////////
@@ -351,96 +294,16 @@ contract FixedFeeSwapHook is BaseHook {
   ///      After checkpointing, fees will be routed to PT instead of YT.
   function _checkpointMaturity() internal {
     if (!_hasMaturityReached()) revert FixedFeeSwapHook_InvalidMaturity();
-    
-    // Check if already checkpointed by seeing if PT indexes have been initialized
-    if (_ptGlobalFees.globalFeeIndex0Scaled > 0 || _ptGlobalFees.globalFeeIndex1Scaled > 0) {
-      return; // Already checkpointed, no-op
-    }
+    if (isMaturityCheckpointed) return;
 
     // Record YT's final global fee indexes as the starting point for PT
     uint256 _ytFinalIndex0 = YIELD_TOKEN.globalFeeIndex0Scaled();
     uint256 _ytFinalIndex1 = YIELD_TOKEN.globalFeeIndex1Scaled();
 
-    // Initialize PT global fees with YT's final indexes
-    _ptGlobalFees.globalFeeIndex0Scaled = _ytFinalIndex0;
-    _ptGlobalFees.globalFeeIndex1Scaled = _ytFinalIndex1;
+    // Initialize PT's fee index baseline to match YT's final indexes.
+    PRINCIPAL_TOKEN.initializeFeeIndexes(_ytFinalIndex0, _ytFinalIndex1);
+    isMaturityCheckpointed = true;
 
     emit MaturityCheckpointed(_ytFinalIndex0, _ytFinalIndex1);
-  }
-
-  /// @notice Updates a user's accrued PT fees based on their current PT balance.
-  /// @param _user The address to update fees for.
-  /// @dev Should be called before burning PT to ensure accurate fee calculation.
-  function _updatePTUserFees(address _user) internal {
-    // Why this exists (example):
-    // - You mint 100 PT + 100 YT before maturity.
-    // - You transfer me 50 PT (PT transfers do NOT touch the hook).
-    // - At maturity, PT fee tracking starts from a baseline (the frozen YT fee indexes).
-    //
-    // If neither of us has ever interacted with PT fee tracking before, our PT user checkpoints are 0.
-    // Without initializing them, our first claim would accrue `currentPtIndex - 0`, which incorrectly
-    // includes the baseline (pre-maturity history) even though PT rewards are meant to start at maturity.
-    //
-    // Fix: on first post-maturity PT interaction, set the user's PT checkpoint to the frozen YT indexes
-    // so they only accrue from the maturity baseline forward.
-    //
-    // Why this is not sufficient (post-maturity transfer example):
-    // - Maturity baseline is 100 (PT global index starts at 100).
-    // - Alice holds 100 PT while PT index moves 100 -> 110 (Alice has earned fees for 100 -> 110).
-    // - Alice transfers her 100 PT to Bob when the PT index is 110.
-    //   IMPORTANT: this transfer happens inside the PT ERC20 and does NOT call into this hook, so we
-    //   cannot sync Alice/Bob fee checkpoints at the moment of transfer.
-    // - Later the PT index moves 110 -> 120 and then Bob claims.
-    //   If Bob's checkpoint is still 100, his claim accrues 100 -> 120 (includes 100 -> 110 he did NOT hold).
-    //   If Alice later claims with 0 PT, she accrues nothing and effectively loses 100 -> 110.
-    //
-    if (_hasMaturityReached()) {
-      FeeTracking.UserFees storage _uf = ptUserFees[_user];
-      if (_uf.userFeeIndex0Scaled == 0 && _uf.userFeeIndex1Scaled == 0) {
-        _uf.userFeeIndex0Scaled = YIELD_TOKEN.globalFeeIndex0Scaled();
-        _uf.userFeeIndex1Scaled = YIELD_TOKEN.globalFeeIndex1Scaled();
-      }
-    }
-
-    uint256 _userBalance = PRINCIPAL_TOKEN.balanceOf(_user);
-    ptUserFees[_user]._updateUserFees(
-      _userBalance,
-      _ptGlobalFees.globalFeeIndex0Scaled,
-      _ptGlobalFees.globalFeeIndex1Scaled
-    );
-  }
-
-  /// @notice Claims accrued PT fees for a user and transfers them.
-  /// @param _user The address to claim fees for.
-  /// @return _claimedToken0 Amount of token0 fees claimed.
-  /// @return _claimedToken1 Amount of token1 fees claimed.
-  function _claimPTFees(address _user) internal returns (uint256 _claimedToken0, uint256 _claimedToken1) {
-    // Update user fees to ensure we're syncing to the latest global indices
-    _updatePTUserFees(_user);
-
-    // Get the accrued amounts before resetting
-    (_claimedToken0, _claimedToken1) = ptUserFees[_user]._resetAccruedFees();
-
-    // Emit event for transparency
-    emit PTFeesClaimed(_user, _claimedToken0, _claimedToken1);
-
-    // Transfer tokens to the user
-    _transferAmount(FEE_TOKEN0, _user, _claimedToken0);
-    _transferAmount(FEE_TOKEN1, _user, _claimedToken1);
-  }
-
-  /// @notice Transfers an amount of tokens to a user.
-  /// @param _token The address of the token to transfer.
-  /// @param _to The address to transfer the tokens to.
-  /// @param _amount The amount of tokens to transfer.
-  /// @dev Following Uniswap v4's convention: address(0) represents native ETH.
-  ///      See: https://github.com/Uniswap/v4-core/blob/main/src/types/Currency.sol#L37-L38
-  function _transferAmount(address _token, address _to, uint256 _amount) internal {
-    if (_token == address(0)) {
-      (bool _success,) = payable(_to).call{value: _amount}("");
-      if (!_success) revert FixedFeeSwapHook_TransferFailed();
-    } else {
-      SafeERC20.safeTransfer(IERC20(_token), _to, _amount);
-    }
   }
 }

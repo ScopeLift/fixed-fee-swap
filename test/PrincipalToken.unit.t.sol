@@ -13,7 +13,7 @@ contract PrincipalTokenTest is Test {
 
   function setUp() public virtual {
     hook = makeAddr("hook");
-    principalToken = new PrincipalToken("Principal Token", "PT", hook);
+    principalToken = new PrincipalToken("Principal Token", "PT", hook, address(0), address(0));
   }
 
   function _assumeSafeAddress(address _addr) internal pure {
@@ -33,6 +33,8 @@ contract Constructor is PrincipalTokenTest {
 
     // fixedFeeSwapHook is set to deployer
     assertEq(principalToken.FIXED_FEE_SWAP_HOOK(), hook);
+    assertEq(principalToken.FEE_TOKEN0(), address(0));
+    assertEq(principalToken.FEE_TOKEN1(), address(0));
   }
 }
 
