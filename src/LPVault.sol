@@ -99,11 +99,6 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   /// @param poolManager The address of the Uniswap v4 pool manager.
   event PoolManagerSet(address indexed poolManager);
 
-  /// @notice Emitted when the vault tokens are set during construction.
-  /// @param token0 The address of token0.
-  /// @param token1 The address of token1.
-  event TokensSet(address indexed token0, address indexed token1);
-
   /// @notice Emitted when a deposit is made.
   /// @param depositor The address that deposited and received shares.
   /// @param shares The amount of vault shares minted.
@@ -151,7 +146,6 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     targetPoolKey = _targetPoolKey;
     TOKEN0 = Currency.unwrap(_targetPoolKey.currency0);
     TOKEN1 = Currency.unwrap(_targetPoolKey.currency1);
-    emit TokensSet(TOKEN0, TOKEN1);
 
     _initializePositions(_positions);
   }
@@ -346,8 +340,6 @@ contract LPVault is VaultShareToken, IUnlockCallback {
       );
 
       _liquidityPerPosition[_i] = _liquidity;
-
-      if (_liquidity == 0) continue;
 
       (BalanceDelta _delta,) = POOL_MANAGER.modifyLiquidity(
         targetPoolKey,
