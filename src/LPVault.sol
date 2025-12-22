@@ -418,8 +418,6 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     for (uint256 _i = 0; _i < positions.length; _i++) {
       uint128 _liquidity = _liquidityToRemove[_i];
 
-      if (_liquidity == 0) continue;
-
       LiquidityPosition memory _position = positions[_i];
 
       (BalanceDelta _delta,) = POOL_MANAGER.modifyLiquidity(
