@@ -444,9 +444,9 @@ contract Claim is YieldTokenTest {
     vm.prank(_nonHook);
     yieldToken.claim(_user);
   }
-}
 
-contract ClaimEth is YieldTokenTest {
+  // ========== ETH-specific claim tests ==========
+
   function testFuzz_ClaimsEthAndErc20Successfully(
     address, // unused fuzzed address
     uint256 _mintAmount,

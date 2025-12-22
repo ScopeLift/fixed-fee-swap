@@ -7,7 +7,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 // Internal imports
-import {FeeTracking} from "./lib/FeeTracking.sol";
+import {FeeTracking} from "src/lib/FeeTracking.sol";
 
 contract YieldToken is ERC20 {
   using FeeTracking for FeeTracking.GlobalFees;
@@ -116,8 +116,8 @@ contract YieldToken is ERC20 {
 
   /// @notice Claims accrued (but not yet claimed) fees for a `_user`.
   /// @param _user Address whose accrued fees will be claimed.
-  /// @return _claimedToken0 Amount of FEE_TOKEN_0 transferred to `_user`.
-  /// @return _claimedToken1 Amount of FEE_TOKEN_1 transferred to `_user`.
+  /// @return _claimedToken0 Amount of `FEE_TOKEN_0` transferred to `_user`.
+  /// @return _claimedToken1 Amount of `FEE_TOKEN_1` transferred to `_user`.
   function claim(address _user) external returns (uint256 _claimedToken0, uint256 _claimedToken1) {
     _requireHook();
     (_claimedToken0, _claimedToken1) = _claim(_user);
@@ -196,8 +196,8 @@ contract YieldToken is ERC20 {
 
   /// @notice Claims accrued fees for a user after syncing to the latest global indices.
   /// @param _user The address to claim fees for.
-  /// @return _claimedToken0 Amount of FEE_TOKEN_0 that was transferred.
-  /// @return _claimedToken1 Amount of FEE_TOKEN_1 that was transferred.
+  /// @return _claimedToken0 Amount of `FEE_TOKEN_0` that was transferred.
+  /// @return _claimedToken1 Amount of `FEE_TOKEN_1` that was transferred.
   function _claim(address _user) internal returns (uint256 _claimedToken0, uint256 _claimedToken1) {
     // Update user fees to ensure we're syncing to the latest global indices
     _updateUserFees(_user);
