@@ -103,6 +103,59 @@ contract Mint is YieldTokenTest {
     vm.expectRevert(YieldToken.YieldToken_NotAuthorized.selector);
     yieldToken.mint(_to, _amount);
   }
+
+  // ========== _updateUserFees tests via mint ==========
+
+  function testFuzz_UserDoesNotRetroactivelyEarnFeesWhenMintingAfterFeesCollected(
+    address _existingUser,
+    address _newUser,
+    uint256 _existingUserMintAmount,
+    uint256 _collectedFeeToken0,
+    uint256 _collectedFeeToken1,
+    uint256 _newUserMintAmount
+  ) public {
+    _assumeSafeAddress(_existingUser);
+    _assumeSafeAddress(_newUser);
+    vm.assume(_existingUser != _newUser);
+    _existingUserMintAmount = _boundMintAmount(_existingUserMintAmount);
+    _newUserMintAmount = _boundMintAmount(_newUserMintAmount);
+    _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
+    _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
+
+    // Another user mints shares and fees are collected via the hook
+    vm.prank(hook);
+    yieldToken.mint(_existingUser, _existingUserMintAmount);
+    vm.prank(hook);
+    yieldToken.updateFees(_collectedFeeToken0, _collectedFeeToken1);
+
+    // Get the global fee indices after fees are collected
+    uint256 _globalFeeIndex0 = yieldToken.globalFeeIndex0Scaled();
+    uint256 _globalFeeIndex1 = yieldToken.globalFeeIndex1Scaled();
+
+    // New user mints shares after fees have already been collected via the hook
+    vm.prank(hook);
+    yieldToken.mint(_newUser, _newUserMintAmount);
+
+    // Perform the update for the new user via 0-value self-transfer
+    vm.prank(_newUser);
+    yieldToken.transfer(_newUser, 0);
+
+    // Destructure the tuple for the new user
+    (
+      uint256 _newUserFeeIndex0,
+      uint256 _newUserFeeIndex1,
+      uint256 _newUserAccruedToken0,
+      uint256 _newUserAccruedToken1
+    ) = yieldToken.userFees(_newUser);
+
+    // New user indices should sync to current global indices
+    assertEq(_newUserFeeIndex0, _globalFeeIndex0);
+    assertEq(_newUserFeeIndex1, _globalFeeIndex1);
+
+    // New user should NOT retroactively earn fees from before they minted
+    assertEq(_newUserAccruedToken0, 0);
+    assertEq(_newUserAccruedToken1, 0);
+  }
 }
 
 contract Burn is YieldTokenTest {
@@ -137,6 +190,59 @@ contract Burn is YieldTokenTest {
     vm.expectRevert(YieldToken.YieldToken_NotAuthorized.selector);
     vm.prank(_nonHook);
     yieldToken.burn(_user, _amount);
+  }
+
+  // ========== _updateUserFees tests via burn ==========
+
+  function testFuzz_BurnUpdatesUserFeesBeforeBurning(
+    address _user,
+    uint256 _mintAmount,
+    uint256 _collectedFeeToken0,
+    uint256 _collectedFeeToken1
+  ) public {
+    _assumeSafeAddress(_user);
+    _mintAmount = _boundMintAmount(_mintAmount);
+    _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
+    _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
+
+    // Mint shares for user via the hook
+    vm.prank(hook);
+    yieldToken.mint(_user, _mintAmount);
+
+    // Collect fees to change global indices via the hook
+    vm.prank(hook);
+    yieldToken.updateFees(_collectedFeeToken0, _collectedFeeToken1);
+
+    // Get the global fee indices
+    uint256 _globalFeeIndex0 = yieldToken.globalFeeIndex0Scaled();
+    uint256 _globalFeeIndex1 = yieldToken.globalFeeIndex1Scaled();
+
+    // User's index before burn is 0 (default for new user)
+    uint256 _userFeeIndex0Before = 0;
+    uint256 _userFeeIndex1Before = 0;
+
+    // Burn tokens - this should trigger _updateUserFees before burning
+    vm.prank(hook);
+    yieldToken.burn(_user, _mintAmount);
+
+    // Destructure the tuple after the burn
+    (
+      uint256 _userFeeIndex0,
+      uint256 _userFeeIndex1,
+      uint256 _userAccruedToken0,
+      uint256 _userAccruedToken1
+    ) = yieldToken.userFees(_user);
+
+    // Check that the user's fees were updated before burning
+    // User should have accrued fees for the period they held shares
+    assertEq(_userFeeIndex0, _globalFeeIndex0);
+    assertEq(_userFeeIndex1, _globalFeeIndex1);
+    assertEq(
+      _userAccruedToken0, _calculateAccruedFees(_mintAmount, _globalFeeIndex0, _userFeeIndex0Before)
+    );
+    assertEq(
+      _userAccruedToken1, _calculateAccruedFees(_mintAmount, _globalFeeIndex1, _userFeeIndex1Before)
+    );
   }
 }
 
@@ -322,196 +428,32 @@ contract UpdateFees is YieldTokenTest {
   }
 }
 
-contract Claim is YieldTokenTest {
-  function testFuzz_ClaimTransfersAccruedFeesToUser(
-    address _user,
-    uint256 _mintAmount,
-    uint256 _collectedFeeToken0,
-    uint256 _collectedFeeToken1
-  ) public {
-    _assumeSafeAddress(_user);
-    _mintAmount = _boundMintAmount(_mintAmount);
-    _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
-    _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
+contract Transfer is YieldTokenTest {
+  function testFuzz_TransfersTokens(address _from, address _to, uint256 _amount) public {
+    _assumeSafeAddress(_from);
+    _assumeSafeAddress(_to);
+    vm.assume(_from != _to);
+    _amount = _boundMintAmount(_amount);
 
-    // Mint and send fees for token0 and token1 into the yield token contract
-    token0.mint(address(yieldToken), _collectedFeeToken0);
-    token1.mint(address(yieldToken), _collectedFeeToken1);
-
-    // User mints shares via the hook
+    // Mint tokens to sender via hook
     vm.prank(hook);
-    yieldToken.mint(_user, _mintAmount);
+    yieldToken.mint(_from, _amount);
 
-    // Fees collected (global indices increase)
-    vm.prank(hook);
-    yieldToken.updateFees(_collectedFeeToken0, _collectedFeeToken1);
+    assertEq(yieldToken.balanceOf(_from), _amount);
+    assertEq(yieldToken.balanceOf(_to), 0);
 
-    // Sync user fees to latest global indices
-    vm.prank(hook);
-    yieldToken.claim(_user);
-    // After claim, user fees should have been reset; we just ensure no revert and balances updated
-    // Note: actual token transfers are covered by event test below
+    // Transfer tokens
+    vm.prank(_from);
+    bool _success = yieldToken.transfer(_to, _amount);
+    assertTrue(_success);
+
+    // Verify balances are updated
+    assertEq(yieldToken.balanceOf(_from), 0);
+    assertEq(yieldToken.balanceOf(_to), _amount);
   }
 
-  function testFuzz_EmitsFeesClaimedEvent(
-    address _user,
-    uint256 _mintAmount,
-    uint256 _collectedFeeToken0,
-    uint256 _collectedFeeToken1
-  ) public {
-    _assumeSafeAddress(_user);
-    _mintAmount = _boundMintAmount(_mintAmount);
-    _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
-    _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
+  // ========== _updateUserFees tests via transfer ==========
 
-    // Mint and send fees for token0 and token1 into the yield token contract
-    token0.mint(address(yieldToken), _collectedFeeToken0);
-    token1.mint(address(yieldToken), _collectedFeeToken1);
-
-    // User mints shares via the hook
-    vm.prank(hook);
-    yieldToken.mint(_user, _mintAmount);
-
-    // Fees collected (global indices increase)
-    vm.prank(hook);
-    yieldToken.updateFees(_collectedFeeToken0, _collectedFeeToken1);
-
-    // Compute expected accrued fees for the user based on current global indices
-    uint256 _globalFeeIndex0 = yieldToken.globalFeeIndex0Scaled();
-    uint256 _globalFeeIndex1 = yieldToken.globalFeeIndex1Scaled();
-    uint256 _userIndex0Before = 0;
-    uint256 _userIndex1Before = 0;
-    uint256 _expectedAccruedToken0 =
-      _calculateAccruedFees(_mintAmount, _globalFeeIndex0, _userIndex0Before);
-    uint256 _expectedAccruedToken1 =
-      _calculateAccruedFees(_mintAmount, _globalFeeIndex1, _userIndex1Before);
-
-    vm.expectEmit();
-    emit YieldToken.FeesClaimed(
-      _user, address(token0), address(token1), _expectedAccruedToken0, _expectedAccruedToken1
-    );
-
-    vm.prank(hook);
-    yieldToken.claim(_user);
-  }
-
-  function testFuzz_ClaimsFeesAlsoSyncsToLatestGlobalIndices(
-    address _user,
-    uint256 _mintAmount,
-    uint256 _collectedFeeToken0,
-    uint256 _collectedFeeToken1
-  ) public {
-    _assumeSafeAddress(_user);
-    _mintAmount = _boundMintAmount(_mintAmount);
-    _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
-    _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
-
-    // Mint and send fees for token0 and token1 into the yield token contract
-    token0.mint(address(yieldToken), _collectedFeeToken0);
-    token1.mint(address(yieldToken), _collectedFeeToken1);
-
-    // User mints shares via the hook
-    vm.prank(hook);
-    yieldToken.mint(_user, _mintAmount);
-
-    // Fees collected (global indices increase)
-    vm.prank(hook);
-    yieldToken.updateFees(_collectedFeeToken0, _collectedFeeToken1);
-
-    // Now claim via hook
-    vm.prank(hook);
-    yieldToken.claim(_user);
-
-    // Verify user fees are synced to latest global indices and accrued reset
-    (
-      uint256 _userFeeIndex0AfterClaiming,
-      uint256 _userFeeIndex1AfterClaiming,
-      uint256 _accrued0AfterClaiming,
-      uint256 _accrued1AfterClaiming
-    ) = yieldToken.userFees(_user);
-
-    assertEq(_userFeeIndex0AfterClaiming, yieldToken.globalFeeIndex0Scaled());
-    assertEq(_userFeeIndex1AfterClaiming, yieldToken.globalFeeIndex1Scaled());
-    assertEq(_accrued0AfterClaiming, 0);
-    assertEq(_accrued1AfterClaiming, 0);
-  }
-
-  function testFuzz_RevertIf_ClaimCalledByNonHook(address _user, address _nonHook) public {
-    _assumeSafeAddress(_user);
-    vm.assume(_nonHook != hook);
-
-    vm.expectRevert(YieldToken.YieldToken_NotAuthorized.selector);
-    vm.prank(_nonHook);
-    yieldToken.claim(_user);
-  }
-
-  // ========== ETH-specific claim tests ==========
-
-  function testFuzz_ClaimsEthAndErc20Successfully(
-    address, // unused fuzzed address
-    uint256 _mintAmount,
-    uint256 _collectedEth,
-    uint256 _collectedToken1
-  ) public {
-    // Use a dedicated EOA-style address as the fee receiver to avoid contracts like console
-    address _user = makeAddr("ethReceiver");
-
-    // Deploy a YieldToken instance that treats ETH as token0
-    YieldToken ethYieldToken =
-      new YieldToken("Yield Token", "YT", hook, address(0), address(token1));
-
-    // Bound inputs and require at least one non-zero fee
-    _mintAmount = _boundMintAmount(_mintAmount);
-    _collectedEth = _boundFeeAmount(_collectedEth);
-    _collectedToken1 = _boundFeeAmount(_collectedToken1);
-    vm.assume(_collectedEth > 0 || _collectedToken1 > 0);
-
-    // Fund the YieldToken with ETH and ERC20 fees
-    vm.deal(address(ethYieldToken), _collectedEth);
-    token1.mint(address(ethYieldToken), _collectedToken1);
-
-    // User mints shares via the hook
-    vm.prank(hook);
-    ethYieldToken.mint(_user, _mintAmount);
-
-    // Collect fees (global indices increase)
-    vm.prank(hook);
-    ethYieldToken.updateFees(_collectedEth, _collectedToken1);
-
-    // Claim via hook – should succeed and exercise ETH + ERC20 transfer paths
-    vm.prank(hook);
-    ethYieldToken.claim(_user);
-  }
-
-  function testFuzz_RevertIf_EthTransferFails(uint256 _mintAmount, uint256 _collectedEth) public {
-    _mintAmount = _boundMintAmount(_mintAmount);
-    _collectedEth = _boundFeeAmount(_collectedEth);
-    vm.assume(_collectedEth > 0);
-
-    // Deploy a YieldToken instance that treats ETH as token0
-    YieldToken ethYieldToken =
-      new YieldToken("Yield Token", "YT", hook, address(0), address(token1));
-
-    // Non‑payable recipient that rejects ETH
-    NonPayableContractMock _nonPayable = new NonPayableContractMock();
-
-    // Fund ETH to the token, mint shares to non‑payable, and update fees
-    vm.deal(address(ethYieldToken), _collectedEth);
-
-    vm.prank(hook);
-    ethYieldToken.mint(address(_nonPayable), _mintAmount);
-
-    vm.prank(hook);
-    ethYieldToken.updateFees(_collectedEth, 0);
-
-    // Attempt to claim should revert with YieldToken_TransferFailed
-    vm.expectRevert(YieldToken.YieldToken_TransferFailed.selector);
-    vm.prank(hook);
-    ethYieldToken.claim(address(_nonPayable));
-  }
-}
-
-contract UpdateUserFees is YieldTokenTest {
   // ========== Branch 1: User has no shares (_userBalance == 0) ==========
 
   function testFuzz_UserWithNoSharesSyncsToZeroGlobalIndices(address _user) public {
@@ -885,57 +827,6 @@ contract UpdateUserFees is YieldTokenTest {
     );
   }
 
-  function testFuzz_UserWithSharesDoesNotRetroactivelyEarnFeesWhenMintingAfterFeesCollected(
-    address _existingUser,
-    address _newUser,
-    uint256 _existingUserMintAmount,
-    uint256 _collectedFeeToken0,
-    uint256 _collectedFeeToken1,
-    uint256 _newUserMintAmount
-  ) public {
-    _assumeSafeAddress(_existingUser);
-    _assumeSafeAddress(_newUser);
-    vm.assume(_existingUser != _newUser);
-    _existingUserMintAmount = _boundMintAmount(_existingUserMintAmount);
-    _newUserMintAmount = _boundMintAmount(_newUserMintAmount);
-    _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
-    _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
-
-    // Another user mints shares and fees are collected via the hook
-    vm.prank(hook);
-    yieldToken.mint(_existingUser, _existingUserMintAmount);
-    vm.prank(hook);
-    yieldToken.updateFees(_collectedFeeToken0, _collectedFeeToken1);
-
-    // Get the global fee indices after fees are collected
-    uint256 _globalFeeIndex0 = yieldToken.globalFeeIndex0Scaled();
-    uint256 _globalFeeIndex1 = yieldToken.globalFeeIndex1Scaled();
-
-    // New user mints shares after fees have already been collected via the hook
-    vm.prank(hook);
-    yieldToken.mint(_newUser, _newUserMintAmount);
-
-    // Perform the update for the new user via 0-value self-transfer
-    vm.prank(_newUser);
-    yieldToken.transfer(_newUser, 0);
-
-    // Destructure the tuple for the new user
-    (
-      uint256 _newUserFeeIndex0,
-      uint256 _newUserFeeIndex1,
-      uint256 _newUserAccruedToken0,
-      uint256 _newUserAccruedToken1
-    ) = yieldToken.userFees(_newUser);
-
-    // New user indices should sync to current global indices
-    assertEq(_newUserFeeIndex0, _globalFeeIndex0);
-    assertEq(_newUserFeeIndex1, _globalFeeIndex1);
-
-    // New user should NOT retroactively earn fees from before they minted
-    assertEq(_newUserAccruedToken0, 0);
-    assertEq(_newUserAccruedToken1, 0);
-  }
-
   /// @notice Helper function to mint shares, collect fees, and sync user fees via public flows.
   function _mintSharesAndCollectFeesHelper(
     address _user,
@@ -955,5 +846,194 @@ contract UpdateUserFees is YieldTokenTest {
     // Sync user fees to latest global indices via 0-value transfer
     vm.prank(_user);
     _yieldToken.transfer(_user, 0);
+  }
+}
+
+contract Claim is YieldTokenTest {
+  function testFuzz_ClaimTransfersAccruedFeesToUser(
+    address _user,
+    uint256 _mintAmount,
+    uint256 _collectedFeeToken0,
+    uint256 _collectedFeeToken1
+  ) public {
+    _assumeSafeAddress(_user);
+    _mintAmount = _boundMintAmount(_mintAmount);
+    _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
+    _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
+
+    // Mint and send fees for token0 and token1 into the yield token contract
+    token0.mint(address(yieldToken), _collectedFeeToken0);
+    token1.mint(address(yieldToken), _collectedFeeToken1);
+
+    // User mints shares via the hook
+    vm.prank(hook);
+    yieldToken.mint(_user, _mintAmount);
+
+    // Fees collected (global indices increase)
+    vm.prank(hook);
+    yieldToken.updateFees(_collectedFeeToken0, _collectedFeeToken1);
+
+    // Sync user fees to latest global indices
+    vm.prank(hook);
+    yieldToken.claim(_user);
+    // After claim, user fees should have been reset; we just ensure no revert and balances updated
+    // Note: actual token transfers are covered by event test below
+  }
+
+  function testFuzz_EmitsFeesClaimedEvent(
+    address _user,
+    uint256 _mintAmount,
+    uint256 _collectedFeeToken0,
+    uint256 _collectedFeeToken1
+  ) public {
+    _assumeSafeAddress(_user);
+    _mintAmount = _boundMintAmount(_mintAmount);
+    _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
+    _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
+
+    // Mint and send fees for token0 and token1 into the yield token contract
+    token0.mint(address(yieldToken), _collectedFeeToken0);
+    token1.mint(address(yieldToken), _collectedFeeToken1);
+
+    // User mints shares via the hook
+    vm.prank(hook);
+    yieldToken.mint(_user, _mintAmount);
+
+    // Fees collected (global indices increase)
+    vm.prank(hook);
+    yieldToken.updateFees(_collectedFeeToken0, _collectedFeeToken1);
+
+    // Compute expected accrued fees for the user based on current global indices
+    uint256 _globalFeeIndex0 = yieldToken.globalFeeIndex0Scaled();
+    uint256 _globalFeeIndex1 = yieldToken.globalFeeIndex1Scaled();
+    uint256 _userIndex0Before = 0;
+    uint256 _userIndex1Before = 0;
+    uint256 _expectedAccruedToken0 =
+      _calculateAccruedFees(_mintAmount, _globalFeeIndex0, _userIndex0Before);
+    uint256 _expectedAccruedToken1 =
+      _calculateAccruedFees(_mintAmount, _globalFeeIndex1, _userIndex1Before);
+
+    vm.expectEmit();
+    emit YieldToken.FeesClaimed(
+      _user, address(token0), address(token1), _expectedAccruedToken0, _expectedAccruedToken1
+    );
+
+    vm.prank(hook);
+    yieldToken.claim(_user);
+  }
+
+  function testFuzz_ClaimsFeesAlsoSyncsToLatestGlobalIndices(
+    address _user,
+    uint256 _mintAmount,
+    uint256 _collectedFeeToken0,
+    uint256 _collectedFeeToken1
+  ) public {
+    _assumeSafeAddress(_user);
+    _mintAmount = _boundMintAmount(_mintAmount);
+    _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
+    _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
+
+    // Mint and send fees for token0 and token1 into the yield token contract
+    token0.mint(address(yieldToken), _collectedFeeToken0);
+    token1.mint(address(yieldToken), _collectedFeeToken1);
+
+    // User mints shares via the hook
+    vm.prank(hook);
+    yieldToken.mint(_user, _mintAmount);
+
+    // Fees collected (global indices increase)
+    vm.prank(hook);
+    yieldToken.updateFees(_collectedFeeToken0, _collectedFeeToken1);
+
+    // Now claim via hook
+    vm.prank(hook);
+    yieldToken.claim(_user);
+
+    // Verify user fees are synced to latest global indices and accrued reset
+    (
+      uint256 _userFeeIndex0AfterClaiming,
+      uint256 _userFeeIndex1AfterClaiming,
+      uint256 _accrued0AfterClaiming,
+      uint256 _accrued1AfterClaiming
+    ) = yieldToken.userFees(_user);
+
+    assertEq(_userFeeIndex0AfterClaiming, yieldToken.globalFeeIndex0Scaled());
+    assertEq(_userFeeIndex1AfterClaiming, yieldToken.globalFeeIndex1Scaled());
+    assertEq(_accrued0AfterClaiming, 0);
+    assertEq(_accrued1AfterClaiming, 0);
+  }
+
+  function testFuzz_RevertIf_ClaimCalledByNonHook(address _user, address _nonHook) public {
+    _assumeSafeAddress(_user);
+    vm.assume(_nonHook != hook);
+
+    vm.expectRevert(YieldToken.YieldToken_NotAuthorized.selector);
+    vm.prank(_nonHook);
+    yieldToken.claim(_user);
+  }
+
+  // ========== ETH-specific claim tests ==========
+
+  function testFuzz_ClaimsEthAndErc20Successfully(
+    address, // unused fuzzed address
+    uint256 _mintAmount,
+    uint256 _collectedEth,
+    uint256 _collectedToken1
+  ) public {
+    // Use a dedicated EOA-style address as the fee receiver to avoid contracts like console
+    address _user = makeAddr("ethReceiver");
+
+    // Deploy a YieldToken instance that treats ETH as token0
+    YieldToken ethYieldToken =
+      new YieldToken("Yield Token", "YT", hook, address(0), address(token1));
+
+    // Bound inputs and require at least one non-zero fee
+    _mintAmount = _boundMintAmount(_mintAmount);
+    _collectedEth = _boundFeeAmount(_collectedEth);
+    _collectedToken1 = _boundFeeAmount(_collectedToken1);
+    vm.assume(_collectedEth > 0 || _collectedToken1 > 0);
+
+    // Fund the YieldToken with ETH and ERC20 fees
+    vm.deal(address(ethYieldToken), _collectedEth);
+    token1.mint(address(ethYieldToken), _collectedToken1);
+
+    // User mints shares via the hook
+    vm.prank(hook);
+    ethYieldToken.mint(_user, _mintAmount);
+
+    // Collect fees (global indices increase)
+    vm.prank(hook);
+    ethYieldToken.updateFees(_collectedEth, _collectedToken1);
+
+    // Claim via hook – should succeed and exercise ETH + ERC20 transfer paths
+    vm.prank(hook);
+    ethYieldToken.claim(_user);
+  }
+
+  function testFuzz_RevertIf_EthTransferFails(uint256 _mintAmount, uint256 _collectedEth) public {
+    _mintAmount = _boundMintAmount(_mintAmount);
+    _collectedEth = _boundFeeAmount(_collectedEth);
+    vm.assume(_collectedEth > 0);
+
+    // Deploy a YieldToken instance that treats ETH as token0
+    YieldToken ethYieldToken =
+      new YieldToken("Yield Token", "YT", hook, address(0), address(token1));
+
+    // Non‑payable recipient that rejects ETH
+    NonPayableContractMock _nonPayable = new NonPayableContractMock();
+
+    // Fund ETH to the token, mint shares to non‑payable, and update fees
+    vm.deal(address(ethYieldToken), _collectedEth);
+
+    vm.prank(hook);
+    ethYieldToken.mint(address(_nonPayable), _mintAmount);
+
+    vm.prank(hook);
+    ethYieldToken.updateFees(_collectedEth, 0);
+
+    // Attempt to claim should revert with YieldToken_TransferFailed
+    vm.expectRevert(YieldToken.YieldToken_TransferFailed.selector);
+    vm.prank(hook);
+    ethYieldToken.claim(address(_nonPayable));
   }
 }
