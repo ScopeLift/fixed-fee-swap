@@ -106,7 +106,9 @@ contract FixedFeeSwapHook is BaseHook {
     YIELD_TOKEN = new YieldToken(
       string.concat("Yield ", _underlyingName),
       string.concat("YT-", _underlyingSymbol, "-", _maturityStr),
-      address(this)
+      address(this),
+      VAULT_SHARE_TOKEN.FEE_TOKEN0(),
+      VAULT_SHARE_TOKEN.FEE_TOKEN1()
     );
 
     MATURITY = _maturity;

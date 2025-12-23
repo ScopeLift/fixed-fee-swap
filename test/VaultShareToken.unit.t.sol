@@ -9,6 +9,7 @@ import {VaultShareToken} from "src/VaultShareToken.sol";
 import {VaultShareTokenHarness} from "test/harness/VaultShareTokenHarness.sol";
 import {ERC20Mock} from "test/mock/ERC20Mock.sol";
 import {NonPayableContractMock} from "test/mock/NonPayableContractMock.sol";
+import {FeeTracking} from "src/lib/FeeTracking.sol";
 
 contract VaultShareTokenTest is Test {
   VaultShareTokenHarness public vaultShareToken;
@@ -66,20 +67,20 @@ contract VaultShareTokenTest is Test {
 
   function _calculateFeeIndex(uint256 _collectedFeeToken, uint256 _supply)
     internal
-    view
+    pure
     returns (uint256)
   {
     // Manually reproduce the formula `(collected * PRECISION) / supply` rather than calling
     // Math.mulDiv so that the test cross-checks production logic via an equivalent expression.
     if (_supply == 0) return 0;
     unchecked {
-      return (_collectedFeeToken * vaultShareToken.PRECISION()) / _supply;
+      return (_collectedFeeToken * FeeTracking.PRECISION) / _supply;
     }
   }
 
   function _calculateAccruedFees(uint256 _userBalance, uint256 _globalIndex, uint256 _userIndex)
     internal
-    view
+    pure
     returns (uint256)
   {
     // Manually reproduce the formula `(balance * (globalIndex - userIndex)) / PRECISION` rather
@@ -87,7 +88,7 @@ contract VaultShareTokenTest is Test {
     // expression.
     if (_globalIndex == _userIndex) return 0;
     unchecked {
-      return (_userBalance * (_globalIndex - _userIndex)) / vaultShareToken.PRECISION();
+      return (_userBalance * (_globalIndex - _userIndex)) / FeeTracking.PRECISION;
     }
   }
 

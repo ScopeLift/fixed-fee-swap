@@ -3,8 +3,16 @@ pragma solidity 0.8.26;
 
 // External Imports
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+// Internal imports
+import {FeeTracking} from "src/lib/FeeTracking.sol";
 
 contract YieldToken is ERC20 {
+  using FeeTracking for FeeTracking.GlobalFees;
+  using FeeTracking for FeeTracking.UserFees;
+
   /*//////////////////////////////////////////////////////////////
                         ERRORS
   //////////////////////////////////////////////////////////////*/
@@ -12,12 +20,59 @@ contract YieldToken is ERC20 {
   /// @notice Thrown when the caller is not authorized.
   error YieldToken_NotAuthorized();
 
+  /// @notice Thrown when a transfer fails.
+  error YieldToken_TransferFailed();
+
+  /*//////////////////////////////////////////////////////////////
+                          EVENTS
+  //////////////////////////////////////////////////////////////*/
+
+  /// @notice Emitted when the global cumulative fee index for token0 and token1 are updated.
+  /// @param newglobalFeeIndex0Scaled Updated global cumulative fee index for token0
+  /// @param newglobalFeeIndex1Scaled Updated global cumulative fee index for token1
+  /// @param collectedFeeToken0 Amount of token0 fees collected from the pool.
+  /// @param collectedFeeToken1 Amount of token1 fees collected from the pool.
+  event FeeIndexesUpdated(
+    uint256 newglobalFeeIndex0Scaled,
+    uint256 newglobalFeeIndex1Scaled,
+    uint256 collectedFeeToken0,
+    uint256 collectedFeeToken1
+  );
+
+  /// @notice Emitted when a user claims their accrued fees.
+  /// @param user The address that claimed fees.
+  /// @param token0 The address of the token0 to claim fees for.
+  /// @param token1 The address of the token1 to claim fees for.
+  /// @param token0Amount Amount of token0 fees claimed.
+  /// @param token1Amount Amount of token1 fees claimed.
+  event FeesClaimed(
+    address indexed user,
+    address indexed token0,
+    address indexed token1,
+    uint256 token0Amount,
+    uint256 token1Amount
+  );
+
   /*//////////////////////////////////////////////////////////////
                         STATE VARIABLES
   //////////////////////////////////////////////////////////////*/
 
   /// @notice The fixed fee swap hook address.
   address public immutable FIXED_FEE_SWAP_HOOK;
+
+  /// @notice The token address in which token0 fees are collected / distributed.
+  /// @dev Use address(0) to represent native ETH following Uniswap v4 `Currency` convention.
+  address public immutable FEE_TOKEN0;
+
+  /// @notice The token address in which token1 fees are collected / distributed.
+  /// @dev Use address(0) to represent native ETH following Uniswap v4 `Currency` convention.
+  address public immutable FEE_TOKEN1;
+
+  /// @notice Global fee tracking state.
+  FeeTracking.GlobalFees private _globalFees;
+
+  /// @notice Tracks fee accounting data per user.
+  mapping(address => FeeTracking.UserFees) public userFees;
 
   /*//////////////////////////////////////////////////////////////
                         CONSTRUCTOR
@@ -27,15 +82,46 @@ contract YieldToken is ERC20 {
   /// @param _name ERC20 name value.
   /// @param _symbol ERC20 symbol value.
   /// @param _fixedFeeSwapHook The fixed fee swap hook address.
-  constructor(string memory _name, string memory _symbol, address _fixedFeeSwapHook)
-    ERC20(_name, _symbol)
-  {
+  constructor(
+    string memory _name,
+    string memory _symbol,
+    address _fixedFeeSwapHook,
+    address _feeToken0,
+    address _feeToken1
+  ) ERC20(_name, _symbol) {
     FIXED_FEE_SWAP_HOOK = _fixedFeeSwapHook;
+    FEE_TOKEN0 = _feeToken0;
+    FEE_TOKEN1 = _feeToken1;
   }
 
   /*//////////////////////////////////////////////////////////////
                         EXTERNAL FUNCTIONS
   //////////////////////////////////////////////////////////////*/
+
+  /// @notice Global cumulative fee index for token0.
+  /// @dev
+  ///   - Scaled by PRECISION.
+  ///   - Increases whenever new token0 fees are distributed via `_updateFees`.
+  ///   - Represents the total amount of token0 fees accrued per 1 share since vault inception.
+  ///   - Used with `userFees[user].userFeeIndex0Scaled` to compute user-specific deltas.
+  function globalFeeIndex0Scaled() external view returns (uint256) {
+    return _globalFees.globalFeeIndex0Scaled;
+  }
+
+  /// @notice Global cumulative fee index for token1.
+  /// @dev Same semantics as `globalFeeIndex0Scaled`, but for token1.
+  function globalFeeIndex1Scaled() external view returns (uint256) {
+    return _globalFees.globalFeeIndex1Scaled;
+  }
+
+  /// @notice Claims accrued (but not yet claimed) fees for a `_user`.
+  /// @param _user Address whose accrued fees will be claimed.
+  /// @return _claimedToken0 Amount of `FEE_TOKEN_0` transferred to `_user`.
+  /// @return _claimedToken1 Amount of `FEE_TOKEN_1` transferred to `_user`.
+  function claim(address _user) external returns (uint256 _claimedToken0, uint256 _claimedToken1) {
+    _requireHook();
+    (_claimedToken0, _claimedToken1) = _claim(_user);
+  }
 
   /// @notice Mints tokens to an address.
   /// @param _to The address to mint tokens to.
@@ -53,6 +139,17 @@ contract YieldToken is ERC20 {
     _burn(_from, _amount);
   }
 
+  /// @notice Updates the fee indexes for token0 and token1.
+  /// @param _collectedFeeToken0 Newly collected token0 fees collected from the pool (delta since
+  /// last call).
+  /// @param _collectedFeeToken1 Newly collected token1 fees collected from the pool (delta since
+  /// last call).
+  /// @dev Can only be called by the hook to update fees when collecting from the vault.
+  function updateFees(uint256 _collectedFeeToken0, uint256 _collectedFeeToken1) external {
+    _requireHook();
+    _updateFees(_collectedFeeToken0, _collectedFeeToken1);
+  }
+
   /*//////////////////////////////////////////////////////////////
                         INTERNAL FUNCTIONS
   //////////////////////////////////////////////////////////////*/
@@ -60,5 +157,74 @@ contract YieldToken is ERC20 {
   /// @notice Requires the caller to be the fixed fee swap hook.
   function _requireHook() internal view {
     if (msg.sender != FIXED_FEE_SWAP_HOOK) revert YieldToken_NotAuthorized();
+  }
+
+  /// @inheritdoc ERC20
+  /// @dev Updates user fee accounting for both the sender and the recipient.
+  function _update(address _from, address _to, uint256 _value) internal override {
+    if (_from != address(0)) _updateUserFees(_from);
+    if (_to != address(0)) _updateUserFees(_to);
+    super._update(_from, _to, _value);
+  }
+
+  /// @notice Updates the fee indexes for token0 and token1.
+  /// @param _collectedFeeToken0 Newly collected token0 fees collected from the pool (delta since
+  /// last call).
+  /// @param _collectedFeeToken1 Newly collected token1 fees collected from the pool (delta since
+  /// last call).
+  /// @dev Intended to be called only from the inheriting contract.
+  function _updateFees(uint256 _collectedFeeToken0, uint256 _collectedFeeToken1) internal {
+    _globalFees._updateFees(_collectedFeeToken0, _collectedFeeToken1, totalSupply());
+
+    // Emit event after updating fees
+    emit FeeIndexesUpdated(
+      _globalFees.globalFeeIndex0Scaled,
+      _globalFees.globalFeeIndex1Scaled,
+      _collectedFeeToken0,
+      _collectedFeeToken1
+    );
+  }
+
+  /// @notice Updates user's accrued (but not yet claimed) and user's fee indices.
+  /// @param _user The address to update fees for.
+  /// @dev See `FeeTracking._updateUserFees` for details.
+  function _updateUserFees(address _user) internal {
+    userFees[_user]._updateUserFees(
+      balanceOf(_user), _globalFees.globalFeeIndex0Scaled, _globalFees.globalFeeIndex1Scaled
+    );
+  }
+
+  /// @notice Claims accrued fees for a user after syncing to the latest global indices.
+  /// @param _user The address to claim fees for.
+  /// @return _claimedToken0 Amount of `FEE_TOKEN_0` that was transferred.
+  /// @return _claimedToken1 Amount of `FEE_TOKEN_1` that was transferred.
+  function _claim(address _user) internal returns (uint256 _claimedToken0, uint256 _claimedToken1) {
+    // Update user fees to ensure we're syncing to the latest global indices
+    _updateUserFees(_user);
+
+    // Get the accrued amounts before resetting
+    (_claimedToken0, _claimedToken1) = userFees[_user]._resetAccruedFees();
+
+    // Emit event for transparency
+    emit FeesClaimed(_user, FEE_TOKEN0, FEE_TOKEN1, _claimedToken0, _claimedToken1);
+
+    // Transfer tokens to the user
+    _transferAmount(FEE_TOKEN0, _user, _claimedToken0);
+    _transferAmount(FEE_TOKEN1, _user, _claimedToken1);
+  }
+
+  /// @notice Transfers an amount of tokens to a user.
+  /// @param _token The address of the token to transfer.
+  /// @param _to The address to transfer the tokens to.
+  /// @param _amount The amount of tokens to transfer.
+  /// @dev Following Uniswap v4's convention: address(0) represents native ETH.
+  ///      See: https://github.com/Uniswap/v4-core/blob/main/src/types/Currency.sol#L37-L38
+  function _transferAmount(address _token, address _to, uint256 _amount) internal {
+    if (_token == address(0)) {
+      (bool _success,) = payable(_to).call{value: _amount}("");
+      if (!_success) revert YieldToken_TransferFailed();
+    } else {
+      SafeERC20.safeTransfer(IERC20(_token), _to, _amount);
+    }
   }
 }
