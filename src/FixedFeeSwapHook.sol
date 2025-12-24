@@ -6,6 +6,9 @@ import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {PoolKey} from "v4-core/types/PoolKey.sol";
+import {BalanceDelta, BalanceDeltaLibrary} from "v4-core/types/BalanceDelta.sol";
+import {SwapParams} from "v4-core/types/PoolOperation.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -188,9 +191,9 @@ contract FixedFeeSwapHook is BaseHook {
       beforeRemoveLiquidity: false,
       afterRemoveLiquidity: false,
       beforeSwap: false,
-      afterSwap: false,
+      afterSwap: true,
       beforeDonate: false,
-      afterDonate: false,
+      afterDonate: true,
       beforeSwapReturnDelta: false,
       afterSwapReturnDelta: false,
       afterAddLiquidityReturnDelta: false,
@@ -260,6 +263,10 @@ contract FixedFeeSwapHook is BaseHook {
 
     // Transfer VaultShareToken from the hook to the caller
     _vstAmount = _amount;
+    if (VAULT_SHARE_TOKEN.balanceOf(address(this)) < _vstAmount) {
+      revert FixedFeeSwapHook_InsufficientBalance();
+    }
+
     VAULT_SHARE_TOKEN.transfer(msg.sender, _vstAmount);
 
     emit Redeem(msg.sender, _vstAmount, _maturityReached);
@@ -284,6 +291,55 @@ contract FixedFeeSwapHook is BaseHook {
     if (_amount == 0) revert FixedFeeSwapHook_InsufficientBalance();
 
     (_claimedToken0, _claimedToken1) = _claimAndBurnYieldTokens(msg.sender, _amount);
+  }
+
+  /*//////////////////////////////////////////////////////////////
+                        UNISWAP V4 HOOK FUNCTIONS
+  //////////////////////////////////////////////////////////////*/
+
+  /// @notice Called by the PoolManager after a swap has been executed and settled.
+  /// @dev
+  ///  - At this point, all swap fees have been finalized.
+  ///  - Any positive balance delta represents fees received by this hook.
+  ///  - These fees are routed through `_updateFees`, which:
+  ///   - Sends fees to the YieldToken before maturity
+  ///   - Accumulates fees into the post-maturity PT fee index after maturity
+  ///  - Negative deltas are ignored, as they represent amounts paid out by the hook.
+  function _afterSwap(
+    address,
+    PoolKey calldata,
+    SwapParams calldata,
+    BalanceDelta delta,
+    bytes calldata
+  ) internal override returns (bytes4, int128) {
+    int128 _delta0 = delta.amount0();
+    int128 _delta1 = delta.amount1();
+
+    uint256 _fee0 = _delta0 > 0 ? uint256(uint128(_delta0)) : 0;
+    uint256 _fee1 = _delta1 > 0 ? uint256(uint128(_delta1)) : 0;
+
+    if (_fee0 > 0 || _fee1 > 0) _updateFees(_fee0, _fee1);
+    return (this.afterSwap.selector, 0);
+  }
+
+  /// @notice Called by the PoolManager after a donation is made to the pool.
+  /// @dev
+  ///  - Donations are explicit fee-like transfers and are treated identically
+  ///    to swap fees for accounting purposes.
+  ///  - Donated amounts are routed through `_updateFees`, which applies
+  ///    maturity-based fee routing logic.
+  ///  - This hook does not distinguish between swap fees and donations;
+  ///    both contribute to protocol fee distribution.
+  function _afterDonate(
+    address,
+    PoolKey calldata,
+    uint256 _amount0,
+    uint256 _amount1,
+    bytes calldata
+  ) internal override returns (bytes4) {
+    if (_amount0 > 0 || _amount1 > 0) _updateFees(_amount0, _amount1);
+
+    return this.afterDonate.selector;
   }
 
   /*//////////////////////////////////////////////////////////////
@@ -363,7 +419,8 @@ contract FixedFeeSwapHook is BaseHook {
   /// @dev
   ///  - Calculates fees based on postMaturityFeeIndex0Scaled and postMaturityFeeIndex1Scaled.
   ///  - postMaturityFeeIndex0Scaled is scaled by PRECISION (like FeeTracking's
-  /// globalFeeIndex0Scaled). - Formula: fees = (feeIndex * amount) / PRECISION
+  /// globalFeeIndex0Scaled).
+  ///  - Formula: fees = (feeIndex * amount) / PRECISION
   function _claimFeesAccruedAfterMaturity(address _user, uint256 _amount) internal {
     // Calculate post-maturity fees claimable for the redeemed amount
     uint256 _postMaturityFeeToken0 =

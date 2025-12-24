@@ -209,11 +209,12 @@ contract GetHookPermissions is FixedFeeSwapHookTest {
     assertFalse(_permissions.beforeRemoveLiquidity);
     assertFalse(_permissions.afterRemoveLiquidity);
     assertFalse(_permissions.beforeSwap);
-    assertFalse(_permissions.afterSwap);
     assertFalse(_permissions.beforeDonate);
-    assertFalse(_permissions.afterDonate);
     assertFalse(_permissions.beforeSwapReturnDelta);
     assertFalse(_permissions.afterSwapReturnDelta);
+
+    assertTrue(_permissions.afterSwap);
+    assertTrue(_permissions.afterDonate);
   }
 }
 
