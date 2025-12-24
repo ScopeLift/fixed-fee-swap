@@ -984,7 +984,7 @@ contract Claim is YieldTokenTest {
     address _user = makeAddr("ethReceiver");
 
     // Deploy a YieldToken instance that treats ETH as token0
-    YieldToken ethYieldToken =
+    YieldToken _ethYieldToken =
       new YieldToken("Yield Token", "YT", hook, address(0), address(token1));
 
     // Bound inputs and require at least one non-zero fee
@@ -994,20 +994,20 @@ contract Claim is YieldTokenTest {
     vm.assume(_collectedEth > 0 || _collectedToken1 > 0);
 
     // Fund the YieldToken with ETH and ERC20 fees
-    vm.deal(address(ethYieldToken), _collectedEth);
-    token1.mint(address(ethYieldToken), _collectedToken1);
+    vm.deal(address(_ethYieldToken), _collectedEth);
+    token1.mint(address(_ethYieldToken), _collectedToken1);
 
     // User mints shares via the hook
     vm.prank(hook);
-    ethYieldToken.mint(_user, _mintAmount);
+    _ethYieldToken.mint(_user, _mintAmount);
 
     // Collect fees (global indices increase)
     vm.prank(hook);
-    ethYieldToken.updateFees(_collectedEth, _collectedToken1);
+    _ethYieldToken.updateFees(_collectedEth, _collectedToken1);
 
     // Claim via hook – should succeed and exercise ETH + ERC20 transfer paths
     vm.prank(hook);
-    ethYieldToken.claim(_user);
+    _ethYieldToken.claim(_user);
   }
 
   function testFuzz_RevertIf_EthTransferFails(uint256 _mintAmount, uint256 _collectedEth) public {
@@ -1016,24 +1016,24 @@ contract Claim is YieldTokenTest {
     vm.assume(_collectedEth > 0);
 
     // Deploy a YieldToken instance that treats ETH as token0
-    YieldToken ethYieldToken =
+    YieldToken _ethYieldToken =
       new YieldToken("Yield Token", "YT", hook, address(0), address(token1));
 
     // Non‑payable recipient that rejects ETH
     NonPayableContractMock _nonPayable = new NonPayableContractMock();
 
     // Fund ETH to the token, mint shares to non‑payable, and update fees
-    vm.deal(address(ethYieldToken), _collectedEth);
+    vm.deal(address(_ethYieldToken), _collectedEth);
 
     vm.prank(hook);
-    ethYieldToken.mint(address(_nonPayable), _mintAmount);
+    _ethYieldToken.mint(address(_nonPayable), _mintAmount);
 
     vm.prank(hook);
-    ethYieldToken.updateFees(_collectedEth, 0);
+    _ethYieldToken.updateFees(_collectedEth, 0);
 
     // Attempt to claim should revert with YieldToken_TransferFailed
     vm.expectRevert(YieldToken.YieldToken_TransferFailed.selector);
     vm.prank(hook);
-    ethYieldToken.claim(address(_nonPayable));
+    _ethYieldToken.claim(address(_nonPayable));
   }
 }

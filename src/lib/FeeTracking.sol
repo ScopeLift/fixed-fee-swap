@@ -57,7 +57,7 @@ library FeeTracking {
   //////////////////////////////////////////////////////////////*/
 
   /// @notice Updates the global fee indexes when new fees are collected.
-  /// @param _globalFees Storage reference to global fee state.
+  /// @param globalFees Storage reference to global fee state.
   /// @param _collectedFeeToken0 Newly collected token0 fees (delta since last call).
   /// @param _collectedFeeToken1 Newly collected token1 fees (delta since last call).
   /// @param _totalSupply Current total supply of tokens.
@@ -67,7 +67,7 @@ library FeeTracking {
   ///  - We scale first to avoid precision loss: delta = collectedFees * PRECISION / totalShares
   ///  - Rounding.Floor ensures that total distributed <= collected. Any dust remains (safe).
   function _updateFees(
-    GlobalFees storage _globalFees,
+    GlobalFees storage globalFees,
     uint256 _collectedFeeToken0,
     uint256 _collectedFeeToken1,
     uint256 _totalSupply
@@ -85,7 +85,7 @@ library FeeTracking {
     // Rounding.Floor ensures that total distributed <= collected.
     // Any dust remains inside the vault (safe and intentional).
     if (_collectedFeeToken0 > 0) {
-      _globalFees.globalFeeIndex0Scaled += Math.mulDiv(
+      globalFees.globalFeeIndex0Scaled += Math.mulDiv(
         _collectedFeeToken0, PRECISION, _totalSupply, Math.Rounding.Floor
       );
     }
@@ -96,26 +96,26 @@ library FeeTracking {
     // - no rewards are minted, only accounting updated
     // - FLOOR ensures we don't over-distribute
     if (_collectedFeeToken1 > 0) {
-      _globalFees.globalFeeIndex1Scaled += Math.mulDiv(
+      globalFees.globalFeeIndex1Scaled += Math.mulDiv(
         _collectedFeeToken1, PRECISION, _totalSupply, Math.Rounding.Floor
       );
     }
   }
 
   /// @notice Updates a user's accrued fees based on their current balance.
-  /// @param _userFees Storage reference to user's fee state.
+  /// @param userFees Storage reference to user's fee state.
   /// @param _userBalance Current balance of the user.
   /// @param _globalIndex0 Current global fee index for token0.
   /// @param _globalIndex1 Current global fee index for token1.
   /// @dev
   ///  - Should be called before mint, burn, transfer and claim.
-  ///  - Accrues newly earned fees into `_userFees.userAccruedToken0/_userFees.userAccruedToken1`.
-  ///  - Updates `_userFees.userFeeIndex0Scaled/_userFees.userFeeIndex1Scaled` to the current global
+  ///  - Accrues newly earned fees into `userFees.userAccruedToken0/userFees.userAccruedToken1`.
+  ///  - Updates `userFees.userFeeIndex0Scaled/userFees.userFeeIndex1Scaled` to the current global
   ///    indices.
   ///  - If user has no balance, syncs their indices so they don't retro-earn when they
   ///    receive tokens in the future.
   function _updateUserFees(
-    UserFees storage _userFees,
+    UserFees storage userFees,
     uint256 _userBalance,
     uint256 _globalIndex0,
     uint256 _globalIndex1
@@ -124,41 +124,41 @@ library FeeTracking {
     // Just sync their fee indices so they don't retro-earn when they
     // receive shares in the future.
     if (_userBalance == 0) {
-      if (_userFees.userFeeIndex0Scaled != _globalIndex0) {
-        _userFees.userFeeIndex0Scaled = _globalIndex0;
+      if (userFees.userFeeIndex0Scaled != _globalIndex0) {
+        userFees.userFeeIndex0Scaled = _globalIndex0;
       }
-      if (_userFees.userFeeIndex1Scaled != _globalIndex1) {
-        _userFees.userFeeIndex1Scaled = _globalIndex1;
+      if (userFees.userFeeIndex1Scaled != _globalIndex1) {
+        userFees.userFeeIndex1Scaled = _globalIndex1;
       }
       return;
     }
 
     // Accrue newly earned fees for token0
-    if (_globalIndex0 > _userFees.userFeeIndex0Scaled) {
-      uint256 _deltaIndex0 = _globalIndex0 - _userFees.userFeeIndex0Scaled;
-      _userFees.userAccruedToken0 += Math.mulDiv(_userBalance, _deltaIndex0, PRECISION);
-      _userFees.userFeeIndex0Scaled = _globalIndex0;
+    if (_globalIndex0 > userFees.userFeeIndex0Scaled) {
+      uint256 _deltaIndex0 = _globalIndex0 - userFees.userFeeIndex0Scaled;
+      userFees.userAccruedToken0 += Math.mulDiv(_userBalance, _deltaIndex0, PRECISION);
+      userFees.userFeeIndex0Scaled = _globalIndex0;
     }
 
     // Accrue newly earned fees for token1
-    if (_globalIndex1 > _userFees.userFeeIndex1Scaled) {
-      uint256 _deltaIndex1 = _globalIndex1 - _userFees.userFeeIndex1Scaled;
-      _userFees.userAccruedToken1 += Math.mulDiv(_userBalance, _deltaIndex1, PRECISION);
-      _userFees.userFeeIndex1Scaled = _globalIndex1;
+    if (_globalIndex1 > userFees.userFeeIndex1Scaled) {
+      uint256 _deltaIndex1 = _globalIndex1 - userFees.userFeeIndex1Scaled;
+      userFees.userAccruedToken1 += Math.mulDiv(_userBalance, _deltaIndex1, PRECISION);
+      userFees.userFeeIndex1Scaled = _globalIndex1;
     }
   }
 
   /// @notice Resets the user's accrued fees to zero and returns the amounts.
-  /// @param _userFees Storage reference to user's fee state.
+  /// @param userFees Storage reference to user's fee state.
   /// @return token0Amount Accrued token0 fees before reset.
   /// @return token1Amount Accrued token1 fees before reset.
-  function _resetAccruedFees(UserFees storage _userFees)
+  function _resetAccruedFees(UserFees storage userFees)
     internal
     returns (uint256 token0Amount, uint256 token1Amount)
   {
-    token0Amount = _userFees.userAccruedToken0;
-    token1Amount = _userFees.userAccruedToken1;
-    _userFees.userAccruedToken0 = 0;
-    _userFees.userAccruedToken1 = 0;
+    token0Amount = userFees.userAccruedToken0;
+    token1Amount = userFees.userAccruedToken1;
+    userFees.userAccruedToken0 = 0;
+    userFees.userAccruedToken1 = 0;
   }
 }
