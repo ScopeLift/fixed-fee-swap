@@ -91,6 +91,18 @@ contract FixedFeeSwapHook is BaseHook {
     uint256 token1Amount
   );
 
+  /// @notice Emitted when the post-maturity fee indexes are updated.
+  /// @param postMaturityFeeIndex0Scaled The post-maturity fee index for token0.
+  /// @param postMaturityFeeIndex1Scaled The post-maturity fee index for token1.
+  /// @param feeToken0 The amount of token0 fees collected.
+  /// @param feeToken1 The amount of token1 fees collected.
+  event FeeIndexesUpdated(
+    uint256 postMaturityFeeIndex0Scaled,
+    uint256 postMaturityFeeIndex1Scaled,
+    uint256 feeToken0,
+    uint256 feeToken1
+  );
+
   /*//////////////////////////////////////////////////////////////
                         STATE VARIABLES
   //////////////////////////////////////////////////////////////*/
@@ -277,6 +289,51 @@ contract FixedFeeSwapHook is BaseHook {
   /*//////////////////////////////////////////////////////////////
                         INTERNAL FUNCTIONS
   //////////////////////////////////////////////////////////////*/
+
+  /// @notice Called by hook to update the fees for the yield token or the post-maturity fee index.
+  /// @param fee0 The amount of token0 fees collected.
+  /// @param fee1 The amount of token1 fees collected.
+  /// @dev
+  ///  - If called before maturity, the fees are routed to the yield token.
+  ///  - If called after maturity, the fees are routed to the post-maturity fee index.
+  function _updateFees(uint256 fee0, uint256 fee1) internal {
+    if (block.timestamp < MATURITY) {
+      // Pre-maturity → YT owns fees
+      YIELD_TOKEN.updateFees(fee0, fee1);
+    } else {
+      // Post-maturity → Hook owns fees
+      _updatePostMaturityFeeIndex(fee0, fee1);
+    }
+  }
+
+  /// @notice Updates the post-maturity fee index.
+  /// @param feeToken0 The amount of token0 fees collected.
+  /// @param feeToken1 The amount of token1 fees collected.
+  /// @dev
+  ///  - Updates the post-maturity fee index for token0 and token1.
+  ///  - postMaturityFeeIndex0Scaled is scaled by PRECISION (like FeeTracking's
+  /// globalFeeIndex0Scaled).
+  ///  - Formula: fees = (feeIndex * amount) / PRECISION
+  function _updatePostMaturityFeeIndex(uint256 feeToken0, uint256 feeToken1) internal {
+    uint256 totalPT = PRINCIPAL_TOKEN.totalSupply();
+    if (totalPT == 0) return;
+
+    if (feeToken0 > 0) {
+      postMaturityFeeIndex0Scaled += Math.mulDiv(
+        feeToken0, FeeTracking.PRECISION, totalPT, Math.Rounding.Floor
+      );
+    }
+
+    if (feeToken1 > 0) {
+      postMaturityFeeIndex1Scaled += Math.mulDiv(
+        feeToken1, FeeTracking.PRECISION, totalPT, Math.Rounding.Floor
+      );
+    }
+
+    emit FeeIndexesUpdated(
+      postMaturityFeeIndex0Scaled, postMaturityFeeIndex1Scaled, feeToken0, feeToken1
+    );
+  }
 
   /// @notice Claims fees and burns YT tokens
   /// @param _user The address to claim fees from and burn YT tokens for.
