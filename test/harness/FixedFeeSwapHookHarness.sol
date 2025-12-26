@@ -16,5 +16,12 @@ contract FixedFeeSwapHookHarness is FixedFeeSwapHook {
   {}
 
   function validateHookAddress(BaseHook) internal pure override {}
+
+  /// @notice Exposed function to update fees for testing.
+  /// @param fee0 The amount of token0 fees collected.
+  /// @param fee1 The amount of token1 fees collected.
+  function exposed_updateFees(uint256 fee0, uint256 fee1) external {
+    _updateFees(fee0, fee1);
+  }
 }
 

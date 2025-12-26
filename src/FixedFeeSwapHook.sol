@@ -7,7 +7,7 @@ import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
-import {BalanceDelta, BalanceDeltaLibrary} from "v4-core/types/BalanceDelta.sol";
+import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {SwapParams} from "v4-core/types/PoolOperation.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -309,11 +309,11 @@ contract FixedFeeSwapHook is BaseHook {
     address,
     PoolKey calldata,
     SwapParams calldata,
-    BalanceDelta delta,
+    BalanceDelta _delta,
     bytes calldata
   ) internal override returns (bytes4, int128) {
-    int128 _delta0 = delta.amount0();
-    int128 _delta1 = delta.amount1();
+    int128 _delta0 = _delta.amount0();
+    int128 _delta1 = _delta.amount1();
 
     uint256 _fee0 = _delta0 > 0 ? uint256(uint128(_delta0)) : 0;
     uint256 _fee1 = _delta1 > 0 ? uint256(uint128(_delta1)) : 0;
@@ -347,47 +347,47 @@ contract FixedFeeSwapHook is BaseHook {
   //////////////////////////////////////////////////////////////*/
 
   /// @notice Called by hook to update the fees for the yield token or the post-maturity fee index.
-  /// @param fee0 The amount of token0 fees collected.
-  /// @param fee1 The amount of token1 fees collected.
+  /// @param _fee0 The amount of token0 fees collected.
+  /// @param _fee1 The amount of token1 fees collected.
   /// @dev
   ///  - If called before maturity, the fees are routed to the yield token.
   ///  - If called after maturity, the fees are routed to the post-maturity fee index.
-  function _updateFees(uint256 fee0, uint256 fee1) internal {
+  function _updateFees(uint256 _fee0, uint256 _fee1) internal {
     if (block.timestamp < MATURITY) {
       // Pre-maturity → YT owns fees
-      YIELD_TOKEN.updateFees(fee0, fee1);
+      YIELD_TOKEN.updateFees(_fee0, _fee1);
     } else {
       // Post-maturity → Hook owns fees
-      _updatePostMaturityFeeIndex(fee0, fee1);
+      _updatePostMaturityFeeIndex(_fee0, _fee1);
     }
   }
 
   /// @notice Updates the post-maturity fee index.
-  /// @param feeToken0 The amount of token0 fees collected.
-  /// @param feeToken1 The amount of token1 fees collected.
+  /// @param _feeToken0 The amount of token0 fees collected.
+  /// @param _feeToken1 The amount of token1 fees collected.
   /// @dev
   ///  - Updates the post-maturity fee index for token0 and token1.
   ///  - postMaturityFeeIndex0Scaled is scaled by PRECISION (like FeeTracking's
   /// globalFeeIndex0Scaled).
   ///  - Formula: fees = (feeIndex * amount) / PRECISION
-  function _updatePostMaturityFeeIndex(uint256 feeToken0, uint256 feeToken1) internal {
-    uint256 totalPT = PRINCIPAL_TOKEN.totalSupply();
-    if (totalPT == 0) return;
+  function _updatePostMaturityFeeIndex(uint256 _feeToken0, uint256 _feeToken1) internal {
+    uint256 _totalPT = PRINCIPAL_TOKEN.totalSupply();
+    if (_totalPT == 0) return;
 
-    if (feeToken0 > 0) {
+    if (_feeToken0 > 0) {
       postMaturityFeeIndex0Scaled += Math.mulDiv(
-        feeToken0, FeeTracking.PRECISION, totalPT, Math.Rounding.Floor
+        _feeToken0, FeeTracking.PRECISION, _totalPT, Math.Rounding.Floor
       );
     }
 
-    if (feeToken1 > 0) {
+    if (_feeToken1 > 0) {
       postMaturityFeeIndex1Scaled += Math.mulDiv(
-        feeToken1, FeeTracking.PRECISION, totalPT, Math.Rounding.Floor
+        _feeToken1, FeeTracking.PRECISION, _totalPT, Math.Rounding.Floor
       );
     }
 
     emit FeeIndexesUpdated(
-      postMaturityFeeIndex0Scaled, postMaturityFeeIndex1Scaled, feeToken0, feeToken1
+      postMaturityFeeIndex0Scaled, postMaturityFeeIndex1Scaled, _feeToken0, _feeToken1
     );
   }
 

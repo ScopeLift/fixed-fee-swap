@@ -6,6 +6,7 @@ import {Test, Vm} from "forge-std/Test.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 // Internal imports
 import {FixedFeeSwapHook as FixedFeeSwapHookBase} from "src/FixedFeeSwapHook.sol";
@@ -14,6 +15,7 @@ import {PrincipalToken} from "src/PrincipalToken.sol";
 import {YieldToken} from "src/YieldToken.sol";
 import {ERC20Mock} from "test/mock/ERC20Mock.sol";
 import {FixedFeeSwapHookHarness} from "test/harness/FixedFeeSwapHookHarness.sol";
+import {NonPayableContractMock} from "test/mock/NonPayableContractMock.sol";
 
 contract FixedFeeSwapHookTest is Test {
   FixedFeeSwapHookHarness internal fixedFeeSwapHook;
@@ -50,6 +52,20 @@ contract FixedFeeSwapHookTest is Test {
     vm.assume(_addr != address(0));
   }
 
+  /// @notice Assumes the address is a safe EOA (Externally Owned Account).
+  /// @param _address The address to check.
+  /// @dev Excludes contract addresses, precompile addresses, and known problematic addresses (like
+  /// console), which is necessary for native ETH transfers.
+  function _assumeSafeEOA(address _address) internal view {
+    vm.assume(_address != address(0));
+    // Exclude the console address (used by forge-std for logging, cannot receive ETH)
+    vm.assume(_address != address(0x000000000000000000636F6e736F6c652e6c6f67));
+    // Exclude precompile addresses (0x01-0x0F) which cannot receive ETH
+    vm.assume(_address > address(0x0F));
+    // Exclude contract addresses (for native ETH transfers)
+    vm.assume(_address.code.length == 0);
+  }
+
   function _boundToRealisticAmount(uint256 _amount) internal pure returns (uint256) {
     return bound(_amount, 1, type(uint128).max);
   }
@@ -73,13 +89,12 @@ contract FixedFeeSwapHookTest is Test {
   /// @param _feeToken0 Amount of token0 fees to add.
   /// @param _feeToken1 Amount of token1 fees to add.
   function _setupFeesBeforeMaturity(uint256 _feeToken0, uint256 _feeToken1) internal {
-    // Update fees on YT before maturity (must be called by the hook)
-    YieldToken _yt = fixedFeeSwapHook.YIELD_TOKEN();
-    vm.prank(address(fixedFeeSwapHook));
-    _yt.updateFees(_feeToken0, _feeToken1);
+    // Update fees on YT before maturity (routes to YT via _updateFees)
+    fixedFeeSwapHook.exposed_updateFees(_feeToken0, _feeToken1);
 
     // Fund the YieldToken contract with fee tokens so it can pay out claims
     // Use a large amount to ensure we have enough for any user's claim
+    YieldToken _yt = fixedFeeSwapHook.YIELD_TOKEN();
     deal(address(token0), address(_yt), type(uint128).max);
     deal(address(token1), address(_yt), type(uint128).max);
   }
@@ -92,6 +107,37 @@ contract FixedFeeSwapHookTest is Test {
     fixedFeeSwapHook.PRINCIPAL_TOKEN().approve(address(fixedFeeSwapHook), _amount);
     vm.prank(_user);
     fixedFeeSwapHook.YIELD_TOKEN().approve(address(fixedFeeSwapHook), _amount);
+  }
+
+  /// @notice Helper function to set up post-maturity fees.
+  /// @param _feeToken0 Amount of token0 fees to add.
+  /// @param _feeToken1 Amount of token1 fees to add.
+  /// @dev Must be called after maturity. Funds the hook contract with fee tokens.
+  function _setupFeesAfterMaturity(uint256 _feeToken0, uint256 _feeToken1) internal {
+    // Update fees on hook after maturity (must be called by the hook)
+    fixedFeeSwapHook.exposed_updateFees(_feeToken0, _feeToken1);
+
+    // Fund the hook contract with fee tokens so it can pay out claims
+    // Use a large amount to ensure we have enough for any user's claim
+    deal(address(token0), address(fixedFeeSwapHook), type(uint128).max);
+    deal(address(token1), address(fixedFeeSwapHook), type(uint128).max);
+  }
+
+  /// @notice Helper function to calculate expected post-maturity fees.
+  /// @param _hook The hook contract.
+  /// @param _redeemAmount The amount being redeemed.
+  /// @return _fee0 Expected fee0 amount.
+  /// @return _fee1 Expected fee1 amount.
+  function _calculatePostMaturityFees(FixedFeeSwapHookHarness _hook, uint256 _redeemAmount)
+    internal
+    view
+    returns (uint256 _fee0, uint256 _fee1)
+  {
+    _fee0 = Math.mulDiv(
+      _hook.postMaturityFeeIndex0Scaled(), _redeemAmount, 1e18, Math.Rounding.Floor
+    );
+    _fee1 =
+      Math.mulDiv(_hook.postMaturityFeeIndex1Scaled(), _redeemAmount, 1e18, Math.Rounding.Floor);
   }
 }
 
@@ -503,8 +549,148 @@ contract Redeem is FixedFeeSwapHookTest {
     assertEq(token1.balanceOf(user), _initialUserToken1Balance + _accruedToken1);
   }
 
-  function testFuzz_RedeemAfterMaturity_Successful(uint256 _redeemAmount) public {
-    // TODO: Implement post-maturity redeem test
+  function testFuzz_RedeemAfterMaturity(
+    uint256 _depositAmount,
+    uint256 _redeemAmount,
+    uint256 _feeToken0,
+    uint256 _feeToken1
+  ) public {
+    _depositAmount = _boundToRealisticAmount(_depositAmount);
+    _feeToken0 = _boundToRealisticAmount(_feeToken0);
+    _feeToken1 = _boundToRealisticAmount(_feeToken1);
+
+    // Assume user is a safe EOA (needed for native ETH transfers)
+    _assumeSafeEOA(user);
+
+    // Create a VaultShareToken with native ETH (address(0)) as token0 and ERC20 as token1
+    VaultShareToken _vstWithEth =
+      new VaultShareToken("Vault Share Token", "VST", address(0), address(token1));
+
+    // Create a new hook with the ETH-enabled VST
+    FixedFeeSwapHookHarness _hookWithEth =
+      new FixedFeeSwapHookHarness(poolManager, _vstWithEth, maturity);
+
+    // Set up: user deposits VST to get PT and YT before maturity
+    deal(address(_vstWithEth), user, _depositAmount);
+    vm.prank(user);
+    _vstWithEth.approve(address(_hookWithEth), _depositAmount);
+    vm.prank(user);
+    _hookWithEth.deposit(_depositAmount);
+
+    // Ensure redeem amount doesn't exceed user's balance
+    uint256 _userBalance = _hookWithEth.PRINCIPAL_TOKEN().balanceOf(user);
+    _redeemAmount = bound(_redeemAmount, 1, _userBalance);
+
+    // Move past maturity
+    vm.warp(maturity + 1);
+
+    // Set up post-maturity fees (ETH and ERC20)
+    _hookWithEth.exposed_updateFees(_feeToken0, _feeToken1);
+
+    // Fund the hook contract with ETH and ERC20 tokens
+    vm.deal(address(_hookWithEth), type(uint128).max);
+    deal(address(token1), address(_hookWithEth), type(uint128).max);
+
+    // Get initial balances
+    uint256 _initialUserVstBalance = _vstWithEth.balanceOf(user);
+    uint256 _initialUserEthBalance = user.balance;
+    uint256 _initialUserToken1Balance = token1.balanceOf(user);
+    uint256 _initialPtSupply = _hookWithEth.PRINCIPAL_TOKEN().totalSupply();
+    uint256 _initialYtSupply = _hookWithEth.YIELD_TOKEN().totalSupply();
+
+    // Approve PT tokens (only PT needed after maturity)
+    vm.prank(user);
+    _hookWithEth.PRINCIPAL_TOKEN().approve(address(_hookWithEth), _redeemAmount);
+
+    // Redeem
+    vm.prank(user);
+    assertEq(_hookWithEth.redeem(_redeemAmount), _redeemAmount);
+
+    // Check VST is transferred
+    assertEq(_vstWithEth.balanceOf(user), _initialUserVstBalance + _redeemAmount);
+
+    // Check PT is burned
+    assertEq(_hookWithEth.PRINCIPAL_TOKEN().balanceOf(user), _userBalance - _redeemAmount);
+    assertEq(_hookWithEth.PRINCIPAL_TOKEN().totalSupply(), _initialPtSupply - _redeemAmount);
+
+    // Check YT is NOT burned (after maturity, YT is not required)
+    assertEq(_hookWithEth.YIELD_TOKEN().totalSupply(), _initialYtSupply);
+
+    // Check post-maturity fees are claimed (native ETH and ERC20)
+    uint256 _expectedFeeEth = Math.mulDiv(
+      _hookWithEth.postMaturityFeeIndex0Scaled(), _redeemAmount, 1e18, Math.Rounding.Floor
+    );
+    assertEq(user.balance, _initialUserEthBalance + _expectedFeeEth);
+
+    uint256 _expectedFee1 = Math.mulDiv(
+      _hookWithEth.postMaturityFeeIndex1Scaled(), _redeemAmount, 1e18, Math.Rounding.Floor
+    );
+    assertEq(token1.balanceOf(user), _initialUserToken1Balance + _expectedFee1);
+  }
+
+  function testFuzz_EmitFeesClaimedOnRedeemAfterMaturity(
+    uint256 _depositAmount,
+    uint256 _redeemAmount,
+    uint256 _feeToken0,
+    uint256 _feeToken1
+  ) public {
+    _depositAmount = _boundToRealisticAmount(_depositAmount);
+    _feeToken0 = _boundToRealisticAmount(_feeToken0);
+    _feeToken1 = _boundToRealisticAmount(_feeToken1);
+
+    // Assume user is a safe EOA (needed for native ETH transfers)
+    _assumeSafeEOA(user);
+
+    // Create a VaultShareToken with native ETH (address(0)) as token0 and ERC20 as token1
+    VaultShareToken _vstWithEth =
+      new VaultShareToken("Vault Share Token", "VST", address(0), address(token1));
+
+    // Create a new hook with the ETH-enabled VST
+    FixedFeeSwapHookHarness _hookWithEth =
+      new FixedFeeSwapHookHarness(poolManager, _vstWithEth, maturity);
+
+    // Set up: user deposits VST to get PT and YT before maturity
+    deal(address(_vstWithEth), user, _depositAmount);
+    vm.prank(user);
+    _vstWithEth.approve(address(_hookWithEth), _depositAmount);
+    vm.prank(user);
+    _hookWithEth.deposit(_depositAmount);
+
+    // Ensure redeem amount doesn't exceed user's balance
+    uint256 _userBalance = _hookWithEth.PRINCIPAL_TOKEN().balanceOf(user);
+    _redeemAmount = bound(_redeemAmount, 1, _userBalance);
+
+    // Move past maturity
+    vm.warp(maturity + 1);
+
+    // Set up post-maturity fees (ETH and ERC20)
+    _hookWithEth.exposed_updateFees(_feeToken0, _feeToken1);
+
+    // Fund the hook contract with ETH and ERC20 tokens
+    vm.deal(address(_hookWithEth), type(uint128).max);
+    deal(address(token1), address(_hookWithEth), type(uint128).max);
+
+    // Calculate expected fees (using same rounding as contract)
+    uint256 _expectedFeeEth = Math.mulDiv(
+      _hookWithEth.postMaturityFeeIndex0Scaled(), _redeemAmount, 1e18, Math.Rounding.Floor
+    );
+    uint256 _expectedFee1 = Math.mulDiv(
+      _hookWithEth.postMaturityFeeIndex1Scaled(), _redeemAmount, 1e18, Math.Rounding.Floor
+    );
+
+    // Approve PT tokens
+    vm.prank(user);
+    _hookWithEth.PRINCIPAL_TOKEN().approve(address(_hookWithEth), _redeemAmount);
+
+    // Expect FeesClaimed event (with native ETH address(0) and ERC20 token1)
+    vm.expectEmit();
+    emit FixedFeeSwapHookBase.FeesClaimed(
+      user, address(0), address(token1), _expectedFeeEth, _expectedFee1
+    );
+
+    // Redeem
+    vm.prank(user);
+    _hookWithEth.redeem(_redeemAmount);
   }
 
   function testFuzz_EmitsRedeemEvent(uint256 _depositAmount, uint256 _redeemAmount) public {
@@ -571,5 +757,102 @@ contract Redeem is FixedFeeSwapHookTest {
     vm.expectRevert(FixedFeeSwapHookBase.FixedFeeSwapHook_InsufficientBalance.selector);
     vm.prank(user);
     fixedFeeSwapHook.redeem(_redeemAmount);
+  }
+
+  function testFuzz_RevertIf_InsufficientVSTBalanceInHook(
+    uint256 _depositAmount,
+    uint256 _redeemAmount
+  ) public {
+    _depositAmount = _boundToRealisticAmount(_depositAmount);
+    _redeemAmount = _boundToRealisticAmount(_redeemAmount);
+
+    // Set up: user deposits VST to get PT and YT
+    _depositVstForUser(user, _depositAmount);
+
+    // Ensure redeem amount doesn't exceed user's PT balance
+    uint256 _userBalance = fixedFeeSwapHook.PRINCIPAL_TOKEN().balanceOf(user);
+    _redeemAmount = bound(_redeemAmount, 1, _userBalance);
+
+    // Manually reduce hook's VST balance to create insufficient balance scenario
+    // Set hook's balance to be less than the redeem amount
+    uint256 _insufficientBalance = _redeemAmount > 0 ? _redeemAmount - 1 : 0;
+    deal(address(vaultShareToken), address(fixedFeeSwapHook), _insufficientBalance);
+
+    // Approve PT tokens
+    vm.prank(user);
+    fixedFeeSwapHook.PRINCIPAL_TOKEN().approve(address(fixedFeeSwapHook), _redeemAmount);
+
+    // Approve YT tokens if before maturity
+    if (block.timestamp < fixedFeeSwapHook.MATURITY()) {
+      vm.prank(user);
+      fixedFeeSwapHook.YIELD_TOKEN().approve(address(fixedFeeSwapHook), _redeemAmount);
+    }
+
+    // Should revert because hook doesn't have enough VST
+    vm.expectRevert(FixedFeeSwapHookBase.FixedFeeSwapHook_InsufficientBalance.selector);
+    vm.prank(user);
+    fixedFeeSwapHook.redeem(_redeemAmount);
+  }
+
+  /// @notice Tests revert when native ETH transfer fails (non-payable contract).
+  function testFuzz_RevertIf_NativeEthTransferFails(
+    uint256 _depositAmount,
+    uint256 _redeemAmount,
+    uint256 _feeEth
+  ) public {
+    _depositAmount = _boundToRealisticAmount(_depositAmount);
+    _feeEth = _boundToRealisticAmount(_feeEth);
+    _redeemAmount = _boundToRealisticAmount(_redeemAmount);
+
+    // Ensure we have fees to claim - need significant fees to avoid rounding to zero
+    vm.assume(_feeEth >= _depositAmount && _depositAmount > 0);
+
+    // Create a VaultShareToken with native ETH (address(0)) as token0
+    VaultShareToken _vstWithEth =
+      new VaultShareToken("Vault Share Token", "VST", address(0), address(token1));
+
+    // Create a new hook with the ETH-enabled VST
+    FixedFeeSwapHookHarness _hookWithEth =
+      new FixedFeeSwapHookHarness(poolManager, _vstWithEth, maturity);
+
+    // Deploy a contract that rejects ETH transfers
+    NonPayableContractMock _nonPayableContract = new NonPayableContractMock();
+
+    // Set up: non-payable contract deposits VST to get PT and YT before maturity
+    deal(address(_vstWithEth), address(_nonPayableContract), _depositAmount);
+    vm.prank(address(_nonPayableContract));
+    _vstWithEth.approve(address(_hookWithEth), _depositAmount);
+    vm.prank(address(_nonPayableContract));
+    _hookWithEth.deposit(_depositAmount);
+
+    // Ensure redeem amount doesn't exceed balance
+    uint256 _userBalance = _hookWithEth.PRINCIPAL_TOKEN().balanceOf(address(_nonPayableContract));
+    _redeemAmount = bound(_redeemAmount, 1, _userBalance);
+
+    // Move past maturity
+    vm.warp(maturity + 1);
+
+    // Set up post-maturity fees (use large fee to ensure non-zero claimable amount)
+    _hookWithEth.exposed_updateFees(_feeEth, 0);
+
+    // Fund the hook contract with ETH
+    vm.deal(address(_hookWithEth), type(uint128).max);
+
+    // Calculate expected ETH fee to ensure it's non-zero
+    uint256 _expectedFeeEth = Math.mulDiv(
+      _hookWithEth.postMaturityFeeIndex0Scaled(), _redeemAmount, 1e18, Math.Rounding.Floor
+    );
+
+    // Only test if we have non-zero fees to claim
+    vm.assume(_expectedFeeEth > 0);
+
+    // Approve PT tokens
+    vm.prank(address(_nonPayableContract));
+    _hookWithEth.PRINCIPAL_TOKEN().approve(address(_hookWithEth), _redeemAmount);
+
+    // Should revert because non-payable contract cannot receive ETH
+    vm.expectRevert(FixedFeeSwapHookBase.FixedFeeSwapHook_TransferFailed.selector);
+    vm.prank(address(_nonPayableContract));
+    _hookWithEth.redeem(_redeemAmount);
   }
 }
