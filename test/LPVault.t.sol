@@ -87,6 +87,40 @@ contract LPVaultTest is Test, Deployers {
   function _assumeSafeAddress(address _addr) internal view {
     vm.assume(_addr != address(0) && _addr != address(manager) && _addr != address(vault));
   }
+
+  function _mintToken0(address _depositor, uint256 _amount) internal {
+    deal(Currency.unwrap(currency0), _depositor, _amount);
+  }
+
+  function _mintToken1(address _depositor, uint256 _amount) internal {
+    deal(Currency.unwrap(currency1), _depositor, _amount);
+  }
+
+  function _approveToken0(address _from, address _to, uint256 _amount) internal {
+    vm.prank(_from);
+    MockERC20(Currency.unwrap(currency0)).approve(address(_to), _amount);
+  }
+
+  function _approveToken1(address _from, address _to, uint256 _amount) internal {
+    vm.prank(_from);
+    MockERC20(Currency.unwrap(currency1)).approve(address(_to), _amount);
+  }
+
+  function _deposit(address _depositor, uint256 _amount0, uint256 _amount1)
+    internal
+    returns (uint256 _shares, uint256 _amount0Used, uint256 _amount1Used)
+  {
+    uint256 _amount0Max = bound(_amount0, 1e6, type(uint96).max);
+    uint256 _amount1Max = bound(_amount1, 1e6, type(uint96).max);
+
+    _mintToken0(_depositor, _amount0Max);
+    _mintToken1(_depositor, _amount1Max);
+    _approveToken0(_depositor, address(vault), _amount0Max);
+    _approveToken1(_depositor, address(vault), _amount1Max);
+
+    vm.prank(_depositor);
+    (_shares, _amount0Used, _amount1Used) = vault.deposit(_amount0Max, _amount1Max);
+  }
 }
 
 contract Constructor is LPVaultTest {
@@ -441,28 +475,6 @@ contract Deposit is LPVaultTest {
 }
 
 contract Withdraw is LPVaultTest {
-  function _setupDepositor(address _depositor) internal {
-    deal(Currency.unwrap(currency0), _depositor, 1e18 ether);
-    deal(Currency.unwrap(currency1), _depositor, 1e18 ether);
-
-    vm.startPrank(_depositor);
-    MockERC20(Currency.unwrap(currency0)).approve(address(vault), type(uint256).max);
-    MockERC20(Currency.unwrap(currency1)).approve(address(vault), type(uint256).max);
-    vm.stopPrank();
-  }
-
-  function _deposit(address _depositor, uint256 _amount0, uint256 _amount1)
-    internal
-    returns (uint256 _shares, uint256 _amount0Used, uint256 _amount1Used)
-  {
-    _setupDepositor(_depositor);
-    _amount0 = bound(_amount0, 1e6, type(uint96).max);
-    _amount1 = bound(_amount1, 1e6, type(uint96).max);
-
-    vm.prank(_depositor);
-    (_shares, _amount0Used, _amount1Used) = vault.deposit(_amount0, _amount1);
-  }
-
   function testFuzz_WithdrawBurnsSharesAndTransfersTokens(
     address _depositor,
     uint256 _amount0,
