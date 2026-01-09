@@ -292,8 +292,8 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     (uint256 _amount0Used, uint256 _amount1Used) =
       _settleDeltas(_totalDelta0, _totalDelta1, _callbackData.sender);
 
-    // TODO: Handle fee deltas
-    (_totalFeeDelta0, _totalFeeDelta1);
+    // Collect fees and update fee-per-share indexes.
+    _collectFees(_totalFeeDelta0, _totalFeeDelta1);
 
     return abi.encode(_liquidityPerPosition, _amount0Used, _amount1Used);
   }
@@ -314,8 +314,8 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     (uint256 _amount0Received, uint256 _amount1Received) =
       _settleWithdrawDeltas(_totalDelta0, _totalDelta1, _callbackData.receiver);
 
-    // TODO: Handle fee deltas
-    (_totalFeeDelta0, _totalFeeDelta1);
+    // Collect fees and update fee-per-share indexes.
+    _collectFees(_totalFeeDelta0, _totalFeeDelta1);
 
     return abi.encode(_amount0Received, _amount1Received);
   }
@@ -487,5 +487,27 @@ contract LPVault is VaultShareToken, IUnlockCallback {
       _amount1Received = uint256(_delta1);
       POOL_MANAGER.take(targetPoolKey.currency1, _receiver, _amount1Received);
     }
+  }
+
+  /// @notice Collects fee tokens from the pool and updates the fee-per-share indexes.
+  /// @dev Fee deltas are positive when the pool owes us fees.
+  /// @param _feeDelta0 The fee delta for token0.
+  /// @param _feeDelta1 The fee delta for token1.
+  function _collectFees(int256 _feeDelta0, int256 _feeDelta1) internal virtual {
+    uint256 _collectedFee0;
+    uint256 _collectedFee1;
+
+    // Take fee tokens from the pool (positive delta = pool owes us).
+    if (_feeDelta0 > 0) {
+      _collectedFee0 = uint256(_feeDelta0);
+      POOL_MANAGER.take(targetPoolKey.currency0, address(this), _collectedFee0);
+    }
+    if (_feeDelta1 > 0) {
+      _collectedFee1 = uint256(_feeDelta1);
+      POOL_MANAGER.take(targetPoolKey.currency1, address(this), _collectedFee1);
+    }
+
+    // Update the global fee-per-share indexes if any fees were collected.
+    if (_collectedFee0 > 0 || _collectedFee1 > 0) _updateFees(_collectedFee0, _collectedFee1);
   }
 }
