@@ -94,18 +94,6 @@ contract FixedFeeSwapHook is BaseHook {
     uint256 token1Amount
   );
 
-  /// @notice Emitted when the post-maturity fee indexes are updated.
-  /// @param postMaturityFeeIndex0Scaled The post-maturity fee index for token0.
-  /// @param postMaturityFeeIndex1Scaled The post-maturity fee index for token1.
-  /// @param feeToken0 The amount of token0 fees collected.
-  /// @param feeToken1 The amount of token1 fees collected.
-  event FeeIndexesUpdated(
-    uint256 postMaturityFeeIndex0Scaled,
-    uint256 postMaturityFeeIndex1Scaled,
-    uint256 feeToken0,
-    uint256 feeToken1
-  );
-
   /*//////////////////////////////////////////////////////////////
                         STATE VARIABLES
   //////////////////////////////////////////////////////////////*/
@@ -122,14 +110,6 @@ contract FixedFeeSwapHook is BaseHook {
   /// @notice The maturity after which yield token will be 0. (principal token will be equal to
   /// vault share token)
   uint256 public immutable MATURITY;
-
-  /// @notice Post-maturity global cumulative fee index for token0 (scaled by PRECISION).
-  /// @dev Represents "how much token0 each PT has earned" since maturity.
-  uint256 public postMaturityFeeIndex0Scaled;
-
-  /// @notice Post-maturity global cumulative fee index for token1 (scaled by PRECISION).
-  /// @dev Represents "how much token1 each PT has earned" since maturity.
-  uint256 public postMaturityFeeIndex1Scaled;
 
   /*//////////////////////////////////////////////////////////////
                         CONSTRUCTOR
@@ -191,9 +171,9 @@ contract FixedFeeSwapHook is BaseHook {
       beforeRemoveLiquidity: false,
       afterRemoveLiquidity: false,
       beforeSwap: false,
-      afterSwap: true,
+      afterSwap: false,
       beforeDonate: false,
-      afterDonate: true,
+      afterDonate: false,
       beforeSwapReturnDelta: false,
       afterSwapReturnDelta: false,
       afterAddLiquidityReturnDelta: false,
@@ -294,102 +274,8 @@ contract FixedFeeSwapHook is BaseHook {
   }
 
   /*//////////////////////////////////////////////////////////////
-                        UNISWAP V4 HOOK FUNCTIONS
-  //////////////////////////////////////////////////////////////*/
-
-  /// @notice Called by the PoolManager after a swap has been executed and settled.
-  /// @dev
-  ///  - At this point, all swap fees have been finalized.
-  ///  - Any positive balance delta represents fees received by this hook.
-  ///  - These fees are routed through `_updateFees`, which:
-  ///   - Sends fees to the YieldToken before maturity
-  ///   - Accumulates fees into the post-maturity PT fee index after maturity
-  ///  - Negative deltas are ignored, as they represent amounts paid out by the hook.
-  function _afterSwap(
-    address,
-    PoolKey calldata,
-    SwapParams calldata,
-    BalanceDelta _delta,
-    bytes calldata
-  ) internal override returns (bytes4, int128) {
-    int128 _delta0 = _delta.amount0();
-    int128 _delta1 = _delta.amount1();
-
-    uint256 _fee0 = _delta0 > 0 ? uint256(uint128(_delta0)) : 0;
-    uint256 _fee1 = _delta1 > 0 ? uint256(uint128(_delta1)) : 0;
-
-    if (_fee0 > 0 || _fee1 > 0) _updateFees(_fee0, _fee1);
-    return (this.afterSwap.selector, 0);
-  }
-
-  /// @notice Called by the PoolManager after a donation is made to the pool.
-  /// @dev
-  ///  - Donations are explicit fee-like transfers and are treated identically
-  ///    to swap fees for accounting purposes.
-  ///  - Donated amounts are routed through `_updateFees`, which applies
-  ///    maturity-based fee routing logic.
-  ///  - This hook does not distinguish between swap fees and donations;
-  ///    both contribute to protocol fee distribution.
-  function _afterDonate(
-    address,
-    PoolKey calldata,
-    uint256 _amount0,
-    uint256 _amount1,
-    bytes calldata
-  ) internal override returns (bytes4) {
-    if (_amount0 > 0 || _amount1 > 0) _updateFees(_amount0, _amount1);
-
-    return this.afterDonate.selector;
-  }
-
-  /*//////////////////////////////////////////////////////////////
                         INTERNAL FUNCTIONS
   //////////////////////////////////////////////////////////////*/
-
-  /// @notice Called by hook to update the fees for the yield token or the post-maturity fee index.
-  /// @param _fee0 The amount of token0 fees collected.
-  /// @param _fee1 The amount of token1 fees collected.
-  /// @dev
-  ///  - If called before maturity, the fees are routed to the yield token.
-  ///  - If called after maturity, the fees are routed to the post-maturity fee index.
-  function _updateFees(uint256 _fee0, uint256 _fee1) internal {
-    if (block.timestamp < MATURITY) {
-      // Pre-maturity → YT owns fees
-      YIELD_TOKEN.updateFees(_fee0, _fee1);
-    } else {
-      // Post-maturity → Hook owns fees
-      _updatePostMaturityFeeIndex(_fee0, _fee1);
-    }
-  }
-
-  /// @notice Updates the post-maturity fee index.
-  /// @param _feeToken0 The amount of token0 fees collected.
-  /// @param _feeToken1 The amount of token1 fees collected.
-  /// @dev
-  ///  - Updates the post-maturity fee index for token0 and token1.
-  ///  - postMaturityFeeIndex0Scaled is scaled by PRECISION (like FeeTracking's
-  /// globalFeeIndex0Scaled).
-  ///  - Formula: fees = (feeIndex * amount) / PRECISION
-  function _updatePostMaturityFeeIndex(uint256 _feeToken0, uint256 _feeToken1) internal {
-    uint256 _totalPT = PRINCIPAL_TOKEN.totalSupply();
-    if (_totalPT == 0) return;
-
-    if (_feeToken0 > 0) {
-      postMaturityFeeIndex0Scaled += Math.mulDiv(
-        _feeToken0, FeeTracking.PRECISION, _totalPT, Math.Rounding.Floor
-      );
-    }
-
-    if (_feeToken1 > 0) {
-      postMaturityFeeIndex1Scaled += Math.mulDiv(
-        _feeToken1, FeeTracking.PRECISION, _totalPT, Math.Rounding.Floor
-      );
-    }
-
-    emit FeeIndexesUpdated(
-      postMaturityFeeIndex0Scaled, postMaturityFeeIndex1Scaled, _feeToken0, _feeToken1
-    );
-  }
 
   /// @notice Claims fees and burns YT tokens
   /// @param _user The address to claim fees from and burn YT tokens for.
@@ -417,32 +303,48 @@ contract FixedFeeSwapHook is BaseHook {
   /// @param _user The address to claim fees for.
   /// @param _amount The amount of PT tokens being redeemed.
   /// @dev
-  ///  - Calculates fees based on postMaturityFeeIndex0Scaled and postMaturityFeeIndex1Scaled.
-  ///  - postMaturityFeeIndex0Scaled is scaled by PRECISION (like FeeTracking's
-  /// globalFeeIndex0Scaled).
-  ///  - Formula: fees = (feeIndex * amount) / PRECISION
+  ///  - Calculates fees proportionally based on contract balances and total PT supply.
+  ///  - Formula: fees = (contractBalance * amount) / totalSupply
   function _claimFeesAccruedAfterMaturity(address _user, uint256 _amount) internal {
-    // Calculate post-maturity fees claimable for the redeemed amount
-    uint256 _postMaturityFeeToken0 =
-      Math.mulDiv(postMaturityFeeIndex0Scaled, _amount, FeeTracking.PRECISION, Math.Rounding.Floor);
-    uint256 _postMaturityFeeToken1 =
-      Math.mulDiv(postMaturityFeeIndex1Scaled, _amount, FeeTracking.PRECISION, Math.Rounding.Floor);
+    // Get total PT supply to calculate proportional share
+    uint256 _totalSupply = PRINCIPAL_TOKEN.totalSupply();
 
+    if (_totalSupply == 0) revert FixedFeeSwapHook_InsufficientBalance();
+    
+    // Get contract balances for both fee tokens
+    address _feeToken0 = VAULT_SHARE_TOKEN.FEE_TOKEN0();
+    address _feeToken1 = VAULT_SHARE_TOKEN.FEE_TOKEN1();
+    
+    // Calculate post-maturity fees claimable for the redeemed amount proportionally
+    uint256 _feeToken0Amount = Math.mulDiv(_getTokenBalance(_feeToken0), _amount, _totalSupply, Math.Rounding.Floor);
+    uint256 _feeToken1Amount = Math.mulDiv(_getTokenBalance(_feeToken1), _amount, _totalSupply, Math.Rounding.Floor);
+    
     // Transfer post-maturity fees to the user
-    if (_postMaturityFeeToken0 > 0) {
-      _transferFeeToken(VAULT_SHARE_TOKEN.FEE_TOKEN0(), _user, _postMaturityFeeToken0);
+    if (_feeToken0Amount > 0) {
+      _transferFeeToken(_feeToken0, _user, _feeToken0Amount);
     }
-    if (_postMaturityFeeToken1 > 0) {
-      _transferFeeToken(VAULT_SHARE_TOKEN.FEE_TOKEN1(), _user, _postMaturityFeeToken1);
+    if (_feeToken1Amount > 0) {
+      _transferFeeToken(_feeToken1, _user, _feeToken1Amount);
     }
 
     emit FeesClaimed(
       _user,
-      VAULT_SHARE_TOKEN.FEE_TOKEN0(),
-      VAULT_SHARE_TOKEN.FEE_TOKEN1(),
-      _postMaturityFeeToken0,
-      _postMaturityFeeToken1
+      _feeToken0,
+      _feeToken1,
+      _feeToken0Amount,
+      _feeToken1Amount
     );
+  }
+
+  /// @notice Gets the balance of a token in the contract.
+  /// @param _token The address of the token to get the balance of.
+  /// @return The balance of the token in the contract.
+  function _getTokenBalance(address _token) internal view returns (uint256) {
+    if (_token == address(0)) {
+      return address(this).balance;
+    } else {
+      return IERC20(_token).balanceOf(address(this));
+    }
   }
 
   /// @notice Transfers an amount of fee tokens to a user.
