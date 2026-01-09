@@ -281,11 +281,19 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   {
     DepositCallbackData memory _callbackData = abi.decode(_actionData, (DepositCallbackData));
 
-    (uint128[] memory _liquidityPerPosition, int256 _totalDelta0, int256 _totalDelta1) =
-      _addLiquidityToPositions(_callbackData.amount0Max, _callbackData.amount1Max);
+    (
+      uint128[] memory _liquidityPerPosition,
+      int256 _totalDelta0,
+      int256 _totalDelta1,
+      int256 _totalFeeDelta0,
+      int256 _totalFeeDelta1
+    ) = _addLiquidityToPositions(_callbackData.amount0Max, _callbackData.amount1Max);
 
     (uint256 _amount0Used, uint256 _amount1Used) =
       _settleDeltas(_totalDelta0, _totalDelta1, _callbackData.sender);
+
+    // TODO: Handle fee deltas
+    (_totalFeeDelta0, _totalFeeDelta1);
 
     return abi.encode(_liquidityPerPosition, _amount0Used, _amount1Used);
   }
@@ -300,11 +308,14 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   {
     WithdrawCallbackData memory _callbackData = abi.decode(_actionData, (WithdrawCallbackData));
 
-    (int256 _totalDelta0, int256 _totalDelta1) =
+    (int256 _totalDelta0, int256 _totalDelta1, int256 _totalFeeDelta0, int256 _totalFeeDelta1) =
       _removeLiquidityFromPositions(_callbackData.liquidityToRemove);
 
     (uint256 _amount0Received, uint256 _amount1Received) =
       _settleWithdrawDeltas(_totalDelta0, _totalDelta1, _callbackData.receiver);
+
+    // TODO: Handle fee deltas
+    (_totalFeeDelta0, _totalFeeDelta1);
 
     return abi.encode(_amount0Received, _amount1Received);
   }
@@ -315,10 +326,18 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   /// @return _liquidityPerPosition Array of liquidity added to each position.
   /// @return _totalDelta0 The total delta for token0 (negative = owed to pool).
   /// @return _totalDelta1 The total delta for token1 (negative = owed to pool).
+  /// @return _totalFeeDelta0 The total fee delta for token0 (positive = fees earned).
+  /// @return _totalFeeDelta1 The total fee delta for token1 (positive = fees earned).
   function _addLiquidityToPositions(uint256 _amount0Max, uint256 _amount1Max)
     internal
     virtual
-    returns (uint128[] memory _liquidityPerPosition, int256 _totalDelta0, int256 _totalDelta1)
+    returns (
+      uint128[] memory _liquidityPerPosition,
+      int256 _totalDelta0,
+      int256 _totalDelta1,
+      int256 _totalFeeDelta0,
+      int256 _totalFeeDelta1
+    )
   {
     PoolId _poolId = targetPoolKey.toId();
     (uint160 _sqrtPriceX96,,,) = POOL_MANAGER.getSlot0(_poolId);
@@ -337,7 +356,7 @@ contract LPVault is VaultShareToken, IUnlockCallback {
 
       _liquidityPerPosition[_i] = _liquidity;
 
-      (BalanceDelta _delta,) = POOL_MANAGER.modifyLiquidity(
+      (BalanceDelta _delta, BalanceDelta _feeDelta) = POOL_MANAGER.modifyLiquidity(
         targetPoolKey,
         ModifyLiquidityParams({
           tickLower: _position.tickLower,
@@ -350,6 +369,8 @@ contract LPVault is VaultShareToken, IUnlockCallback {
 
       _totalDelta0 += _delta.amount0();
       _totalDelta1 += _delta.amount1();
+      _totalFeeDelta0 += _feeDelta.amount0();
+      _totalFeeDelta1 += _feeDelta.amount1();
     }
   }
 
@@ -410,17 +431,24 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   /// @param _liquidityToRemove Array of liquidity to remove from each position.
   /// @return _totalDelta0 The total delta for token0 (positive = pool owes us).
   /// @return _totalDelta1 The total delta for token1 (positive = pool owes us).
+  /// @return _totalFeeDelta0 The total fee delta for token0 (positive = fees earned).
+  /// @return _totalFeeDelta1 The total fee delta for token1 (positive = fees earned).
   function _removeLiquidityFromPositions(uint128[] memory _liquidityToRemove)
     internal
     virtual
-    returns (int256 _totalDelta0, int256 _totalDelta1)
+    returns (
+      int256 _totalDelta0,
+      int256 _totalDelta1,
+      int256 _totalFeeDelta0,
+      int256 _totalFeeDelta1
+    )
   {
     for (uint256 _i = 0; _i < positions.length; _i++) {
       uint128 _liquidity = _liquidityToRemove[_i];
 
       LiquidityPosition memory _position = positions[_i];
 
-      (BalanceDelta _delta,) = POOL_MANAGER.modifyLiquidity(
+      (BalanceDelta _delta, BalanceDelta _feeDelta) = POOL_MANAGER.modifyLiquidity(
         targetPoolKey,
         ModifyLiquidityParams({
           tickLower: _position.tickLower,
@@ -433,6 +461,8 @@ contract LPVault is VaultShareToken, IUnlockCallback {
 
       _totalDelta0 += _delta.amount0();
       _totalDelta1 += _delta.amount1();
+      _totalFeeDelta0 += _feeDelta.amount0();
+      _totalFeeDelta1 += _feeDelta.amount1();
     }
   }
 
