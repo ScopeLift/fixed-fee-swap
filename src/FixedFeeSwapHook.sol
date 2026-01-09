@@ -75,7 +75,8 @@ contract FixedFeeSwapHook is BaseHook {
   event Deposit(address indexed user, uint256 vsAmount, uint256 ptAmount, uint256 ytAmount);
 
   /// @notice Emitted when a user redeems their principal and yield tokens back into the vault share
-  /// token. @param user The address of the user who redeemed.
+  /// token.
+  /// @param user The address of the user who redeemed.
   /// @param vstAmount The amount of vault share token redeemed.
   /// @param maturityReached Whether the maturity has been reached.
   event Redeem(address indexed user, uint256 vstAmount, bool maturityReached);
@@ -219,7 +220,8 @@ contract FixedFeeSwapHook is BaseHook {
   ///  - If called at/after maturity, the caller must have at least `_amount` PT tokens.
   ///  - Note:
   ///    - Before maturity, the YT will be non-zero, so 1 PT + 1 YT = 1 VST.
-  ///    - At maturity, the YT will be 0, so 1 PT = 1 VST.
+  ///    - After maturity, the caller will claim fees proportionally based on their PT ownership.
+  ///      Fees are calculated as: (contractBalance × amount) / totalSupply for each fee token.
   function redeem(uint256 _amount) external returns (uint256 _vstAmount) {
     if (_amount == 0) revert FixedFeeSwapHook_InvalidAmount();
 
@@ -268,7 +270,7 @@ contract FixedFeeSwapHook is BaseHook {
 
     uint256 _amount = YIELD_TOKEN.balanceOf(msg.sender);
 
-    if (_amount == 0) revert FixedFeeSwapHook_InsufficientBalance();
+    if (_amount == 0) revert FixedFeeSwapHook_InvalidAmount();
 
     (_claimedToken0, _claimedToken1) = _claimAndBurnYieldTokens(msg.sender, _amount);
   }
