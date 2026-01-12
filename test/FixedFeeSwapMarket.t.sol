@@ -120,8 +120,8 @@ abstract contract FixedFeeSwapMarketTest is Test {
   }
 
   /// @notice Computes the packed bitmap slot/bit for a given tick.
-  /// @dev Mirrors `TickBitmap.position` with `tickSpacing = 1` (so the compressed tick equals `tick`).
-  /// @param tick The tick to locate in the bitmap.
+  /// @dev Mirrors `TickBitmap.position` with `tickSpacing = 1` (so the compressed tick equals
+  /// `tick`). @param tick The tick to locate in the bitmap.
   /// @return wordPos The bitmap word key (`tick >> 8`).
   /// @return bitPos The bit index within the word (`tick & 0xff`).
   function _bitmapPosition(int24 tick) internal pure returns (int16 wordPos, uint8 bitPos) {
@@ -522,8 +522,12 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     uint256 hookBalance0After = token0.balanceOf(address(hook));
     uint256 hookBalance1After = token1.balanceOf(address(hook));
 
-    assertEq(int256(balance0Before - balance0After), expected0, "User token0 debited should equal expected");
-    assertEq(int256(balance1Before - balance1After), expected1, "User token1 debited should equal expected");
+    assertEq(
+      int256(balance0Before - balance0After), expected0, "User token0 debited should equal expected"
+    );
+    assertEq(
+      int256(balance1Before - balance1After), expected1, "User token1 debited should equal expected"
+    );
     assertEq(
       int256(hookBalance0After - hookBalance0Before),
       expected0,
@@ -695,8 +699,12 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     uint256 balance0After = token0.balanceOf(alice);
     uint256 balance1After = token1.balanceOf(alice);
 
-    assertEq(int256(balance0Before - balance0After), expected0, "Token0 amount should match expected");
-    assertEq(int256(balance1Before - balance1After), expected1, "Token1 amount should match expected");
+    assertEq(
+      int256(balance0Before - balance0After), expected0, "Token0 amount should match expected"
+    );
+    assertEq(
+      int256(balance1Before - balance1After), expected1, "Token1 amount should match expected"
+    );
   }
 
   /// @dev Position above current tick requires only token0 (principal)
@@ -720,8 +728,12 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     uint256 balance0After = token0.balanceOf(alice);
     uint256 balance1After = token1.balanceOf(alice);
 
-    assertEq(int256(balance0Before - balance0After), expected0, "Token0 amount should match expected");
-    assertEq(int256(balance1Before - balance1After), expected1, "Token1 amount should match expected");
+    assertEq(
+      int256(balance0Before - balance0After), expected0, "Token0 amount should match expected"
+    );
+    assertEq(
+      int256(balance1Before - balance1After), expected1, "Token1 amount should match expected"
+    );
   }
 
   /// @dev Position spanning current tick requires both tokens
@@ -745,8 +757,12 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     uint256 balance0After = token0.balanceOf(alice);
     uint256 balance1After = token1.balanceOf(alice);
 
-    assertEq(int256(balance0Before - balance0After), expected0, "Token0 amount should match expected");
-    assertEq(int256(balance1Before - balance1After), expected1, "Token1 amount should match expected");
+    assertEq(
+      int256(balance0Before - balance0After), expected0, "Token0 amount should match expected"
+    );
+    assertEq(
+      int256(balance1Before - balance1After), expected1, "Token1 amount should match expected"
+    );
   }
 
   function testFuzz_TickLowerEqualsCurrentTick_OnlyToken0(uint128 liquidity) public {
@@ -766,8 +782,16 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     vm.prank(alice);
     hook.mintLiquidity(tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max);
 
-    assertEq(int256(balance0Before - token0.balanceOf(alice)), expected0, "Token0 amount should match expected");
-    assertEq(int256(balance1Before - token1.balanceOf(alice)), expected1, "Token1 amount should match expected");
+    assertEq(
+      int256(balance0Before - token0.balanceOf(alice)),
+      expected0,
+      "Token0 amount should match expected"
+    );
+    assertEq(
+      int256(balance1Before - token1.balanceOf(alice)),
+      expected1,
+      "Token1 amount should match expected"
+    );
   }
 
   function testFuzz_TickUpperEqualsCurrentTick_OnlyToken1(uint128 liquidity) public {
@@ -787,8 +811,16 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     vm.prank(alice);
     hook.mintLiquidity(tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max);
 
-    assertEq(int256(balance0Before - token0.balanceOf(alice)), expected0, "Token0 amount should match expected");
-    assertEq(int256(balance1Before - token1.balanceOf(alice)), expected1, "Token1 amount should match expected");
+    assertEq(
+      int256(balance0Before - token0.balanceOf(alice)),
+      expected0,
+      "Token0 amount should match expected"
+    );
+    assertEq(
+      int256(balance1Before - token1.balanceOf(alice)),
+      expected1,
+      "Token1 amount should match expected"
+    );
   }
 
   // ============ Liquidity Scaling Tests ============
@@ -1041,7 +1073,7 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
     vm.prank(alice);
     hook.increaseLiquidity(positionId, additionalLiquidity, type(uint256).max, type(uint256).max);
 
-    (,, , int128 totalLiquidity) = hook.getPositionInfo(positionId);
+    (,,, int128 totalLiquidity) = hook.getPositionInfo(positionId);
     assertEq(
       uint128(totalLiquidity),
       initialLiquidity + additionalLiquidity,
@@ -1050,9 +1082,10 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
   }
 
   /// @dev Increasing liquidity does not change position ownership or ticks
-  function testFuzz_OwnerUnchangedAfterIncrease(uint128 initialLiquidity, uint128 additionalLiquidity)
-    public
-  {
+  function testFuzz_OwnerUnchangedAfterIncrease(
+    uint128 initialLiquidity,
+    uint128 additionalLiquidity
+  ) public {
     initialLiquidity = _boundLiquidity(initialLiquidity);
     additionalLiquidity = _boundLiquidity(additionalLiquidity);
 
@@ -1220,7 +1253,9 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
   }
 
   /// @dev Token conservation: total supply unchanged after increase
-  function testFuzz_TokenConservation(uint128 initialLiquidity, uint128 additionalLiquidity) public {
+  function testFuzz_TokenConservation(uint128 initialLiquidity, uint128 additionalLiquidity)
+    public
+  {
     initialLiquidity = _boundLiquidity(initialLiquidity);
     additionalLiquidity = _boundLiquidity(additionalLiquidity);
 
@@ -1267,7 +1302,9 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
 
     uint128 activeAfter = hook.getActiveLiquidity();
     assertEq(
-      activeAfter, activeBefore + additionalLiquidity, "Active liquidity should increase by additional"
+      activeAfter,
+      activeBefore + additionalLiquidity,
+      "Active liquidity should increase by additional"
     );
   }
 
@@ -1291,7 +1328,9 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
     hook.increaseLiquidity(positionId, additionalLiquidity, type(uint256).max, type(uint256).max);
 
     uint128 activeAfter = hook.getActiveLiquidity();
-    assertEq(activeAfter, activeBefore, "Active liquidity should not change for below-range position");
+    assertEq(
+      activeAfter, activeBefore, "Active liquidity should not change for below-range position"
+    );
   }
 
   /// @dev Increasing does not update active liquidity when position is above current tick
@@ -1314,7 +1353,9 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
     hook.increaseLiquidity(positionId, additionalLiquidity, type(uint256).max, type(uint256).max);
 
     uint128 activeAfter = hook.getActiveLiquidity();
-    assertEq(activeAfter, activeBefore, "Active liquidity should not change for above-range position");
+    assertEq(
+      activeAfter, activeBefore, "Active liquidity should not change for above-range position"
+    );
   }
 
   // ============ Multiple Operations Tests ============
@@ -1416,8 +1457,16 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
     vm.prank(alice);
     hook.increaseLiquidity(positionId, additionalLiquidity, type(uint256).max, type(uint256).max);
 
-    assertEq(int256(balance0Before - token0.balanceOf(alice)), expected0, "Token0 amount should match expected");
-    assertEq(int256(balance1Before - token1.balanceOf(alice)), expected1, "Token1 amount should match expected");
+    assertEq(
+      int256(balance0Before - token0.balanceOf(alice)),
+      expected0,
+      "Token0 amount should match expected"
+    );
+    assertEq(
+      int256(balance1Before - token1.balanceOf(alice)),
+      expected1,
+      "Token1 amount should match expected"
+    );
   }
 
   /// @dev Position above current tick: increase requires only token0 (principal)
@@ -1445,12 +1494,22 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
     vm.prank(alice);
     hook.increaseLiquidity(positionId, additionalLiquidity, type(uint256).max, type(uint256).max);
 
-    assertEq(int256(balance0Before - token0.balanceOf(alice)), expected0, "Token0 amount should match expected");
-    assertEq(int256(balance1Before - token1.balanceOf(alice)), expected1, "Token1 amount should match expected");
+    assertEq(
+      int256(balance0Before - token0.balanceOf(alice)),
+      expected0,
+      "Token0 amount should match expected"
+    );
+    assertEq(
+      int256(balance1Before - token1.balanceOf(alice)),
+      expected1,
+      "Token1 amount should match expected"
+    );
   }
 
   /// @dev Position spanning current tick: increase requires both tokens
-  function testFuzz_InRangeBothTokens(uint128 initialLiquidity, uint128 additionalLiquidity) public {
+  function testFuzz_InRangeBothTokens(uint128 initialLiquidity, uint128 additionalLiquidity)
+    public
+  {
     initialLiquidity = _boundLiquidity(initialLiquidity);
     additionalLiquidity = _boundLiquidity(additionalLiquidity);
 
@@ -1472,8 +1531,16 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
     vm.prank(alice);
     hook.increaseLiquidity(positionId, additionalLiquidity, type(uint256).max, type(uint256).max);
 
-    assertEq(int256(balance0Before - token0.balanceOf(alice)), expected0, "Token0 amount should match expected");
-    assertEq(int256(balance1Before - token1.balanceOf(alice)), expected1, "Token1 amount should match expected");
+    assertEq(
+      int256(balance0Before - token0.balanceOf(alice)),
+      expected0,
+      "Token0 amount should match expected"
+    );
+    assertEq(
+      int256(balance1Before - token1.balanceOf(alice)),
+      expected1,
+      "Token1 amount should match expected"
+    );
   }
 
   /// @dev Cash required for in-range increases changes over time (principal is time-invariant)
@@ -1509,16 +1576,21 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
     (used_t2.amount0, used_t2.amount1) = _increaseLiquidity(alice, positionId, additionalLiquidity);
     assertEq(used_t2.amount0, expected_t2.amount0, "Token0 at t2 should match expected");
     assertEq(used_t2.amount1, expected_t2.amount1, "Token1 at t2 should match expected");
-    assertEq(expected_t2.amount0, expected_t1.amount0, "Principal requirement should be time-invariant");
-    assertTrue(expected_t2.amount1 != expected_t1.amount1, "Cash requirement should change with time");
+    assertEq(
+      expected_t2.amount0, expected_t1.amount0, "Principal requirement should be time-invariant"
+    );
+    assertTrue(
+      expected_t2.amount1 != expected_t1.amount1, "Cash requirement should change with time"
+    );
   }
 
   // ============ Slippage Tests ============
 
   /// @dev Allows increase when slippage exactly met
-  function testFuzz_AllowsWhen_SlippageExactlyMet(uint128 initialLiquidity, uint128 additionalLiquidity)
-    public
-  {
+  function testFuzz_AllowsWhen_SlippageExactlyMet(
+    uint128 initialLiquidity,
+    uint128 additionalLiquidity
+  ) public {
     initialLiquidity = _boundLiquidity(initialLiquidity);
     additionalLiquidity = _boundLiquidity(additionalLiquidity);
 
@@ -1540,7 +1612,9 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
     // If we get here without reverting, the test passes
     (,,, int128 totalLiquidity) = hook.getPositionInfo(positionId);
     assertEq(
-      uint128(totalLiquidity), initialLiquidity + additionalLiquidity, "Liquidity should be increased"
+      uint128(totalLiquidity),
+      initialLiquidity + additionalLiquidity,
+      "Liquidity should be increased"
     );
   }
 
@@ -1554,9 +1628,10 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
     hook.increaseLiquidity(missingPositionId, 1e18, type(uint256).max, type(uint256).max);
   }
 
-  function testFuzz_RevertWhen_NotPositionOwner(uint128 initialLiquidity, uint128 additionalLiquidity)
-    public
-  {
+  function testFuzz_RevertWhen_NotPositionOwner(
+    uint128 initialLiquidity,
+    uint128 additionalLiquidity
+  ) public {
     initialLiquidity = _boundLiquidity(initialLiquidity);
     additionalLiquidity = _boundLiquidity(additionalLiquidity);
 
@@ -1774,9 +1849,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   // ============ Position Update Tests ============
 
   /// @dev Decreasing removes liquidity from position
-  function testFuzz_RemovesFromPosition(uint128 initialLiquidity, uint128 removeAmount)
-    public
-  {
+  function testFuzz_RemovesFromPosition(uint128 initialLiquidity, uint128 removeAmount) public {
     initialLiquidity = _boundLiquidity(initialLiquidity);
     removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
 
@@ -1824,7 +1897,9 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   }
 
   /// @dev Decreasing updates tick liquidity gross
-  function testFuzz_UpdatesTickLiquidityGross(uint128 initialLiquidity, uint128 removeAmount) public {
+  function testFuzz_UpdatesTickLiquidityGross(uint128 initialLiquidity, uint128 removeAmount)
+    public
+  {
     initialLiquidity = _boundLiquidity(initialLiquidity);
     removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
 
@@ -1893,10 +1968,12 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     uint256 lowerMask = uint256(1) << lowerBit;
     uint256 upperMask = uint256(1) << upperBit;
     assertTrue(
-      (hook.getTickBitmapWord(lowerWord) & lowerMask) != 0, "Lower tick bit should be set after mint"
+      (hook.getTickBitmapWord(lowerWord) & lowerMask) != 0,
+      "Lower tick bit should be set after mint"
     );
     assertTrue(
-      (hook.getTickBitmapWord(upperWord) & upperMask) != 0, "Upper tick bit should be set after mint"
+      (hook.getTickBitmapWord(upperWord) & upperMask) != 0,
+      "Upper tick bit should be set after mint"
     );
 
     // Full withdrawal
@@ -1904,9 +1981,13 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     hook.decreaseLiquidity(positionId, -int128(liquidity), 0, 0);
 
     // Verify words are restored exactly
-    assertEq(hook.getTickBitmapWord(lowerWord), lowerWordBefore, "Lower bitmap word should be restored");
+    assertEq(
+      hook.getTickBitmapWord(lowerWord), lowerWordBefore, "Lower bitmap word should be restored"
+    );
     if (upperWord != lowerWord) {
-      assertEq(hook.getTickBitmapWord(upperWord), upperWordBefore, "Upper bitmap word should be restored");
+      assertEq(
+        hook.getTickBitmapWord(upperWord), upperWordBefore, "Upper bitmap word should be restored"
+      );
     }
 
     // Verify tick liquidity is zero
@@ -2002,9 +2083,13 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
     uint256 lowerMask = uint256(1) << lowerBit;
     uint256 upperMask = uint256(1) << upperBit;
-    assertEq(hook.getTickBitmapWord(lowerWord), lowerWordAfterMint, "Lower bitmap word should not change");
+    assertEq(
+      hook.getTickBitmapWord(lowerWord), lowerWordAfterMint, "Lower bitmap word should not change"
+    );
     if (upperWord != lowerWord) {
-      assertEq(hook.getTickBitmapWord(upperWord), upperWordAfterMint, "Upper bitmap word should not change");
+      assertEq(
+        hook.getTickBitmapWord(upperWord), upperWordAfterMint, "Upper bitmap word should not change"
+      );
     }
     assertTrue(
       (hook.getTickBitmapWord(lowerWord) & lowerMask) != 0,
@@ -2041,10 +2126,14 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
 
     assertEq(
-      int256(token0.balanceOf(alice) - balance0Before), expected0, "User token0 received should match expected"
+      int256(token0.balanceOf(alice) - balance0Before),
+      expected0,
+      "User token0 received should match expected"
     );
     assertEq(
-      int256(token1.balanceOf(alice) - balance1Before), expected1, "User token1 received should match expected"
+      int256(token1.balanceOf(alice) - balance1Before),
+      expected1,
+      "User token1 received should match expected"
     );
     assertEq(
       int256(hookBalance0Before - token0.balanceOf(address(hook))),
@@ -2086,9 +2175,10 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   // ============ Active Liquidity Tests ============
 
   /// @dev Decreasing updates active liquidity when position spans current tick
-  function testFuzz_UpdatesActiveLiquidityWhenInRange(uint128 initialLiquidity, uint128 removeAmount)
-    public
-  {
+  function testFuzz_UpdatesActiveLiquidityWhenInRange(
+    uint128 initialLiquidity,
+    uint128 removeAmount
+  ) public {
     initialLiquidity = _boundLiquidity(initialLiquidity);
     removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
 
@@ -2126,7 +2216,9 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
 
     uint128 activeAfter = hook.getActiveLiquidity();
-    assertEq(activeAfter, activeBefore, "Active liquidity should not change for below-range position");
+    assertEq(
+      activeAfter, activeBefore, "Active liquidity should not change for below-range position"
+    );
   }
 
   /// @dev Decreasing does not update active liquidity when position is above current tick
@@ -2148,7 +2240,9 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
 
     uint128 activeAfter = hook.getActiveLiquidity();
-    assertEq(activeAfter, activeBefore, "Active liquidity should not change for above-range position");
+    assertEq(
+      activeAfter, activeBefore, "Active liquidity should not change for above-range position"
+    );
   }
 
   // ============ Multiple Operations Tests ============
@@ -2251,8 +2345,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     assertEq(uint128(bobLiq), bobInitial - bobDecrease, "Bob liquidity should match");
 
     (uint128 lowerGross,) = hook.getTickInfo(tickLower);
-    uint128 expectedTotal =
-      (aliceInitial - aliceDecrease) + (bobInitial - bobDecrease);
+    uint128 expectedTotal = (aliceInitial - aliceDecrease) + (bobInitial - bobDecrease);
     assertEq(lowerGross, expectedTotal, "Tick should have combined remaining liquidity");
   }
 
@@ -2281,10 +2374,14 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
 
     assertEq(
-      int256(token0.balanceOf(alice) - balance0Before), expected0, "Token0 received should match expected"
+      int256(token0.balanceOf(alice) - balance0Before),
+      expected0,
+      "Token0 received should match expected"
     );
     assertEq(
-      int256(token1.balanceOf(alice) - balance1Before), expected1, "Token1 received should match expected"
+      int256(token1.balanceOf(alice) - balance1Before),
+      expected1,
+      "Token1 received should match expected"
     );
   }
 
@@ -2311,10 +2408,14 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
 
     assertEq(
-      int256(token0.balanceOf(alice) - balance0Before), expected0, "Token0 received should match expected"
+      int256(token0.balanceOf(alice) - balance0Before),
+      expected0,
+      "Token0 received should match expected"
     );
     assertEq(
-      int256(token1.balanceOf(alice) - balance1Before), expected1, "Token1 received should match expected"
+      int256(token1.balanceOf(alice) - balance1Before),
+      expected1,
+      "Token1 received should match expected"
     );
   }
 
@@ -2341,10 +2442,14 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
 
     assertEq(
-      int256(token0.balanceOf(alice) - balance0Before), expected0, "Token0 received should match expected"
+      int256(token0.balanceOf(alice) - balance0Before),
+      expected0,
+      "Token0 received should match expected"
     );
     assertEq(
-      int256(token1.balanceOf(alice) - balance1Before), expected1, "Token1 received should match expected"
+      int256(token1.balanceOf(alice) - balance1Before),
+      expected1,
+      "Token1 received should match expected"
     );
   }
 
@@ -2390,7 +2495,9 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     assertEq(received_t2.amount1, expected_t2.amount1, "Token1 at t2 should match expected");
 
     // Principal should be same, cash should differ
-    assertEq(expected_t2.amount0, expected_t1.amount0, "Principal returned should be time-invariant");
+    assertEq(
+      expected_t2.amount0, expected_t1.amount0, "Principal returned should be time-invariant"
+    );
     assertNotEq(expected_t2.amount1, expected_t1.amount1, "Cash returned should change with time");
   }
 
@@ -2413,7 +2520,9 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     (int256 expected0, int256 expected1) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
 
     vm.prank(alice);
-    hook.decreaseLiquidity(positionId, -int128(removeAmount), uint256(expected0), uint256(expected1));
+    hook.decreaseLiquidity(
+      positionId, -int128(removeAmount), uint256(expected0), uint256(expected1)
+    );
 
     // If we get here without reverting, the test passes
     (,,, int128 remainingLiquidity) = hook.getPositionInfo(positionId);
@@ -2452,9 +2561,10 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   }
 
   /// @dev Reverts when token0 amount is below min (above-range position)
-  function testFuzz_RevertWhen_Token0SlippageExceeded(uint128 initialLiquidity, uint128 removeAmount)
-    public
-  {
+  function testFuzz_RevertWhen_Token0SlippageExceeded(
+    uint128 initialLiquidity,
+    uint128 removeAmount
+  ) public {
     initialLiquidity = _boundLiquidity(initialLiquidity);
     removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
 
@@ -2475,9 +2585,10 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   }
 
   /// @dev Reverts when token1 amount is below min (below-range position)
-  function testFuzz_RevertWhen_Token1SlippageExceeded(uint128 initialLiquidity, uint128 removeAmount)
-    public
-  {
+  function testFuzz_RevertWhen_Token1SlippageExceeded(
+    uint128 initialLiquidity,
+    uint128 removeAmount
+  ) public {
     initialLiquidity = _boundLiquidity(initialLiquidity);
     removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
 
@@ -2498,9 +2609,10 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   }
 
   /// @dev Reverts when token0 amount is below min (in-range position)
-  function testFuzz_RevertWhen_InRangeToken0SlippageExceeded(uint128 initialLiquidity, uint128 removeAmount)
-    public
-  {
+  function testFuzz_RevertWhen_InRangeToken0SlippageExceeded(
+    uint128 initialLiquidity,
+    uint128 removeAmount
+  ) public {
     initialLiquidity = _boundLiquidity(initialLiquidity);
     removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
 
@@ -2521,9 +2633,10 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   }
 
   /// @dev Reverts when token1 amount is below min (in-range position)
-  function testFuzz_RevertWhen_InRangeToken1SlippageExceeded(uint128 initialLiquidity, uint128 removeAmount)
-    public
-  {
+  function testFuzz_RevertWhen_InRangeToken1SlippageExceeded(
+    uint128 initialLiquidity,
+    uint128 removeAmount
+  ) public {
     initialLiquidity = _boundLiquidity(initialLiquidity);
     removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
 
@@ -2778,7 +2891,9 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     _swap(bob, int256(swapAmount), true, 0);
 
     assertGe(int256(hook.getCurrentTick()), int256(10), "Should cross tick +10");
-    assertLt(uint256(hook.getActiveLiquidity()), uint256(activeBefore), "Active liquidity should decrease");
+    assertLt(
+      uint256(hook.getActiveLiquidity()), uint256(activeBefore), "Active liquidity should decrease"
+    );
   }
 
   /// @dev Multiple positions at different tick ranges
@@ -2811,13 +2926,17 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     uint256 swapAmount = uint256(activeBefore) * 60 / BIPS;
     _swap(bob, int256(swapAmount), true, 0);
 
-    assertGe(int256(hook.getCurrentTick()), int256(currentTick + 50), "Should cross into the new position");
-    assertGt(uint256(hook.getActiveLiquidity()), uint256(activeBefore), "Active liquidity should increase");
+    assertGe(
+      int256(hook.getCurrentTick()), int256(currentTick + 50), "Should cross into the new position"
+    );
+    assertGt(
+      uint256(hook.getActiveLiquidity()), uint256(activeBefore), "Active liquidity should increase"
+    );
   }
 
   /// @dev Crossing an uninitialized word boundary should not change active liquidity.
-  /// @notice Uses the fact that only ticks ±1000 are initialized in `setUp`, so the first "next tick"
-  /// to the right from tick 0 is the uninitialized word edge at tick 255.
+  /// @notice Uses the fact that only ticks ±1000 are initialized in `setUp`, so the first "next
+  /// tick" to the right from tick 0 is the uninitialized word edge at tick 255.
   function testFuzz_CrossingUninitializedBoundaryDoesNotChangeActiveLiquidity(uint128 extraLiquidity)
     public
   {
@@ -2840,7 +2959,8 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertEq(hook.getActiveLiquidity(), activeBefore, "Active liquidity should be unchanged");
   }
 
-  /// @dev Crossing the upper tick of a below-range position (cash->principal, moving left) increases liquidity.
+  /// @dev Crossing the upper tick of a below-range position (cash->principal, moving left)
+  /// increases liquidity.
   function testFuzz_CashForPrincipal_CrossingUpperTickIncreasesActiveLiquidity(uint128 belowRangeLiquidity)
     public
   {
@@ -2858,7 +2978,9 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     uint256 balance1Before = token1.balanceOf(bob);
     _swap(bob, int256(cashInToBoundary), false, 0);
 
-    assertEq(balance1Before - token1.balanceOf(bob), cashInToBoundary, "Should consume cash to boundary");
+    assertEq(
+      balance1Before - token1.balanceOf(bob), cashInToBoundary, "Should consume cash to boundary"
+    );
     assertEq(hook.getCurrentPrice(), boundaryPrice, "Price should move to boundary price");
     assertEq(hook.getCurrentTick(), int24(-11), "Moving left leaves tick just below boundary");
     assertEq(
@@ -2868,7 +2990,8 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     );
   }
 
-  /// @dev Crossing the lower tick of an in-range position (cash->principal, moving left) decreases liquidity.
+  /// @dev Crossing the lower tick of an in-range position (cash->principal, moving left) decreases
+  /// liquidity.
   function testFuzz_CashForPrincipal_CrossingLowerTickDecreasesActiveLiquidity(uint128 narrowLiquidity)
     public
   {
@@ -2886,7 +3009,9 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     uint256 balance1Before = token1.balanceOf(bob);
     _swap(bob, int256(cashInToBoundary), false, 0);
 
-    assertEq(balance1Before - token1.balanceOf(bob), cashInToBoundary, "Should consume cash to boundary");
+    assertEq(
+      balance1Before - token1.balanceOf(bob), cashInToBoundary, "Should consume cash to boundary"
+    );
     assertEq(hook.getCurrentPrice(), boundaryPrice, "Price should move to boundary price");
     assertEq(hook.getCurrentTick(), int24(-11), "Moving left leaves tick just below boundary");
     assertEq(
@@ -2920,7 +3045,8 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     }
   }
 
-  /// @dev If the price limit is already satisfied at entry, the swap should be a no-op (except lazy price init).
+  /// @dev If the price limit is already satisfied at entry, the swap should be a no-op (except lazy
+  /// price init).
   function testFuzz_PriceLimitAlreadyHit_PrincipalForCash_NoOp(uint256 amountIn) public {
     amountIn = _boundSwapAmount(amountIn);
     assertEq(hook.getCurrentPrice(), 0, "Assumes lazy price init");
@@ -2951,7 +3077,8 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertEq(token1.balanceOf(address(hook)), hookBalance1Before, "Hook TOKEN1 unchanged");
   }
 
-  /// @dev If the price limit is already satisfied at entry, the swap should be a no-op (except lazy price init).
+  /// @dev If the price limit is already satisfied at entry, the swap should be a no-op (except lazy
+  /// price init).
   function testFuzz_PriceLimitAlreadyHit_CashForPrincipal_NoOp(uint256 amountIn) public {
     amountIn = _boundSwapAmount(amountIn);
     assertEq(hook.getCurrentPrice(), 0, "Assumes lazy price init");
@@ -3238,7 +3365,8 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     freshHook.exposed_beforeSwap(bob, freshPoolKey, defaultSwapParams, hookParams);
   }
 
-  /// @dev Reverts if liquidity is exhausted mid-swap and there is remaining input (principal->cash).
+  /// @dev Reverts if liquidity is exhausted mid-swap and there is remaining input
+  /// (principal->cash).
   function testFuzz_RevertWhen_LiquidityExhaustedMidSwap_PrincipalForCash(uint128 liq) public {
     address mockManager = makeAddr("freshMockManager2");
     FixedFeeSwapMarketHarness freshHook = new FixedFeeSwapMarketHarness(
@@ -3269,7 +3397,8 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     freshHook.exposed_beforeSwap(bob, freshPoolKey, defaultSwapParams, hookParams);
   }
 
-  /// @dev Reverts if liquidity is exhausted mid-swap and there is remaining input (cash->principal).
+  /// @dev Reverts if liquidity is exhausted mid-swap and there is remaining input
+  /// (cash->principal).
   function testFuzz_RevertWhen_LiquidityExhaustedMidSwap_CashForPrincipal(uint128 liq) public {
     address mockManager = makeAddr("freshMockManager3");
     FixedFeeSwapMarketHarness freshHook = new FixedFeeSwapMarketHarness(
@@ -3293,7 +3422,8 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     vm.stopPrank();
 
     int256 price = freshHook.tickToPrice(freshHook.getCurrentTick());
-    (uint256 cashInToBoundary,,,) = freshHook.exposed_getPrincipalSwapAmount(int256(1e36), price, -10);
+    (uint256 cashInToBoundary,,,) =
+      freshHook.exposed_getPrincipalSwapAmount(int256(1e36), price, -10);
 
     bytes memory hookParams = _encodeHookParams(int256(cashInToBoundary + 1), false, 0);
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__InvalidTickTraversal.selector);
