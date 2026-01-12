@@ -168,8 +168,9 @@ contract FixedFeeSwapMarket is BaseHook {
     revert LiquidityOnlyViaHook();
   }
 
-  /// @dev Hook data schema: `abi.encode(int256 amountIn, bool principalForCash, uint256 priceLimitWad)`.
-  /// If `principalForCash` is true, TOKEN0 is input and TOKEN1 is output (tick increases, price decreases).
+  /// @dev Hook data schema: `abi.encode(int256 amountIn, bool principalForCash, uint256
+  /// priceLimitWad)`. If `principalForCash` is true, TOKEN0 is input and TOKEN1 is output (tick
+  /// increases, price decreases).
   /// If `priceLimitWad` is 0, the swap only stops once `amountIn` is fully consumed.
   function _beforeSwap(
     address _sender,
@@ -213,7 +214,9 @@ contract FixedFeeSwapMarket is BaseHook {
       // `_nextTick == currentTick` when `currentTick` is not initialized (e.g. at tick 0),
       // which causes `tickDelta == 0` and reverts.
       int24 _searchTick = currentTick;
-      if (_tickMovingLeft && currentTick != type(int24).min) _searchTick = currentTick - YIELD_PER_TICK;
+      if (_tickMovingLeft && currentTick != type(int24).min) {
+        _searchTick = currentTick - YIELD_PER_TICK;
+      }
       (int24 _nextTick, bool _initialized) =
         tickBitmap.nextInitializedTickWithinOneWord(_searchTick, YIELD_PER_TICK, _tickMovingLeft);
       // TODO Check if tick hits min or max tick
@@ -293,7 +296,7 @@ contract FixedFeeSwapMarket is BaseHook {
   ) external virtual {
     // First calculate the liquidity delta
     BalanceDelta memory _balanceDelta =
-      modifyLiquidity(msg.sender, _tickUpper, _tickLower, _liquidity.toInt128());
+      _modifyLiquidity(msg.sender, _tickUpper, _tickLower, _liquidity.toInt128());
     if (
       _balanceDelta.amount0.toUint128() > _amount0Max
         || _balanceDelta.amount1.toUint128() > _amount1Max
@@ -324,7 +327,7 @@ contract FixedFeeSwapMarket is BaseHook {
     PositionInfo memory _positionInfo = positions[_positionId];
     if (_positionInfo.owner == address(0)) revert FixedFeeSwap__PositionNotFound();
     if (_positionInfo.owner != msg.sender) revert FixedFeeSwap__NotPositionOwner();
-    BalanceDelta memory _balanceDelta = modifyLiquidity(
+    BalanceDelta memory _balanceDelta = _modifyLiquidity(
       msg.sender, _positionInfo.tickUpper, _positionInfo.tickLower, _liquidity.toInt128()
     );
     if (
@@ -357,11 +360,10 @@ contract FixedFeeSwapMarket is BaseHook {
     if (_positionInfo.owner == address(0)) revert FixedFeeSwap__PositionNotFound();
     if (_positionInfo.owner != msg.sender) revert FixedFeeSwap__NotPositionOwner();
     BalanceDelta memory _balanceDelta =
-      modifyLiquidity(msg.sender, _positionInfo.tickUpper, _positionInfo.tickLower, _liquidity);
-    if (
-      _balanceDelta.amount0.abs() < _amount0Min
-        || _balanceDelta.amount1.abs() < _amount1Min
-    ) revert FixedFeeSwap__InvalidLiquidityAmount();
+      _modifyLiquidity(msg.sender, _positionInfo.tickUpper, _positionInfo.tickLower, _liquidity);
+    if (_balanceDelta.amount0.abs() < _amount0Min || _balanceDelta.amount1.abs() < _amount1Min) {
+      revert FixedFeeSwap__InvalidLiquidityAmount();
+    }
     positions[_positionId] = PositionInfo({
       tickUpper: _positionInfo.tickUpper,
       tickLower: _positionInfo.tickLower,
@@ -370,17 +372,13 @@ contract FixedFeeSwapMarket is BaseHook {
     });
 
     // TODO Make sure these helpers are taking the absolute value
-    if (_balanceDelta.amount0 < 0) {
-      TOKEN0.safeTransfer(msg.sender, _balanceDelta.amount0.abs());
-    }
+    if (_balanceDelta.amount0 < 0) TOKEN0.safeTransfer(msg.sender, _balanceDelta.amount0.abs());
 
-    if (_balanceDelta.amount1 < 0) {
-      TOKEN1.safeTransfer(msg.sender, _balanceDelta.amount1.abs());
-    }
+    if (_balanceDelta.amount1 < 0) TOKEN1.safeTransfer(msg.sender, _balanceDelta.amount1.abs());
   }
 
   /// Shared liquidity functionality
-  function modifyLiquidity(address _owner, int24 _tickUpper, int24 _tickLower, int128 _liquidity)
+  function _modifyLiquidity(address _owner, int24 _tickUpper, int24 _tickLower, int128 _liquidity)
     internal
     returns (BalanceDelta memory)
   {
@@ -567,9 +565,7 @@ contract FixedFeeSwapMarket is BaseHook {
       return (principalToBoundary, cashOutToBoundary, nextTickPrice, _nextTick);
     }
 
-    return _getCashSwapAmountWithinTick(
-      amountIn, principalToBoundary, cashOutToBoundary, priceDiff
-    );
+    return _getCashSwapAmountWithinTick(amountIn, principalToBoundary, cashOutToBoundary, priceDiff);
   }
 
   function _getPrincipalSwapAmount(int256 _amountIn, int256 _currentPrice, int24 _nextTick)
@@ -587,7 +583,8 @@ contract FixedFeeSwapMarket is BaseHook {
     uint256 liquidity = uint256(activeLiquidity);
     uint256 priceDiff = uint256(nextTickPrice - _currentPrice);
     uint256 principalOutToBoundary = (liquidity * uint256(uint24(tickDelta))) / BIPS;
-    uint256 cashInToBoundary = FixedPointMathLib.mulDiv(liquidity, priceDiff, _scaledTimeElapsedWad());
+    uint256 cashInToBoundary =
+      FixedPointMathLib.mulDiv(liquidity, priceDiff, _scaledTimeElapsedWad());
     if (cashInToBoundary == 0) revert FixedFeeSwap__InvalidTickTraversal();
 
     if (amountIn >= cashInToBoundary) {
