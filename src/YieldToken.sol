@@ -131,11 +131,12 @@ contract YieldToken is ERC20 {
     _mint(_to, _amount);
   }
 
-  /// @notice Burns tokens from an address.
+  /// @notice Burns tokens and claims accrued fees from an address.
   /// @param _from The address to burn tokens from.
   /// @param _amount The amount of tokens to burn.
   function burn(address _from, uint256 _amount) external {
     _requireHook();
+    _claim(_from);
     _burn(_from, _amount);
   }
 

@@ -255,8 +255,6 @@ contract FixedFeeSwapHook is BaseHook {
   }
 
   /// @notice Claims fees and burns leftover yield tokens after maturity.
-  /// @return _claimedToken0 Amount of token0 fees claimed.
-  /// @return _claimedToken1 Amount of token1 fees claimed.
   /// @dev
   ///  - Can only be called after maturity.
   ///  - Claims any fees accrued on the YT tokens before maturity.
@@ -272,7 +270,7 @@ contract FixedFeeSwapHook is BaseHook {
 
     if (_amount == 0) revert FixedFeeSwapHook_InvalidAmount();
 
-    (_claimedToken0, _claimedToken1) = _claimAndBurnYieldTokens(msg.sender, _amount);
+    _claimAndBurnYieldTokens(msg.sender, _amount);
   }
 
   /*//////////////////////////////////////////////////////////////
@@ -282,22 +280,12 @@ contract FixedFeeSwapHook is BaseHook {
   /// @notice Claims fees and burns YT tokens
   /// @param _user The address to claim fees from and burn YT tokens for.
   /// @param _amount The amount of YT tokens to claim fees from and burn.
-  /// @return _claimedToken0 Amount of token0 fees claimed.
-  /// @return _claimedToken1 Amount of token1 fees claimed.
-  /// @dev
-  ///  - Claims fees from the YT tokens.
-  ///  - Burns the YT tokens after claiming fees.
-  function _claimAndBurnYieldTokens(address _user, uint256 _amount)
-    internal
-    returns (uint256 _claimedToken0, uint256 _claimedToken1)
-  {
+  /// @dev Burns the YT tokens, which internally claims fees before burning.
+  function _claimAndBurnYieldTokens(address _user, uint256 _amount) internal {
     // Caller should have enough YT tokens
     if (YIELD_TOKEN.balanceOf(_user) < _amount) revert FixedFeeSwapHook_InsufficientBalance();
 
-    // Claim fees from YT
-    (_claimedToken0, _claimedToken1) = YIELD_TOKEN.claim(_user);
-
-    // Burn YT tokens
+    // Burn YT tokens (which internally claims fees before burning)
     YIELD_TOKEN.burn(_user, _amount);
   }
 
