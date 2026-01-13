@@ -260,10 +260,7 @@ contract FixedFeeSwapHook is BaseHook {
   ///  - Claims any fees accrued on the YT tokens before maturity.
   ///  - Burns the YT tokens after claiming fees.
   ///  - Useful for users who have leftover YT tokens after maturity.
-  function claimYTFeesAfterMaturity()
-    external
-    returns (uint256 _claimedToken0, uint256 _claimedToken1)
-  {
+  function claimYTFeesAfterMaturity() external {
     if (block.timestamp < MATURITY) revert FixedFeeSwapHook_BeforeMaturity();
 
     uint256 _amount = YIELD_TOKEN.balanceOf(msg.sender);
@@ -300,41 +297,30 @@ contract FixedFeeSwapHook is BaseHook {
     uint256 _totalSupply = PRINCIPAL_TOKEN.totalSupply();
 
     if (_totalSupply == 0) revert FixedFeeSwapHook_InsufficientBalance();
-    
+
     // Get contract balances for both fee tokens
     address _feeToken0 = VAULT_SHARE_TOKEN.FEE_TOKEN0();
     address _feeToken1 = VAULT_SHARE_TOKEN.FEE_TOKEN1();
-    
-    // Calculate post-maturity fees claimable for the redeemed amount proportionally
-    uint256 _feeToken0Amount = Math.mulDiv(_getTokenBalance(_feeToken0), _amount, _totalSupply, Math.Rounding.Floor);
-    uint256 _feeToken1Amount = Math.mulDiv(_getTokenBalance(_feeToken1), _amount, _totalSupply, Math.Rounding.Floor);
-    
-    // Transfer post-maturity fees to the user
-    if (_feeToken0Amount > 0) {
-      _transferFeeToken(_feeToken0, _user, _feeToken0Amount);
-    }
-    if (_feeToken1Amount > 0) {
-      _transferFeeToken(_feeToken1, _user, _feeToken1Amount);
-    }
 
-    emit FeesClaimed(
-      _user,
-      _feeToken0,
-      _feeToken1,
-      _feeToken0Amount,
-      _feeToken1Amount
-    );
+    // Calculate post-maturity fees claimable for the redeemed amount proportionally
+    uint256 _feeToken0Amount =
+      Math.mulDiv(_getTokenBalance(_feeToken0), _amount, _totalSupply, Math.Rounding.Floor);
+    uint256 _feeToken1Amount =
+      Math.mulDiv(_getTokenBalance(_feeToken1), _amount, _totalSupply, Math.Rounding.Floor);
+
+    // Transfer post-maturity fees to the user
+    if (_feeToken0Amount > 0) _transferFeeToken(_feeToken0, _user, _feeToken0Amount);
+    if (_feeToken1Amount > 0) _transferFeeToken(_feeToken1, _user, _feeToken1Amount);
+
+    emit FeesClaimed(_user, _feeToken0, _feeToken1, _feeToken0Amount, _feeToken1Amount);
   }
 
   /// @notice Gets the balance of a token in the contract.
   /// @param _token The address of the token to get the balance of.
   /// @return The balance of the token in the contract.
   function _getTokenBalance(address _token) internal view returns (uint256) {
-    if (_token == address(0)) {
-      return address(this).balance;
-    } else {
-      return IERC20(_token).balanceOf(address(this));
-    }
+    if (_token == address(0)) return address(this).balance;
+    else return IERC20(_token).balanceOf(address(this));
   }
 
   /// @notice Transfers an amount of fee tokens to a user.

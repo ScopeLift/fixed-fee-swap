@@ -6,6 +6,7 @@ import {Test, Vm} from "forge-std/Test.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 // Internal imports
@@ -52,18 +53,17 @@ contract FixedFeeSwapHookTest is Test {
     vm.assume(_addr != address(0));
   }
 
-  /// @notice Assumes the address is a safe EOA (Externally Owned Account).
+  /// @notice Assumes the address is safe for native ETH transfers.
   /// @param _address The address to check.
-  /// @dev Excludes contract addresses, precompile addresses, and known problematic addresses (like
-  /// console), which is necessary for native ETH transfers.
-  function _assumeSafeEOA(address _address) internal view {
+  /// @dev Excludes precompile addresses and known problematic addresses (like console).
+  ///      Allows both EOAs and contracts (contracts that can receive ETH will succeed,
+  ///      contracts that can't will fail, which is tested separately).
+  function _assumeSafeAddressForEth(address _address) internal pure {
     vm.assume(_address != address(0));
     // Exclude the console address (used by forge-std for logging, cannot receive ETH)
     vm.assume(_address != address(0x000000000000000000636F6e736F6c652e6c6f67));
     // Exclude precompile addresses (0x01-0x0F) which cannot receive ETH
     vm.assume(_address > address(0x0F));
-    // Exclude contract addresses (for native ETH transfers)
-    vm.assume(_address.code.length == 0);
   }
 
   function _boundToRealisticAmount(uint256 _amount) internal pure returns (uint256) {
@@ -85,59 +85,46 @@ contract FixedFeeSwapHookTest is Test {
     fixedFeeSwapHook.deposit(_depositAmount);
   }
 
-  /// @notice Helper function to set up fees on YT before maturity.
+  /// @notice Helper function to set up fees on YT.
   /// @param _feeToken0 Amount of token0 fees to add.
   /// @param _feeToken1 Amount of token1 fees to add.
-  function _setupFeesBeforeMaturity(uint256 _feeToken0, uint256 _feeToken1) internal {
-    // Update fees on YT before maturity (routes to YT via _updateFees)
-    fixedFeeSwapHook.exposed_updateFees(_feeToken0, _feeToken1);
+  function _updateYieldTokenFees(uint256 _feeToken0, uint256 _feeToken1) internal {
+    // Update fees on YT
+    YieldToken _yt = fixedFeeSwapHook.YIELD_TOKEN();
+    vm.prank(address(fixedFeeSwapHook));
+    _yt.updateFees(_feeToken0, _feeToken1);
 
     // Fund the YieldToken contract with fee tokens so it can pay out claims
-    // Use a large amount to ensure we have enough for any user's claim
-    YieldToken _yt = fixedFeeSwapHook.YIELD_TOKEN();
-    deal(address(token0), address(_yt), type(uint128).max);
-    deal(address(token1), address(_yt), type(uint128).max);
+    // Deal the actual fee amounts being added (or add to existing balance if fees were updated
+    // multiple times)
+    uint256 _currentBalance0 = token0.balanceOf(address(_yt));
+    uint256 _currentBalance1 = token1.balanceOf(address(_yt));
+    deal(address(token0), address(_yt), _currentBalance0 + _feeToken0);
+    deal(address(token1), address(_yt), _currentBalance1 + _feeToken1);
   }
 
-  /// @notice Helper function to approve PT and YT tokens for redeem.
+  /// @notice Helper function to approve PT token for redeem.
   /// @param _user The address to approve for.
   /// @param _amount The amount to approve.
-  function _approvePTAndYTForRedeem(address _user, uint256 _amount) internal {
+  function _approvePTForRedeem(address _user, uint256 _amount) internal {
     vm.prank(_user);
     fixedFeeSwapHook.PRINCIPAL_TOKEN().approve(address(fixedFeeSwapHook), _amount);
+  }
+
+  /// @notice Helper function to approve YT token for redeem.
+  /// @param _user The address to approve for.
+  /// @param _amount The amount to approve.
+  function _approveYTForRedeem(address _user, uint256 _amount) internal {
     vm.prank(_user);
     fixedFeeSwapHook.YIELD_TOKEN().approve(address(fixedFeeSwapHook), _amount);
   }
 
-  /// @notice Helper function to set up post-maturity fees.
-  /// @param _feeToken0 Amount of token0 fees to add.
-  /// @param _feeToken1 Amount of token1 fees to add.
-  /// @dev Must be called after maturity. Funds the hook contract with fee tokens.
-  function _setupFeesAfterMaturity(uint256 _feeToken0, uint256 _feeToken1) internal {
-    // Update fees on hook after maturity (must be called by the hook)
-    fixedFeeSwapHook.exposed_updateFees(_feeToken0, _feeToken1);
-
-    // Fund the hook contract with fee tokens so it can pay out claims
-    // Use a large amount to ensure we have enough for any user's claim
-    deal(address(token0), address(fixedFeeSwapHook), type(uint128).max);
-    deal(address(token1), address(fixedFeeSwapHook), type(uint128).max);
-  }
-
-  /// @notice Helper function to calculate expected post-maturity fees.
-  /// @param _hook The hook contract.
-  /// @param _redeemAmount The amount being redeemed.
-  /// @return _fee0 Expected fee0 amount.
-  /// @return _fee1 Expected fee1 amount.
-  function _calculatePostMaturityFees(FixedFeeSwapHookHarness _hook, uint256 _redeemAmount)
-    internal
-    view
-    returns (uint256 _fee0, uint256 _fee1)
-  {
-    _fee0 = Math.mulDiv(
-      _hook.postMaturityFeeIndex0Scaled(), _redeemAmount, 1e18, Math.Rounding.Floor
-    );
-    _fee1 =
-      Math.mulDiv(_hook.postMaturityFeeIndex1Scaled(), _redeemAmount, 1e18, Math.Rounding.Floor);
+  /// @notice Helper function to approve both PT and YT tokens for redeem.
+  /// @param _user The address to approve for.
+  /// @param _amount The amount to approve.
+  function _approvePTAndYTForRedeem(address _user, uint256 _amount) internal {
+    _approvePTForRedeem(_user, _amount);
+    _approveYTForRedeem(_user, _amount);
   }
 }
 
@@ -255,12 +242,11 @@ contract GetHookPermissions is FixedFeeSwapHookTest {
     assertFalse(_permissions.beforeRemoveLiquidity);
     assertFalse(_permissions.afterRemoveLiquidity);
     assertFalse(_permissions.beforeSwap);
+    assertFalse(_permissions.afterSwap);
     assertFalse(_permissions.beforeDonate);
+    assertFalse(_permissions.afterDonate);
     assertFalse(_permissions.beforeSwapReturnDelta);
     assertFalse(_permissions.afterSwapReturnDelta);
-
-    assertTrue(_permissions.afterSwap);
-    assertTrue(_permissions.afterDonate);
   }
 }
 
@@ -376,7 +362,7 @@ contract ClaimYTFeesAfterMaturity is FixedFeeSwapHookTest {
     _depositVstForUser(user, _depositAmount);
 
     // Set up fees before maturity
-    _setupFeesBeforeMaturity(_feeToken0, _feeToken1);
+    _updateYieldTokenFees(_feeToken0, _feeToken1);
 
     // Sync user fees by doing a 0-value transfer (this updates their accrued fees)
     vm.prank(user);
@@ -396,15 +382,13 @@ contract ClaimYTFeesAfterMaturity is FixedFeeSwapHookTest {
 
     // Claim and burn
     vm.prank(user);
-    (uint256 _claimedToken0, uint256 _claimedToken1) = fixedFeeSwapHook.claimYTFeesAfterMaturity();
+    fixedFeeSwapHook.claimYTFeesAfterMaturity();
 
     // Check tokens are burnt
     assertEq(fixedFeeSwapHook.YIELD_TOKEN().balanceOf(user), 0);
     assertEq(fixedFeeSwapHook.YIELD_TOKEN().totalSupply(), _initialYtSupply - _ytBalance);
 
     // Check fees are claimed (should match accrued fees)
-    assertEq(_claimedToken0, _accruedToken0);
-    assertEq(_claimedToken1, _accruedToken1);
     assertEq(token0.balanceOf(user), _initialUserToken0Balance + _accruedToken0);
     assertEq(token1.balanceOf(user), _initialUserToken1Balance + _accruedToken1);
   }
@@ -419,7 +403,7 @@ contract ClaimYTFeesAfterMaturity is FixedFeeSwapHookTest {
 
     // User has no YT tokens (they were already burned or never had any)
     vm.prank(_newUser);
-    vm.expectRevert(FixedFeeSwapHookBase.FixedFeeSwapHook_InsufficientBalance.selector);
+    vm.expectRevert(FixedFeeSwapHookBase.FixedFeeSwapHook_InvalidAmount.selector);
     fixedFeeSwapHook.claimYTFeesAfterMaturity();
   }
 
@@ -453,7 +437,7 @@ contract ClaimYTFeesAfterMaturity is FixedFeeSwapHookTest {
     _depositVstForUser(user, _depositAmount);
 
     // Set up fees before maturity
-    _setupFeesBeforeMaturity(_feeToken0, _feeToken1);
+    _updateYieldTokenFees(_feeToken0, _feeToken1);
 
     // Sync user fees
     vm.prank(user);
@@ -468,18 +452,20 @@ contract ClaimYTFeesAfterMaturity is FixedFeeSwapHookTest {
 
     uint256 _ytBalance = fixedFeeSwapHook.YIELD_TOKEN().balanceOf(user);
     uint256 _initialYtSupply = fixedFeeSwapHook.YIELD_TOKEN().totalSupply();
+    uint256 _initialUserToken0Balance = token0.balanceOf(user);
+    uint256 _initialUserToken1Balance = token1.balanceOf(user);
 
     // Should succeed at exactly maturity
     vm.prank(user);
-    (uint256 _claimedToken0, uint256 _claimedToken1) = fixedFeeSwapHook.claimYTFeesAfterMaturity();
+    fixedFeeSwapHook.claimYTFeesAfterMaturity();
 
     // Check tokens are burnt
     assertEq(fixedFeeSwapHook.YIELD_TOKEN().balanceOf(user), 0);
     assertEq(fixedFeeSwapHook.YIELD_TOKEN().totalSupply(), _initialYtSupply - _ytBalance);
 
-    // Fees should be claimed (may be 0 due to rounding with very small fees)
-    assertEq(_claimedToken0, _accruedToken0);
-    assertEq(_claimedToken1, _accruedToken1);
+    // Check fees are claimed (should match accrued fees)
+    assertEq(token0.balanceOf(user), _initialUserToken0Balance + _accruedToken0);
+    assertEq(token1.balanceOf(user), _initialUserToken1Balance + _accruedToken1);
   }
 }
 
@@ -504,7 +490,7 @@ contract Redeem is FixedFeeSwapHookTest {
     _redeemAmount = bound(_redeemAmount, 1, _userBalance);
 
     // Set up fees before maturity
-    _setupFeesBeforeMaturity(_feeToken0, _feeToken1);
+    _updateYieldTokenFees(_feeToken0, _feeToken1);
 
     // Sync user fees by doing a 0-value transfer (this updates their accrued fees)
     vm.prank(user);
@@ -559,8 +545,8 @@ contract Redeem is FixedFeeSwapHookTest {
     _feeToken0 = _boundToRealisticAmount(_feeToken0);
     _feeToken1 = _boundToRealisticAmount(_feeToken1);
 
-    // Assume user is a safe EOA (needed for native ETH transfers)
-    _assumeSafeEOA(user);
+    // Assume user is a safe address (allows both EOAs and contracts that can receive ETH)
+    _assumeSafeAddressForEth(user);
 
     // Create a VaultShareToken with native ETH (address(0)) as token0 and ERC20 as token1
     VaultShareToken _vstWithEth =
@@ -584,12 +570,9 @@ contract Redeem is FixedFeeSwapHookTest {
     // Move past maturity
     vm.warp(maturity + 1);
 
-    // Set up post-maturity fees (ETH and ERC20)
-    _hookWithEth.exposed_updateFees(_feeToken0, _feeToken1);
-
-    // Fund the hook contract with ETH and ERC20 tokens
-    vm.deal(address(_hookWithEth), type(uint128).max);
-    deal(address(token1), address(_hookWithEth), type(uint128).max);
+    // Fund the hook contract with ETH and ERC20 tokens for post-maturity fees
+    vm.deal(address(_hookWithEth), _feeToken0);
+    deal(address(token1), address(_hookWithEth), _feeToken1);
 
     // Get initial balances
     uint256 _initialUserVstBalance = _vstWithEth.balanceOf(user);
@@ -617,14 +600,14 @@ contract Redeem is FixedFeeSwapHookTest {
     assertEq(_hookWithEth.YIELD_TOKEN().totalSupply(), _initialYtSupply);
 
     // Check post-maturity fees are claimed (native ETH and ERC20)
-    uint256 _expectedFeeEth = Math.mulDiv(
-      _hookWithEth.postMaturityFeeIndex0Scaled(), _redeemAmount, 1e18, Math.Rounding.Floor
-    );
-    assertEq(user.balance, _initialUserEthBalance + _expectedFeeEth);
+    // Calculate expected fees based on contract balances and PT supply
+    uint256 _totalSupply = _initialPtSupply;
+    uint256 _expectedFeeEth =
+      Math.mulDiv(_feeToken0, _redeemAmount, _totalSupply, Math.Rounding.Floor);
+    uint256 _expectedFee1 =
+      Math.mulDiv(_feeToken1, _redeemAmount, _totalSupply, Math.Rounding.Floor);
 
-    uint256 _expectedFee1 = Math.mulDiv(
-      _hookWithEth.postMaturityFeeIndex1Scaled(), _redeemAmount, 1e18, Math.Rounding.Floor
-    );
+    assertEq(user.balance, _initialUserEthBalance + _expectedFeeEth);
     assertEq(token1.balanceOf(user), _initialUserToken1Balance + _expectedFee1);
   }
 
@@ -638,8 +621,8 @@ contract Redeem is FixedFeeSwapHookTest {
     _feeToken0 = _boundToRealisticAmount(_feeToken0);
     _feeToken1 = _boundToRealisticAmount(_feeToken1);
 
-    // Assume user is a safe EOA (needed for native ETH transfers)
-    _assumeSafeEOA(user);
+    // Assume user is a safe address (allows both EOAs and contracts that can receive ETH)
+    _assumeSafeAddressForEth(user);
 
     // Create a VaultShareToken with native ETH (address(0)) as token0 and ERC20 as token1
     VaultShareToken _vstWithEth =
@@ -663,20 +646,17 @@ contract Redeem is FixedFeeSwapHookTest {
     // Move past maturity
     vm.warp(maturity + 1);
 
-    // Set up post-maturity fees (ETH and ERC20)
-    _hookWithEth.exposed_updateFees(_feeToken0, _feeToken1);
+    // Fund the hook contract with ETH and ERC20 tokens for post-maturity fees
+    // Post-maturity fees are now calculated based on contract balances
+    vm.deal(address(_hookWithEth), _feeToken0);
+    deal(address(token1), address(_hookWithEth), _feeToken1);
 
-    // Fund the hook contract with ETH and ERC20 tokens
-    vm.deal(address(_hookWithEth), type(uint128).max);
-    deal(address(token1), address(_hookWithEth), type(uint128).max);
-
-    // Calculate expected fees (using same rounding as contract)
-    uint256 _expectedFeeEth = Math.mulDiv(
-      _hookWithEth.postMaturityFeeIndex0Scaled(), _redeemAmount, 1e18, Math.Rounding.Floor
-    );
-    uint256 _expectedFee1 = Math.mulDiv(
-      _hookWithEth.postMaturityFeeIndex1Scaled(), _redeemAmount, 1e18, Math.Rounding.Floor
-    );
+    // Calculate expected fees based on contract balances and PT supply
+    uint256 _totalSupply = _hookWithEth.PRINCIPAL_TOKEN().totalSupply();
+    uint256 _expectedFee0 =
+      Math.mulDiv(_feeToken0, _redeemAmount, _totalSupply, Math.Rounding.Floor);
+    uint256 _expectedFee1 =
+      Math.mulDiv(_feeToken1, _redeemAmount, _totalSupply, Math.Rounding.Floor);
 
     // Approve PT tokens
     vm.prank(user);
@@ -685,7 +665,7 @@ contract Redeem is FixedFeeSwapHookTest {
     // Expect FeesClaimed event (with native ETH address(0) and ERC20 token1)
     vm.expectEmit();
     emit FixedFeeSwapHookBase.FeesClaimed(
-      user, address(0), address(token1), _expectedFeeEth, _expectedFee1
+      user, address(0), address(token1), _expectedFee0, _expectedFee1
     );
 
     // Redeem
@@ -832,16 +812,12 @@ contract Redeem is FixedFeeSwapHookTest {
     // Move past maturity
     vm.warp(maturity + 1);
 
-    // Set up post-maturity fees (use large fee to ensure non-zero claimable amount)
-    _hookWithEth.exposed_updateFees(_feeEth, 0);
+    // Fund the hook contract with ETH for post-maturity fees
+    vm.deal(address(_hookWithEth), _feeEth);
 
-    // Fund the hook contract with ETH
-    vm.deal(address(_hookWithEth), type(uint128).max);
-
-    // Calculate expected ETH fee to ensure it's non-zero
-    uint256 _expectedFeeEth = Math.mulDiv(
-      _hookWithEth.postMaturityFeeIndex0Scaled(), _redeemAmount, 1e18, Math.Rounding.Floor
-    );
+    // Calculate expected ETH fee based on contract balance and PT supply
+    uint256 _totalSupply = _hookWithEth.PRINCIPAL_TOKEN().totalSupply();
+    uint256 _expectedFeeEth = Math.mulDiv(_feeEth, _redeemAmount, _totalSupply, Math.Rounding.Floor);
 
     // Only test if we have non-zero fees to claim
     vm.assume(_expectedFeeEth > 0);

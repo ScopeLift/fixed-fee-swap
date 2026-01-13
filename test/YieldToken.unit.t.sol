@@ -194,6 +194,13 @@ contract Burn is YieldTokenTest {
 
   // ========== _updateUserFees tests via burn ==========
 
+  struct BurnTestParams {
+    address user;
+    uint256 mintAmount;
+    uint256 collectedFeeToken0;
+    uint256 collectedFeeToken1;
+  }
+
   function testFuzz_BurnUpdatesUserFeesBeforeBurning(
     address _user,
     uint256 _mintAmount,
@@ -205,44 +212,69 @@ contract Burn is YieldTokenTest {
     _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
     _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
 
+    BurnTestParams memory _params = BurnTestParams({
+      user: _user,
+      mintAmount: _mintAmount,
+      collectedFeeToken0: _collectedFeeToken0,
+      collectedFeeToken1: _collectedFeeToken1
+    });
+
+    // Mint and send fees for token0 and token1 into the yield token contract
+    token0.mint(address(yieldToken), _params.collectedFeeToken0);
+    token1.mint(address(yieldToken), _params.collectedFeeToken1);
+
     // Mint shares for user via the hook
     vm.prank(hook);
-    yieldToken.mint(_user, _mintAmount);
+    yieldToken.mint(_params.user, _params.mintAmount);
 
     // Collect fees to change global indices via the hook
     vm.prank(hook);
-    yieldToken.updateFees(_collectedFeeToken0, _collectedFeeToken1);
+    yieldToken.updateFees(_params.collectedFeeToken0, _params.collectedFeeToken1);
 
     // Get the global fee indices
     uint256 _globalFeeIndex0 = yieldToken.globalFeeIndex0Scaled();
     uint256 _globalFeeIndex1 = yieldToken.globalFeeIndex1Scaled();
 
-    // User's index before burn is 0 (default for new user)
-    uint256 _userFeeIndex0Before = 0;
-    uint256 _userFeeIndex1Before = 0;
+    // Get initial user token balances
+    uint256 _initialUserToken0Balance = token0.balanceOf(_params.user);
+    uint256 _initialUserToken1Balance = token1.balanceOf(_params.user);
 
-    // Burn tokens - this should trigger _updateUserFees before burning
+    // Burn tokens - this should trigger _updateUserFees and _claim before burning
     vm.prank(hook);
-    yieldToken.burn(_user, _mintAmount);
+    yieldToken.burn(_params.user, _params.mintAmount);
 
-    // Destructure the tuple after the burn
+    // Check that the user's fees were updated before burning
     (
       uint256 _userFeeIndex0,
       uint256 _userFeeIndex1,
       uint256 _userAccruedToken0,
       uint256 _userAccruedToken1
-    ) = yieldToken.userFees(_user);
+    ) = yieldToken.userFees(_params.user);
 
-    // Check that the user's fees were updated before burning
-    // User should have accrued fees for the period they held shares
+    // User should have synced to global indices
     assertEq(_userFeeIndex0, _globalFeeIndex0);
     assertEq(_userFeeIndex1, _globalFeeIndex1);
-    assertEq(
-      _userAccruedToken0, _calculateAccruedFees(_mintAmount, _globalFeeIndex0, _userFeeIndex0Before)
-    );
-    assertEq(
-      _userAccruedToken1, _calculateAccruedFees(_mintAmount, _globalFeeIndex1, _userFeeIndex1Before)
-    );
+    // Accrued fees should be reset to 0 since they were claimed during burn
+    assertEq(_userAccruedToken0, 0);
+    assertEq(_userAccruedToken1, 0);
+
+    // Check that fees were transferred to the user
+    // Note: If user is the YieldToken contract itself, transfer to self doesn't change balance
+    if (_params.user == address(yieldToken)) {
+      // When transferring to itself, balance should remain at initial (which includes the fees)
+      assertEq(token0.balanceOf(_params.user), _initialUserToken0Balance);
+      assertEq(token1.balanceOf(_params.user), _initialUserToken1Balance);
+    } else {
+      // Normal case: user receives fees (calculate expected fees inline)
+      assertEq(
+        token0.balanceOf(_params.user),
+        _initialUserToken0Balance + _calculateAccruedFees(_params.mintAmount, _globalFeeIndex0, 0)
+      );
+      assertEq(
+        token1.balanceOf(_params.user),
+        _initialUserToken1Balance + _calculateAccruedFees(_params.mintAmount, _globalFeeIndex1, 0)
+      );
+    }
   }
 }
 
