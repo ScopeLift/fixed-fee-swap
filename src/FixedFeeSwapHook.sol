@@ -303,10 +303,21 @@ contract FixedFeeSwapHook is BaseHook {
     address _feeToken1 = VAULT_SHARE_TOKEN.FEE_TOKEN1();
 
     // Calculate post-maturity fees claimable for the redeemed amount proportionally
-    uint256 _feeToken0Amount =
-      Math.mulDiv(_getTokenBalance(_feeToken0), _amount, _totalSupply, Math.Rounding.Floor);
-    uint256 _feeToken1Amount =
-      Math.mulDiv(_getTokenBalance(_feeToken1), _amount, _totalSupply, Math.Rounding.Floor);
+    // Scale by PRECISION to avoid rounding errors in intermediate calculations
+    // Pattern: (balance * amount * PRECISION) / totalSupply, then divide by PRECISION
+    // This preserves precision better than (balance * amount) / totalSupply for small values
+    uint256 _feeToken0Amount = Math.mulDiv(
+      _getTokenBalance(_feeToken0),
+      _amount * FeeTracking.PRECISION,
+      _totalSupply,
+      Math.Rounding.Floor
+    ) / FeeTracking.PRECISION;
+    uint256 _feeToken1Amount = Math.mulDiv(
+      _getTokenBalance(_feeToken1),
+      _amount * FeeTracking.PRECISION,
+      _totalSupply,
+      Math.Rounding.Floor
+    ) / FeeTracking.PRECISION;
 
     // Transfer post-maturity fees to the user
     if (_feeToken0Amount > 0) _transferFeeToken(_feeToken0, _user, _feeToken0Amount);
