@@ -116,18 +116,17 @@ contract Zapper is IERC3156FlashBorrower {
   /// @param _token0Amount The amount of token0 to supply.
   /// @param _token1Amount The amount of token1 to supply.
   // function buyYieldToken(uint256 _token0Amount, uint256 _token1Amount) external {
-    // 1. User deposits token0 and token1 to mint vaults shares
-    // (uint256 _vstMinted, uint256 _amount0Used, uint256 _amount1Used) = LPVault(address(VAULT_SHARE_TOKEN)).deposit(_token0Amount, _token1Amount);
-    
-    // 2. Should flash loan PT based on PT debt X 1/1−(price of vault share token per 1PT)​
+  // 1. User deposits token0 and token1 to mint vaults shares
+  // (uint256 _vstMinted, uint256 _amount0Used, uint256 _amount1Used) = LPVault(address(VAULT_SHARE_TOKEN)).deposit(_token0Amount, _token1Amount);
 
+  // 2. Should flash loan PT based on PT debt X 1/1−(price of vault share token per 1PT)​
 
-    // 3. Swap flash loaned PT for vault shares, mock this swap for now
-    // 4. Split all vault shares
-    // 5. Pay back PT flash loan
-    // 6. Send all YT to the user
+  // 3. Swap flash loaned PT for vault shares, mock this swap for now
+  // 4. Split all vault shares
+  // 5. Pay back PT flash loan
+  // 6. Send all YT to the user
 
-    // emit YieldTokenBought(msg.sender, _token0Amount, _token1Amount, _ytBought);
+  // emit YieldTokenBought(msg.sender, _token0Amount, _token1Amount, _ytBought);
   // }
 
   /// @notice Flash loan callback implementation.
@@ -139,9 +138,12 @@ contract Zapper is IERC3156FlashBorrower {
     address _initiator,
     address _token,
     uint256 _amount,
-    uint256 , // _fee
+    uint256, // _fee
     bytes calldata // _data
-  ) external returns (bytes32) {
+  )
+    external
+    returns (bytes32)
+  {
     // Verify this contract initiated the flash loan
     if (_initiator != address(this)) revert Zapper_InvalidInitiator();
 
@@ -177,9 +179,13 @@ contract Zapper is IERC3156FlashBorrower {
   /// @return _swappedPT The amount of PT obtained from swapping VST.
   /// @dev Mock implementation: uses deposit() to split VST into PT+YT (1:1 ratio).
   ///      In production, this would use an AMM curve to swap VST for PT.
-  function _calculateAndSwapVSTForPT(uint256 _availableVST, uint256 _neededPt) internal returns (uint256 _swappedPT) {
+  function _calculateAndSwapVSTForPT(uint256 _availableVST, uint256 _neededPt)
+    internal
+    returns (uint256 _swappedPT)
+  {
     // Calculate how many VST we need to swap for PT to repay flash loan
-    // TODO: this will be replaced by the actual AMM curve. For now, use minimum of available and needed.
+    // TODO: this will be replaced by the actual AMM curve. For now, use minimum of available and
+    // needed.
     uint256 _vstToSwap = _availableVST > _neededPt ? _neededPt : _availableVST;
 
     // Approve hook to spend VST
