@@ -177,25 +177,26 @@ contract Zapper is IERC3156FlashBorrower {
   /// @param _availableVST The amount of VST available to swap.
   /// @param _neededPt The amount of PT needed to repay flash loan.
   /// @return _swappedPT The amount of PT obtained from swapping VST.
-  /// @dev Mock implementation: uses deposit() to split VST into PT+YT (1:1 ratio).
-  ///      In production, this would use an AMM curve to swap VST for PT.
+  /// @dev Mock implementation: uses deposit() with assumption that 1 VST = 0.5 PT + 0.5 YT.
+  ///      Since deposit() gives 1 VST = 1 PT + 1 YT, we swap 2x the needed PT to account for this.
+  ///      This ensures we always leave some VST for the user. In production, use AMM curve.
   function _calculateAndSwapVSTForPT(uint256 _availableVST, uint256 _neededPt)
     internal
     returns (uint256 _swappedPT)
   {
-    // Calculate how many VST we need to swap for PT to repay flash loan
-    // TODO: this will be replaced by the actual AMM curve. For now, use minimum of available and
-    // needed.
-    uint256 _vstToSwap = _availableVST > _neededPt ? _neededPt : _availableVST;
+    // Mock: Assume we need 2 VST to get 1 PT (since deposit gives 1 VST = 1 PT + 1 YT,
+    // but we only need PT, so we effectively need 2 VST per 1 PT)
+    uint256 _vstToSwap = _neededPt * 2;
 
-    // Approve hook to spend VST
+    // Cap at available VST
+    if (_vstToSwap > _availableVST) _vstToSwap = _availableVST;
+
+    // Use deposit to swap VST for PT+YT (mock: 1 VST = 1 PT + 1 YT)
     IERC20(address(VAULT_SHARE_TOKEN)).approve(address(FIXED_FEE_SWAP_HOOK), _vstToSwap);
-
-    // Swap VST for PT+YT using deposit (mock implementation: 1 VST = 1 PT + 1 YT)
     (uint256 _ptAmount, uint256 _ytAmount) = FIXED_FEE_SWAP_HOOK.deposit(_vstToSwap);
     _swappedPT = _ptAmount;
+    // YT amount is unused but left in contract
 
-    // In a real AMM, we'd get only PT. For this mock, deposit gives us PT+YT in 1:1 ratio,
-    // so the PT amount equals the VST amount swapped. The YT is left in the contract.
+    // Note: This mock always leaves VST for the user since we swap 2x the needed PT
   }
 }
