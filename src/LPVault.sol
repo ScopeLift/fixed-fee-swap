@@ -436,8 +436,8 @@ contract LPVault is VaultShareToken, IUnlockCallback {
         ""
       );
 
-      _totalDelta0 += _delta.amount0();
-      _totalDelta1 += _delta.amount1();
+      _totalDelta0 += _delta.amount0() - _feeDelta.amount0();
+      _totalDelta1 += _delta.amount1() - _feeDelta.amount1();
       _totalFeeDelta0 += _feeDelta.amount0();
       _totalFeeDelta1 += _feeDelta.amount1();
     }
@@ -528,8 +528,10 @@ contract LPVault is VaultShareToken, IUnlockCallback {
         ""
       );
 
-      _totalDelta0 += _delta.amount0();
-      _totalDelta1 += _delta.amount1();
+      // Note: `_delta` (callerDelta) includes both principal and fees. We subtract
+      // the fee portion so withdrawers only receive principal, not vault's accrued fees.
+      _totalDelta0 += _delta.amount0() - _feeDelta.amount0();
+      _totalDelta1 += _delta.amount1() - _feeDelta.amount1();
       _totalFeeDelta0 += _feeDelta.amount0();
       _totalFeeDelta1 += _feeDelta.amount1();
     }
