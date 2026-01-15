@@ -44,13 +44,6 @@ contract Zapper is IERC3156FlashBorrower {
   /// @param vaultSharesReceived The amount of vault shares received.
   event YieldTokenSold(address indexed user, uint256 ytAmount, uint256 vaultSharesReceived);
 
-  /// @notice Emitted when yield token is bought.
-  /// @param user The address that bought the yield token.
-  /// @param token0Amount The amount of token0 supplied.
-  /// @param token1Amount The amount of token1 supplied.
-  /// @param ytBought The amount of yield token bought.
-  // event YieldTokenBought(address indexed user, uint256 token0Amount, uint256 token1Amount, uint256 ytBought);
-
   /*//////////////////////////////////////////////////////////////
                         STATE VARIABLES
   //////////////////////////////////////////////////////////////*/
@@ -111,23 +104,6 @@ contract Zapper is IERC3156FlashBorrower {
 
     emit YieldTokenSold(msg.sender, _ytAmount, _vstReceived);
   }
-
-  /// @notice Buys YT by supplying token0 and token1
-  /// @param _token0Amount The amount of token0 to supply.
-  /// @param _token1Amount The amount of token1 to supply.
-  // function buyYieldToken(uint256 _token0Amount, uint256 _token1Amount) external {
-  // 1. User deposits token0 and token1 to mint vaults shares
-  // (uint256 _vstMinted, uint256 _amount0Used, uint256 _amount1Used) = LPVault(address(VAULT_SHARE_TOKEN)).deposit(_token0Amount, _token1Amount);
-
-  // 2. Should flash loan PT based on PT debt X 1/1−(price of vault share token per 1PT)​
-
-  // 3. Swap flash loaned PT for vault shares, mock this swap for now
-  // 4. Split all vault shares
-  // 5. Pay back PT flash loan
-  // 6. Send all YT to the user
-
-  // emit YieldTokenBought(msg.sender, _token0Amount, _token1Amount, _ytBought);
-  // }
 
   /// @notice Flash loan callback implementation.
   /// @param _initiator The address that initiated the flash loan.
