@@ -6,13 +6,21 @@ import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {PoolKey} from "v4-core/types/PoolKey.sol";
+import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
+import {SwapParams} from "v4-core/types/PoolOperation.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 // Internal imports
 import {PrincipalToken} from "src/PrincipalToken.sol";
 import {YieldToken} from "src/YieldToken.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
+import {FeeTracking} from "src/lib/FeeTracking.sol";
 
 contract FixedFeeSwapHook is BaseHook {
+  using SafeERC20 for IERC20;
   /*//////////////////////////////////////////////////////////////
                         ERRORS
   //////////////////////////////////////////////////////////////*/
@@ -34,6 +42,12 @@ contract FixedFeeSwapHook is BaseHook {
 
   /// @notice Thrown when action is attempted with an insufficient balance.
   error FixedFeeSwapHook_InsufficientBalance();
+
+  /// @notice Thrown when an action is attempted before maturity is reached.
+  error FixedFeeSwapHook_BeforeMaturity();
+
+  /// @notice Thrown when a transfer fails.
+  error FixedFeeSwapHook_TransferFailed();
 
   /*//////////////////////////////////////////////////////////////
                         EVENTS
@@ -59,6 +73,27 @@ contract FixedFeeSwapHook is BaseHook {
   /// @param ptAmount The amount of principal token minted to the user.
   /// @param ytAmount The amount of yield token minted to the user.
   event Deposit(address indexed user, uint256 vsAmount, uint256 ptAmount, uint256 ytAmount);
+
+  /// @notice Emitted when a user redeems their principal and yield tokens back into the vault share
+  /// token.
+  /// @param user The address of the user who redeemed.
+  /// @param vstAmount The amount of vault share token redeemed.
+  /// @param maturityReached Whether the maturity has been reached.
+  event Redeem(address indexed user, uint256 vstAmount, bool maturityReached);
+
+  /// @notice Emitted when a user claims fees after maturity.
+  /// @param user The address of the user who claimed fees.
+  /// @param token0 The address of the token0 to claim fees for.
+  /// @param token1 The address of the token1 to claim fees for.
+  /// @param token0Amount Amount of token0 fees claimed.
+  /// @param token1Amount Amount of token1 fees claimed.
+  event FeesClaimed(
+    address indexed user,
+    address indexed token0,
+    address indexed token1,
+    uint256 token0Amount,
+    uint256 token1Amount
+  );
 
   /*//////////////////////////////////////////////////////////////
                         STATE VARIABLES
@@ -174,5 +209,142 @@ contract FixedFeeSwapHook is BaseHook {
     YIELD_TOKEN.mint(msg.sender, _ytAmount);
 
     emit Deposit(msg.sender, _amount, _ptAmount, _ytAmount);
+  }
+
+  /// @notice Redeems the principal and yield tokens back into the vault share token.
+  /// @param _amount The amount of principal and yield tokens to redeem.
+  /// @return _vstAmount The amount of vault share token redeemed.
+  /// @dev
+  ///  - The caller must have approved the hook to spend the PT and YT tokens.
+  ///  - If called before maturity, the caller must have at least `_amount` PT and YT tokens.
+  ///  - If called at/after maturity, the caller must have at least `_amount` PT tokens.
+  ///  - Note:
+  ///    - Before maturity, the YT will be non-zero, so 1 PT + 1 YT = 1 VST.
+  ///    - After maturity, the caller will claim fees proportionally based on their PT ownership.
+  ///      Fees are calculated as: (contractBalance × amount) / totalSupply for each fee token.
+  function redeem(uint256 _amount) external returns (uint256 _vstAmount) {
+    if (_amount == 0) revert FixedFeeSwapHook_InvalidAmount();
+
+    // Caller should always have enough PT tokens
+    if (PRINCIPAL_TOKEN.balanceOf(msg.sender) < _amount) {
+      revert FixedFeeSwapHook_InsufficientBalance();
+    }
+
+    bool _maturityReached = block.timestamp >= MATURITY;
+
+    if (!_maturityReached) {
+      // -------- BEFORE MATURITY ( needs both PT and YT) --------
+      _claimAndBurnYieldTokens(msg.sender, _amount);
+    } else {
+      // -------- AFTER MATURITY --------
+      _claimFeesAccruedAfterMaturity(msg.sender, _amount);
+    }
+
+    // Burn PT tokens (always required)
+    PRINCIPAL_TOKEN.burn(msg.sender, _amount);
+
+    // Transfer VaultShareToken from the hook to the caller
+    _vstAmount = _amount;
+    if (VAULT_SHARE_TOKEN.balanceOf(address(this)) < _vstAmount) {
+      revert FixedFeeSwapHook_InsufficientBalance();
+    }
+
+    VAULT_SHARE_TOKEN.transfer(msg.sender, _vstAmount);
+
+    emit Redeem(msg.sender, _vstAmount, _maturityReached);
+  }
+
+  /// @notice Claims fees and burns leftover yield tokens after maturity.
+  /// @dev
+  ///  - Can only be called after maturity.
+  ///  - Claims any fees accrued on the YT tokens before maturity.
+  ///  - Burns the YT tokens after claiming fees.
+  ///  - Useful for users who have leftover YT tokens after maturity.
+  function claimYTFeesAfterMaturity() external {
+    if (block.timestamp < MATURITY) revert FixedFeeSwapHook_BeforeMaturity();
+
+    uint256 _amount = YIELD_TOKEN.balanceOf(msg.sender);
+
+    if (_amount == 0) revert FixedFeeSwapHook_InvalidAmount();
+
+    _claimAndBurnYieldTokens(msg.sender, _amount);
+  }
+
+  /*//////////////////////////////////////////////////////////////
+                        INTERNAL FUNCTIONS
+  //////////////////////////////////////////////////////////////*/
+
+  /// @notice Claims fees and burns YT tokens
+  /// @param _user The address to claim fees from and burn YT tokens for.
+  /// @param _amount The amount of YT tokens to claim fees from and burn.
+  /// @dev Burns the YT tokens, which internally claims fees before burning.
+  function _claimAndBurnYieldTokens(address _user, uint256 _amount) internal {
+    // Caller should have enough YT tokens
+    if (YIELD_TOKEN.balanceOf(_user) < _amount) revert FixedFeeSwapHook_InsufficientBalance();
+
+    // Burn YT tokens (which internally claims fees before burning)
+    YIELD_TOKEN.burn(_user, _amount);
+  }
+
+  /// @notice Claims post-maturity fees accrued for a user based on their PT amount.
+  /// @param _user The address to claim fees for.
+  /// @param _amount The amount of PT tokens being redeemed.
+  /// @dev
+  ///  - Calculates fees proportionally based on contract balances and total PT supply.
+  ///  - Formula: fees = (contractBalance * amount) / totalSupply
+  function _claimFeesAccruedAfterMaturity(address _user, uint256 _amount) internal {
+    // Get total PT supply to calculate proportional share
+    uint256 _totalSupply = PRINCIPAL_TOKEN.totalSupply();
+
+    if (_totalSupply == 0) revert FixedFeeSwapHook_InsufficientBalance();
+
+    // Get contract balances for both fee tokens
+    address _feeToken0 = VAULT_SHARE_TOKEN.FEE_TOKEN0();
+    address _feeToken1 = VAULT_SHARE_TOKEN.FEE_TOKEN1();
+
+    // Calculate post-maturity fees claimable for the redeemed amount proportionally
+    // Scale by PRECISION to avoid rounding errors in intermediate calculations
+    // Pattern: (balance * amount * PRECISION) / totalSupply, then divide by PRECISION
+    // This preserves precision better than (balance * amount) / totalSupply for small values
+    uint256 _feeToken0Amount = Math.mulDiv(
+      _getTokenBalance(_feeToken0),
+      _amount * FeeTracking.PRECISION,
+      _totalSupply,
+      Math.Rounding.Floor
+    ) / FeeTracking.PRECISION;
+    uint256 _feeToken1Amount = Math.mulDiv(
+      _getTokenBalance(_feeToken1),
+      _amount * FeeTracking.PRECISION,
+      _totalSupply,
+      Math.Rounding.Floor
+    ) / FeeTracking.PRECISION;
+
+    // Transfer post-maturity fees to the user
+    if (_feeToken0Amount > 0) _transferFeeToken(_feeToken0, _user, _feeToken0Amount);
+    if (_feeToken1Amount > 0) _transferFeeToken(_feeToken1, _user, _feeToken1Amount);
+
+    emit FeesClaimed(_user, _feeToken0, _feeToken1, _feeToken0Amount, _feeToken1Amount);
+  }
+
+  /// @notice Gets the balance of a token in the contract.
+  /// @param _token The address of the token to get the balance of.
+  /// @return The balance of the token in the contract.
+  function _getTokenBalance(address _token) internal view returns (uint256) {
+    if (_token == address(0)) return address(this).balance;
+    else return IERC20(_token).balanceOf(address(this));
+  }
+
+  /// @notice Transfers an amount of fee tokens to a user.
+  /// @param _token The address of the token to transfer.
+  /// @param _to The address to transfer the tokens to.
+  /// @param _amount The amount of tokens to transfer.
+  /// @dev Following Uniswap v4's convention: address(0) represents native ETH.
+  function _transferFeeToken(address _token, address _to, uint256 _amount) internal {
+    if (_token == address(0)) {
+      (bool _success,) = payable(_to).call{value: _amount}("");
+      if (!_success) revert FixedFeeSwapHook_TransferFailed();
+    } else {
+      IERC20(_token).safeTransfer(_to, _amount);
+    }
   }
 }

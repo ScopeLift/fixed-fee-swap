@@ -69,7 +69,7 @@ contract YieldToken is ERC20 {
   address public immutable FEE_TOKEN1;
 
   /// @notice Global fee tracking state.
-  FeeTracking.GlobalFees private _globalFees;
+  FeeTracking.GlobalFees private globalFees;
 
   /// @notice Tracks fee accounting data per user.
   mapping(address => FeeTracking.UserFees) public userFees;
@@ -105,13 +105,13 @@ contract YieldToken is ERC20 {
   ///   - Represents the total amount of token0 fees accrued per 1 share since vault inception.
   ///   - Used with `userFees[user].userFeeIndex0Scaled` to compute user-specific deltas.
   function globalFeeIndex0Scaled() external view returns (uint256) {
-    return _globalFees.globalFeeIndex0Scaled;
+    return globalFees.globalFeeIndex0Scaled;
   }
 
   /// @notice Global cumulative fee index for token1.
   /// @dev Same semantics as `globalFeeIndex0Scaled`, but for token1.
   function globalFeeIndex1Scaled() external view returns (uint256) {
-    return _globalFees.globalFeeIndex1Scaled;
+    return globalFees.globalFeeIndex1Scaled;
   }
 
   /// @notice Claims accrued (but not yet claimed) fees for a `_user`.
@@ -131,11 +131,12 @@ contract YieldToken is ERC20 {
     _mint(_to, _amount);
   }
 
-  /// @notice Burns tokens from an address.
+  /// @notice Burns tokens and claims accrued fees from an address.
   /// @param _from The address to burn tokens from.
   /// @param _amount The amount of tokens to burn.
   function burn(address _from, uint256 _amount) external {
     _requireHook();
+    _claim(_from);
     _burn(_from, _amount);
   }
 
@@ -174,12 +175,12 @@ contract YieldToken is ERC20 {
   /// last call).
   /// @dev Intended to be called only from the inheriting contract.
   function _updateFees(uint256 _collectedFeeToken0, uint256 _collectedFeeToken1) internal {
-    _globalFees._updateFees(_collectedFeeToken0, _collectedFeeToken1, totalSupply());
+    globalFees._updateFees(_collectedFeeToken0, _collectedFeeToken1, totalSupply());
 
     // Emit event after updating fees
     emit FeeIndexesUpdated(
-      _globalFees.globalFeeIndex0Scaled,
-      _globalFees.globalFeeIndex1Scaled,
+      globalFees.globalFeeIndex0Scaled,
+      globalFees.globalFeeIndex1Scaled,
       _collectedFeeToken0,
       _collectedFeeToken1
     );
@@ -190,7 +191,7 @@ contract YieldToken is ERC20 {
   /// @dev See `FeeTracking._updateUserFees` for details.
   function _updateUserFees(address _user) internal {
     userFees[_user]._updateUserFees(
-      balanceOf(_user), _globalFees.globalFeeIndex0Scaled, _globalFees.globalFeeIndex1Scaled
+      balanceOf(_user), globalFees.globalFeeIndex0Scaled, globalFees.globalFeeIndex1Scaled
     );
   }
 
