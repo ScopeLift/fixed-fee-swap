@@ -7,10 +7,12 @@ import {YieldToken} from "src/YieldToken.sol";
 import {LPVault} from "src/LPVault.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
 import {FixedFeeSwapHook} from "src/FixedFeeSwapHook.sol";
+import {FeeTracking} from "src/lib/FeeTracking.sol";
 // External Imports
 import {IERC3156FlashBorrower} from "@openzeppelin/contracts/interfaces/IERC3156FlashBorrower.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 contract Zapper is IERC3156FlashBorrower {
   using SafeERC20 for IERC20;
@@ -43,6 +45,12 @@ contract Zapper is IERC3156FlashBorrower {
   /// @param ytAmount The amount of yield token sold.
   /// @param vaultSharesReceived The amount of vault shares received.
   event YieldTokenSold(address indexed user, uint256 ytAmount, uint256 vaultSharesReceived);
+
+  /// @notice Emitted when yield token is bought.
+  /// @param user The address that bought the yield token.
+  /// @param ytBought The amount of yield token bought.
+  /// @param vstSupplied The amount of VST supplied.
+  event YieldTokenBought(address indexed user, uint256 ytBought, uint256 vstSupplied);
 
   /*//////////////////////////////////////////////////////////////
                         STATE VARIABLES
@@ -105,21 +113,47 @@ contract Zapper is IERC3156FlashBorrower {
     emit YieldTokenSold(msg.sender, _ytAmount, _vstReceived);
   }
 
+  /// @notice Buys YT by supplying VST.
+  /// @param _vstAmount The amount of VST to supply.
+  function buyYieldToken(uint256 _vstAmount) external {
+    if (_vstAmount == 0) revert Zapper_InvalidAmount();
+
+    // 1. User sends VST to zapper
+    VAULT_SHARE_TOKEN.transferFrom(msg.sender, address(this), _vstAmount);
+
+    // 2. Calculate PT debt: X = vstAmount / (1 - ptPrice)
+    uint256 _ptPrice = 0.98e18; // Mock: 0.98 VST per PT (18 decimals)
+    uint256 _ptDebt =
+      Math.mulDiv(_vstAmount, FeeTracking.PRECISION, FeeTracking.PRECISION - _ptPrice);
+
+    // 3. Flash loan PT
+    PRINCIPAL_TOKEN.flashLoan(
+      IERC3156FlashBorrower(address(this)),
+      address(PRINCIPAL_TOKEN),
+      _ptDebt,
+      abi.encode(true) // Flag to indicate this is a buy operation
+    );
+
+    // 4. After flash loan callback, send all YT to user
+    uint256 _ytBought = YIELD_TOKEN.balanceOf(address(this));
+    YIELD_TOKEN.transfer(msg.sender, _ytBought);
+
+    emit YieldTokenBought(msg.sender, _ytBought, _vstAmount);
+  }
+
   /// @notice Flash loan callback implementation.
   /// @param _initiator The address that initiated the flash loan.
   /// @param _token The token being flash loaned.
   /// @param _amount The amount of tokens flash loaned.
+  /// @param _data Encoded bool: true = buy, false/empty = sell.
   /// @return FLASH_LOAN_RETURN_VALUE The magic return value.
   function onFlashLoan(
     address _initiator,
     address _token,
     uint256 _amount,
     uint256, // _fee
-    bytes calldata // _data
-  )
-    external
-    returns (bytes32)
-  {
+    bytes calldata _data
+  ) external returns (bytes32) {
     // Verify this contract initiated the flash loan
     if (_initiator != address(this)) revert Zapper_InvalidInitiator();
 
@@ -129,6 +163,21 @@ contract Zapper is IERC3156FlashBorrower {
     // Verify the caller is the PT token contract
     if (msg.sender != address(PRINCIPAL_TOKEN)) revert Zapper_NotAuthorized();
 
+    bool _isBuy = _data.length > 0 && abi.decode(_data, (bool));
+
+    if (_isBuy) _handleBuyFlashLoan(_amount);
+    else _handleSellFlashLoan(_amount);
+
+    return FLASH_LOAN_RETURN_VALUE;
+  }
+
+  /*//////////////////////////////////////////////////////////////
+                        INTERNAL FUNCTIONS
+  //////////////////////////////////////////////////////////////*/
+
+  /// @notice Handles flash loan callback for selling YT.
+  /// @param _amount The amount of PT flash loaned.
+  function _handleSellFlashLoan(uint256 _amount) internal {
     // Approve hook to spend PT and YT
     IERC20(address(PRINCIPAL_TOKEN)).approve(address(FIXED_FEE_SWAP_HOOK), _amount);
     IERC20(address(YIELD_TOKEN)).approve(address(FIXED_FEE_SWAP_HOOK), _amount);
@@ -141,13 +190,27 @@ contract Zapper is IERC3156FlashBorrower {
 
     // Approve PT contract to spend PT to repay flash loan
     IERC20(address(PRINCIPAL_TOKEN)).approve(address(PRINCIPAL_TOKEN), _swappedPT);
-
-    return FLASH_LOAN_RETURN_VALUE;
   }
 
-  /*//////////////////////////////////////////////////////////////
-                        INTERNAL FUNCTIONS
-  //////////////////////////////////////////////////////////////*/
+  /// @notice Handles flash loan callback for buying YT.
+  /// @param _amount The amount of PT to repay (flash loan amount).
+  function _handleBuyFlashLoan(uint256 _amount) internal {
+    // Mock: Swap PT for VST (assume 1 PT = 0.98 VST)
+    // In production, this would be an AMM swap
+    uint256 _vstFromSwap = (_amount * 98) / 100;
+
+    // Combine swapped VST with user's VST
+    uint256 _totalVst = VAULT_SHARE_TOKEN.balanceOf(address(this));
+
+    // Split all VST into PT + YT
+    IERC20(address(VAULT_SHARE_TOKEN)).approve(address(FIXED_FEE_SWAP_HOOK), _totalVst);
+    (uint256 _ptMinted,) = FIXED_FEE_SWAP_HOOK.deposit(_totalVst);
+
+    // Approve PT contract to spend PT to repay flash loan
+    IERC20(address(PRINCIPAL_TOKEN)).approve(address(PRINCIPAL_TOKEN), _amount);
+
+    // YT stays in contract and will be sent to user after callback
+  }
 
   /// @notice Calculates and swaps portion of available VST for PT to repay flash loan.
   /// @param _availableVST The amount of VST available to swap.

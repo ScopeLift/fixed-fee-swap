@@ -190,6 +190,61 @@ contract SellYieldToken is ZapperTest {
   }
 }
 
+contract BuyYieldToken is ZapperTest {
+  function test_RevertIf_AmountIsZero() public {
+    vm.expectRevert(Zapper.Zapper_InvalidAmount.selector);
+    zapper.buyYieldToken(0);
+  }
+
+  function testFuzz_SuccessfulBuyYieldToken(uint256 _vstAmount) public {
+    _vstAmount = _boundToRealisticAmount(_vstAmount);
+
+    // Give user VST
+    deal(address(vaultShareToken), user, _vstAmount);
+
+    // User approves zapper to spend VST
+    vm.prank(user);
+    vaultShareToken.approve(address(zapper), _vstAmount);
+
+    // Get initial balances
+    uint256 _initialUserYT = fixedFeeSwapHook.YIELD_TOKEN().balanceOf(user);
+    uint256 _initialUserVST = vaultShareToken.balanceOf(user);
+
+    // Execute buy
+    vm.prank(user);
+    zapper.buyYieldToken(_vstAmount);
+
+    // Check balances
+    // User should have no VST left (all was transferred to zapper)
+    assertEq(
+      vaultShareToken.balanceOf(user), _initialUserVST - _vstAmount, "User should have less VST"
+    );
+
+    // User should receive YT
+    uint256 _ytReceived = fixedFeeSwapHook.YIELD_TOKEN().balanceOf(user) - _initialUserYT;
+    assertGt(_ytReceived, 0, "User should receive YT");
+  }
+
+  function testFuzz_EmitsYieldTokenBought(uint256 _vstAmount) public {
+    _vstAmount = _boundToRealisticAmount(_vstAmount);
+
+    // Give user VST
+    deal(address(vaultShareToken), user, _vstAmount);
+
+    // User approves zapper to spend VST
+    vm.prank(user);
+    vaultShareToken.approve(address(zapper), _vstAmount);
+
+    // Execute buy and check event
+    vm.expectEmit(true, false, false, false);
+    emit Zapper.YieldTokenBought(user, 0, _vstAmount); // YT amount will be verified in successful
+    // test
+
+    vm.prank(user);
+    zapper.buyYieldToken(_vstAmount);
+  }
+}
+
 contract OnFlashLoan is ZapperTest {
   function testFuzz_RevertIf_InitiatorIsNotZapper(
     address _initiator,
@@ -243,7 +298,7 @@ contract OnFlashLoan is ZapperTest {
     assertEq(_returnValue, FLASH_LOAN_RETURN_VALUE, "Should return FLASH_LOAN_RETURN_VALUE");
   }
 
-  function testFuzz_Successful_ApprovesHookToSpendPTAndYT(uint256 _amount) public {
+  function testFuzz_SellYTFlashLoanApprovesHookForPTAndYT(uint256 _amount) public {
     _amount = _boundToRealisticAmount(_amount);
 
     // Setup: Deposit VST to get PT and YT
@@ -268,7 +323,7 @@ contract OnFlashLoan is ZapperTest {
       "Initial YT approval should be 0"
     );
 
-    // Call onFlashLoan from PT contract
+    // Call onFlashLoan from PT contract (sell path - empty data)
     vm.prank(address(_pt));
     zapper.onFlashLoan(address(zapper), address(_pt), _amount, 0, "");
 
@@ -285,7 +340,7 @@ contract OnFlashLoan is ZapperTest {
     );
   }
 
-  function testFuzz_Successful_ApprovesPTContractToSpendPT(uint256 _amount) public {
+  function testFuzz_SellYTFlashLoanApprovesPTForRepayment(uint256 _amount) public {
     _amount = _boundToRealisticAmount(_amount);
 
     // Setup: Deposit VST to get PT and YT
@@ -304,7 +359,7 @@ contract OnFlashLoan is ZapperTest {
       "Initial PT self-approval should be 0"
     );
 
-    // Call onFlashLoan from PT contract
+    // Call onFlashLoan from PT contract (sell path - empty data)
     vm.prank(address(_pt));
     zapper.onFlashLoan(address(zapper), address(_pt), _amount, 0, "");
 
@@ -312,6 +367,35 @@ contract OnFlashLoan is ZapperTest {
     assertGt(
       IERC20(address(_pt)).allowance(address(zapper), address(_pt)),
       0,
+      "PT contract should be approved to spend PT for flash loan repayment"
+    );
+  }
+
+  function testFuzz_BuyYTFlashLoanApprovesPTForRepayment(uint256 _amount) public {
+    _amount = _boundToRealisticAmount(_amount);
+
+    // Setup: Give zapper VST (simulating user's VST that was transferred)
+    deal(address(vaultShareToken), address(zapper), _amount);
+
+    // Get PT contract
+    PrincipalToken _pt = fixedFeeSwapHook.PRINCIPAL_TOKEN();
+
+    // Check initial approval
+    assertEq(
+      IERC20(address(_pt)).allowance(address(zapper), address(_pt)),
+      0,
+      "Initial PT self-approval should be 0"
+    );
+
+    // Call onFlashLoan from PT contract (buy path - data encodes true)
+    bytes memory _buyData = abi.encode(true);
+    vm.prank(address(_pt));
+    zapper.onFlashLoan(address(zapper), address(_pt), _amount, 0, _buyData);
+
+    // Check approval after callback
+    assertGe(
+      IERC20(address(_pt)).allowance(address(zapper), address(_pt)),
+      _amount,
       "PT contract should be approved to spend PT for flash loan repayment"
     );
   }
