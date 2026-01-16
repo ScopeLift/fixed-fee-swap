@@ -441,20 +441,14 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     uint160 _sqrtPriceUpperX96 = TickMath.getSqrtPriceAtTick(_position.tickUpper);
 
     if (_sqrtPriceX96 <= _sqrtPriceLowerX96) {
-      _amount0 = SqrtPriceMath.getAmount0Delta(
-        _sqrtPriceLowerX96, _sqrtPriceUpperX96, _liquidity, true
-      );
+      _amount0 =
+        SqrtPriceMath.getAmount0Delta(_sqrtPriceLowerX96, _sqrtPriceUpperX96, _liquidity, true);
     } else if (_sqrtPriceX96 >= _sqrtPriceUpperX96) {
-      _amount1 = SqrtPriceMath.getAmount1Delta(
-        _sqrtPriceLowerX96, _sqrtPriceUpperX96, _liquidity, true
-      );
+      _amount1 =
+        SqrtPriceMath.getAmount1Delta(_sqrtPriceLowerX96, _sqrtPriceUpperX96, _liquidity, true);
     } else {
-      _amount0 = SqrtPriceMath.getAmount0Delta(
-        _sqrtPriceX96, _sqrtPriceUpperX96, _liquidity, true
-      );
-      _amount1 = SqrtPriceMath.getAmount1Delta(
-        _sqrtPriceLowerX96, _sqrtPriceX96, _liquidity, true
-      );
+      _amount0 = SqrtPriceMath.getAmount0Delta(_sqrtPriceX96, _sqrtPriceUpperX96, _liquidity, true);
+      _amount1 = SqrtPriceMath.getAmount1Delta(_sqrtPriceLowerX96, _sqrtPriceX96, _liquidity, true);
     }
   }
 
