@@ -440,42 +440,38 @@ contract LPVault is VaultShareToken, IUnlockCallback {
       int256 _totalFeeDelta1
     )
   {
-    PoolId _poolId = targetPoolKey.toId();
-    (uint160 _sqrtPriceX96,,,) = POOL_MANAGER.getSlot0(_poolId);
+    (uint160 _sqrtPriceX96,,,) = POOL_MANAGER.getSlot0(targetPoolKey.toId());
 
     _liquidityPerPosition = new uint128[](positions.length);
 
     uint16 _weight0 = positions[0].weight;
     if (_weight0 == 0) revert LPVault__ZeroLiquidity();
 
-    uint256 _totalAmount0Ref;
-    uint256 _totalAmount1Ref;
-    for (uint256 _i = 0; _i < positions.length; _i++) {
-      LiquidityPosition memory _position = positions[_i];
-      uint128 _liquidityRef = uint128(_position.weight);
-      (uint256 _amount0Ref, uint256 _amount1Ref) =
-        _getAmountsForLiquidity(_position, _sqrtPriceX96, _liquidityRef);
-      _totalAmount0Ref += _amount0Ref;
-      _totalAmount1Ref += _amount1Ref;
+    uint256 _liquidity0;
+    {
+      uint256 _totalAmount0Ref;
+      uint256 _totalAmount1Ref;
+      for (uint256 _i = 0; _i < positions.length; _i++) {
+        LiquidityPosition memory _position = positions[_i];
+        (uint256 _amount0Ref, uint256 _amount1Ref) =
+          _getAmountsForLiquidity(_position, _sqrtPriceX96, uint128(_position.weight));
+        _totalAmount0Ref += _amount0Ref;
+        _totalAmount1Ref += _amount1Ref;
+      }
+
+      if (_totalAmount0Ref == 0 && _totalAmount1Ref == 0) revert LPVault__ZeroLiquidity();
+
+      _liquidity0 = type(uint256).max;
+      if (_totalAmount0Ref > 0) {
+        _liquidity0 = FullMath.mulDiv(_amount0Max, _weight0, _totalAmount0Ref);
+      }
+
+      if (_totalAmount1Ref > 0) {
+        uint256 _liquidity0ByAmount1 = FullMath.mulDiv(_amount1Max, _weight0, _totalAmount1Ref);
+        if (_liquidity0ByAmount1 < _liquidity0) _liquidity0 = _liquidity0ByAmount1;
+      }
     }
-
-    if (_totalAmount0Ref == 0 && _totalAmount1Ref == 0) revert LPVault__ZeroLiquidity();
-
-    uint256 _liquidity0 = type(uint256).max;
-    if (_totalAmount0Ref > 0) {
-      _liquidity0 = FullMath.mulDiv(_amount0Max, _weight0, _totalAmount0Ref);
-    }
-
-    uint256 _liquidity0ByAmount1 = type(uint256).max;
-    if (_totalAmount1Ref > 0) {
-      _liquidity0ByAmount1 = FullMath.mulDiv(_amount1Max, _weight0, _totalAmount1Ref);
-    }
-
-    if (_liquidity0ByAmount1 < _liquidity0) _liquidity0 = _liquidity0ByAmount1;
     if (_liquidity0 == 0) revert LPVault__ZeroLiquidity();
-
-    uint256 _amount0Required;
-    uint256 _amount1Required;
 
     for (uint256 _i = 0; _i < positions.length; _i++) {
       LiquidityPosition memory _position = positions[_i];
@@ -485,16 +481,6 @@ contract LPVault is VaultShareToken, IUnlockCallback {
         : FullMath.mulDiv(_liquidity0, _position.weight, _weight0).toUint128();
 
       _liquidityPerPosition[_i] = _liquidity;
-
-      (uint256 _amount0ForPosition, uint256 _amount1ForPosition) =
-        _getAmountsForLiquidity(_position, _sqrtPriceX96, _liquidity);
-      _amount0Required += _amount0ForPosition;
-      _amount1Required += _amount1ForPosition;
-    }
-
-    for (uint256 _i = 0; _i < positions.length; _i++) {
-      LiquidityPosition memory _position = positions[_i];
-      uint128 _liquidity = _liquidityPerPosition[_i];
 
       (BalanceDelta _delta, BalanceDelta _feeDelta) = POOL_MANAGER.modifyLiquidity(
         targetPoolKey,
@@ -513,10 +499,10 @@ contract LPVault is VaultShareToken, IUnlockCallback {
       _totalFeeDelta1 += _feeDelta.amount1();
     }
 
-    _amount0Required = _totalDelta0 < 0 ? uint256(-_totalDelta0) : 0;
-    _amount1Required = _totalDelta1 < 0 ? uint256(-_totalDelta1) : 0;
-
-    if (_amount0Required > _amount0Max || _amount1Required > _amount1Max) {
+    if (_totalDelta0 < 0 && uint256(-_totalDelta0) > _amount0Max) {
+      revert LPVault__MaxAmountsExceeded();
+    }
+    if (_totalDelta1 < 0 && uint256(-_totalDelta1) > _amount1Max) {
       revert LPVault__MaxAmountsExceeded();
     }
   }

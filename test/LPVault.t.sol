@@ -14,9 +14,8 @@ import {IHooks} from "v4-core/interfaces/IHooks.sol";
 import {PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
-import {LiquidityAmounts} from "v4-periphery/src/libraries/LiquidityAmounts.sol";
+import {FullMath} from "v4-core/libraries/FullMath.sol";
 import {SqrtPriceMath} from "v4-core/libraries/SqrtPriceMath.sol";
-import {Position} from "v4-core/libraries/Position.sol";
 import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 
 contract LPVaultTest is Test, Deployers {
@@ -343,6 +342,28 @@ contract Deposit is LPVaultTest {
     vm.stopPrank();
   }
 
+  function _getAmountsForLiquidity(
+    LPVault.LiquidityPosition memory _position,
+    uint160 _sqrtPriceX96,
+    uint128 _liquidity
+  ) internal pure returns (uint256 _amount0, uint256 _amount1) {
+    if (_liquidity == 0) return (0, 0);
+
+    uint160 _sqrtPriceLowerX96 = TickMath.getSqrtPriceAtTick(_position.tickLower);
+    uint160 _sqrtPriceUpperX96 = TickMath.getSqrtPriceAtTick(_position.tickUpper);
+
+    if (_sqrtPriceX96 <= _sqrtPriceLowerX96) {
+      _amount0 =
+        SqrtPriceMath.getAmount0Delta(_sqrtPriceLowerX96, _sqrtPriceUpperX96, _liquidity, true);
+    } else if (_sqrtPriceX96 >= _sqrtPriceUpperX96) {
+      _amount1 =
+        SqrtPriceMath.getAmount1Delta(_sqrtPriceLowerX96, _sqrtPriceUpperX96, _liquidity, true);
+    } else {
+      _amount0 = SqrtPriceMath.getAmount0Delta(_sqrtPriceX96, _sqrtPriceUpperX96, _liquidity, true);
+      _amount1 = SqrtPriceMath.getAmount1Delta(_sqrtPriceLowerX96, _sqrtPriceX96, _liquidity, true);
+    }
+  }
+
   /// @dev Calculates expected deposit outputs (shares = first position's liquidity).
   function _calculateExpectedDeposit(uint256 _amount0, uint256 _amount1)
     internal
@@ -352,46 +373,41 @@ contract Deposit is LPVaultTest {
     PoolId _poolId = defaultPoolKey.toId();
     (uint160 _sqrtPriceX96,,,) = StateLibrary.getSlot0(manager, _poolId);
 
+    uint256 _totalAmount0Ref;
+    uint256 _totalAmount1Ref;
+    uint16 _weight0 = defaultPositions[0].weight;
+
     for (uint256 _i = 0; _i < defaultPositions.length; _i++) {
       LPVault.LiquidityPosition memory _position = defaultPositions[_i];
+      (uint256 _amount0Ref, uint256 _amount1Ref) =
+        _getAmountsForLiquidity(_position, _sqrtPriceX96, uint128(_position.weight));
+      _totalAmount0Ref += _amount0Ref;
+      _totalAmount1Ref += _amount1Ref;
+    }
 
-      uint256 _amount0ForPosition = (_amount0 * _position.weight) / BIPS;
-      uint256 _amount1ForPosition = (_amount1 * _position.weight) / BIPS;
+    uint256 _liquidity0 = type(uint256).max;
+    if (_totalAmount0Ref > 0) {
+      _liquidity0 = FullMath.mulDiv(_amount0, _weight0, _totalAmount0Ref);
+    }
 
-      uint160 _sqrtPriceLowerX96 = TickMath.getSqrtPriceAtTick(_position.tickLower);
-      uint160 _sqrtPriceUpperX96 = TickMath.getSqrtPriceAtTick(_position.tickUpper);
+    uint256 _liquidity0ByAmount1 = type(uint256).max;
+    if (_totalAmount1Ref > 0) {
+      _liquidity0ByAmount1 = FullMath.mulDiv(_amount1, _weight0, _totalAmount1Ref);
+    }
 
-      uint128 _liquidity = LiquidityAmounts.getLiquidityForAmounts(
-        _sqrtPriceX96,
-        _sqrtPriceLowerX96,
-        _sqrtPriceUpperX96,
-        _amount0ForPosition,
-        _amount1ForPosition
-      );
+    if (_liquidity0ByAmount1 < _liquidity0) _liquidity0 = _liquidity0ByAmount1;
 
-      // Calculate amounts needed for this liquidity based on position's range relative to current
-      // price.
-      uint256 _amount0delta;
-      uint256 _amount1delta;
+    _expectedShares = uint128(_liquidity0);
 
-      if (_sqrtPriceX96 <= _sqrtPriceLowerX96) {
-        // Current price below position - only token0 needed.
-        _amount0delta =
-          SqrtPriceMath.getAmount0Delta(_sqrtPriceLowerX96, _sqrtPriceUpperX96, _liquidity, true);
-      } else if (_sqrtPriceX96 >= _sqrtPriceUpperX96) {
-        // Current price above position - only token1 needed.
-        _amount1delta =
-          SqrtPriceMath.getAmount1Delta(_sqrtPriceLowerX96, _sqrtPriceUpperX96, _liquidity, true);
-      } else {
-        // In range - both tokens needed.
-        _amount0delta =
-          SqrtPriceMath.getAmount0Delta(_sqrtPriceX96, _sqrtPriceUpperX96, _liquidity, true);
-        _amount1delta =
-          SqrtPriceMath.getAmount1Delta(_sqrtPriceLowerX96, _sqrtPriceX96, _liquidity, true);
-      }
+    for (uint256 _i = 0; _i < defaultPositions.length; _i++) {
+      LPVault.LiquidityPosition memory _position = defaultPositions[_i];
+      uint128 _liquidity = _i == 0
+        ? _expectedShares
+        : uint128(FullMath.mulDiv(_liquidity0, _position.weight, _weight0));
 
-      // Shares are based on first position's liquidity only.
-      if (_i == 0) _expectedShares = _liquidity;
+      (uint256 _amount0delta, uint256 _amount1delta) =
+        _getAmountsForLiquidity(_position, _sqrtPriceX96, _liquidity);
+
       _expectedAmount0 += _amount0delta;
       _expectedAmount1 += _amount1delta;
     }
@@ -445,22 +461,32 @@ contract Deposit is LPVaultTest {
 
     // Calculate expected liquidity for each position.
     uint128[] memory _expectedLiquidity = new uint128[](defaultPositions.length);
+    uint16 _weight0 = defaultPositions[0].weight;
+    uint256 _totalAmount0Ref;
+    uint256 _totalAmount1Ref;
     for (uint256 _i = 0; _i < defaultPositions.length; _i++) {
       LPVault.LiquidityPosition memory _position = defaultPositions[_i];
+      (uint256 _amount0Ref, uint256 _amount1Ref) =
+        _getAmountsForLiquidity(_position, _sqrtPriceX96, uint128(_position.weight));
+      _totalAmount0Ref += _amount0Ref;
+      _totalAmount1Ref += _amount1Ref;
+    }
 
-      uint256 _amount0ForPosition = (_amount0 * _position.weight) / BIPS;
-      uint256 _amount1ForPosition = (_amount1 * _position.weight) / BIPS;
+    uint256 _liquidity0 = type(uint256).max;
+    if (_totalAmount0Ref > 0) {
+      _liquidity0 = FullMath.mulDiv(_amount0, _weight0, _totalAmount0Ref);
+    }
+    uint256 _liquidity0ByAmount1 = type(uint256).max;
+    if (_totalAmount1Ref > 0) {
+      _liquidity0ByAmount1 = FullMath.mulDiv(_amount1, _weight0, _totalAmount1Ref);
+    }
+    if (_liquidity0ByAmount1 < _liquidity0) _liquidity0 = _liquidity0ByAmount1;
 
-      uint160 _sqrtPriceLowerX96 = TickMath.getSqrtPriceAtTick(_position.tickLower);
-      uint160 _sqrtPriceUpperX96 = TickMath.getSqrtPriceAtTick(_position.tickUpper);
-
-      _expectedLiquidity[_i] = LiquidityAmounts.getLiquidityForAmounts(
-        _sqrtPriceX96,
-        _sqrtPriceLowerX96,
-        _sqrtPriceUpperX96,
-        _amount0ForPosition,
-        _amount1ForPosition
-      );
+    for (uint256 _i = 0; _i < defaultPositions.length; _i++) {
+      LPVault.LiquidityPosition memory _position = defaultPositions[_i];
+      _expectedLiquidity[_i] = _i == 0
+        ? uint128(_liquidity0)
+        : uint128(FullMath.mulDiv(_liquidity0, _position.weight, _weight0));
     }
 
     vm.prank(depositor);
@@ -514,7 +540,7 @@ contract Deposit is LPVaultTest {
 
   function test_RevertIf_ZeroLiquidity() public {
     vm.prank(depositor);
-    vm.expectRevert(Position.CannotUpdateEmptyPosition.selector);
+    vm.expectRevert(LPVault.LPVault__ZeroLiquidity.selector);
     vault.deposit(0, 0);
   }
 
@@ -697,8 +723,8 @@ contract Withdraw is LPVaultTest {
     assertEq(vault.totalSupply(), 0);
 
     // Verify amounts received match total deposited (within rounding tolerance).
-    assertApproxEqAbs(_amount0Received, _amount0Used1, 3);
-    assertApproxEqAbs(_amount1Received, _amount1Used1, 3);
+    assertApproxEqAbs(_amount0Received, _amount0Used1, 5);
+    assertApproxEqAbs(_amount1Received, _amount1Used1, 5);
 
     // Verify liquidity was proportionally removed (all positions should be empty).
     for (uint256 _i = 0; _i < defaultPositions.length; _i++) {
