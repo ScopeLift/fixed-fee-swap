@@ -174,9 +174,8 @@ contract LPVaultTest is Test, Deployers {
 
 contract Constructor is LPVaultTest {
   function testFuzz_SinglePosition(int24 _tickLower, int24 _tickUpper, address _deployer) public {
-    _tickLower = _boundTick(_tickLower);
-    _tickUpper = _boundTick(_tickUpper);
-    vm.assume(_tickLower < _tickUpper);
+    _tickLower = int24(bound(int256(_tickLower), int256(MIN_TICK), int256(MAX_TICK - 1)));
+    _tickUpper = int24(bound(int256(_tickUpper), int256(_tickLower + 1), int256(MAX_TICK)));
     vm.assume(_deployer != address(0));
 
     LPVault.LiquidityPosition[] memory _positions = new LPVault.LiquidityPosition[](1);
@@ -297,8 +296,7 @@ contract Constructor is LPVaultTest {
 
   function testFuzz_RevertIf_InvalidTickRange(int24 _tickLower, int24 _tickUpper) public {
     _tickLower = _boundTick(_tickLower);
-    _tickUpper = _boundTick(_tickUpper);
-    vm.assume(_tickLower >= _tickUpper);
+    _tickUpper = int24(bound(int256(_tickUpper), int256(MIN_TICK), int256(_tickLower)));
 
     LPVault.LiquidityPosition[] memory _positions = new LPVault.LiquidityPosition[](1);
     _positions[0] = LPVault.LiquidityPosition({
