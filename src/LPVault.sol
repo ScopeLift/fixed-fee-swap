@@ -10,7 +10,9 @@ import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
+import {SqrtPriceMath} from "v4-core/libraries/SqrtPriceMath.sol";
 import {SafeCast} from "v4-core/libraries/SafeCast.sol";
+import {FullMath} from "v4-core/libraries/FullMath.sol";
 import {LiquidityAmounts} from "v4-periphery/src/libraries/LiquidityAmounts.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -89,6 +91,9 @@ contract LPVault is VaultShareToken, IUnlockCallback {
 
   /// @notice Thrown when the total liquidity is zero.
   error LPVault__ZeroLiquidity();
+
+  /// @notice Thrown when required token amounts exceed the provided maximums.
+  error LPVault__MaxAmountsExceeded();
 
   /// @notice Thrown when the shares amount is invalid (zero or exceeds balance).
   error LPVault__InvalidShares();
@@ -389,9 +394,9 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     }
   }
 
-  /// @notice Adds liquidity to all positions based on the provided token amounts.
-  /// @param _amount0Max The maximum amount of token0 to distribute across positions.
-  /// @param _amount1Max The maximum amount of token1 to distribute across positions.
+  /// @notice Adds liquidity to all positions based on proportional liquidity weights.
+  /// @param _amount0Max The maximum amount of token0 available for the deposit.
+  /// @param _amount1Max The maximum amount of token1 available for the deposit.
   /// @return _liquidityPerPosition Array of liquidity added to each position.
   /// @return _totalDelta0 The total delta for token0 (negative = owed to pool).
   /// @return _totalDelta1 The total delta for token1 (negative = owed to pool).
@@ -413,17 +418,56 @@ contract LPVault is VaultShareToken, IUnlockCallback {
 
     _liquidityPerPosition = new uint128[](positions.length);
 
+    uint16 _weight0 = positions[0].weight;
+    if (_weight0 == 0) revert LPVault__ZeroLiquidity();
+
+    uint256 _totalAmount0Ref;
+    uint256 _totalAmount1Ref;
+    for (uint256 _i = 0; _i < positions.length; _i++) {
+      LiquidityPosition memory _position = positions[_i];
+      uint128 _liquidityRef = uint128(_position.weight);
+      (uint256 _amount0Ref, uint256 _amount1Ref) =
+        _getAmountsForLiquidity(_position, _sqrtPriceX96, _liquidityRef);
+      _totalAmount0Ref += _amount0Ref;
+      _totalAmount1Ref += _amount1Ref;
+    }
+
+    if (_totalAmount0Ref == 0 && _totalAmount1Ref == 0) revert LPVault__ZeroLiquidity();
+
+    uint256 _liquidity0 = type(uint256).max;
+    if (_totalAmount0Ref > 0) {
+      _liquidity0 = FullMath.mulDiv(_amount0Max, _weight0, _totalAmount0Ref);
+    }
+
+    uint256 _liquidity0ByAmount1 = type(uint256).max;
+    if (_totalAmount1Ref > 0) {
+      _liquidity0ByAmount1 = FullMath.mulDiv(_amount1Max, _weight0, _totalAmount1Ref);
+    }
+
+    if (_liquidity0ByAmount1 < _liquidity0) _liquidity0 = _liquidity0ByAmount1;
+    if (_liquidity0 == 0) revert LPVault__ZeroLiquidity();
+
+    uint256 _amount0Required;
+    uint256 _amount1Required;
+
     for (uint256 _i = 0; _i < positions.length; _i++) {
       LiquidityPosition memory _position = positions[_i];
 
-      uint256 _amount0ForPosition = (_amount0Max * _position.weight) / BIPS;
-      uint256 _amount1ForPosition = (_amount1Max * _position.weight) / BIPS;
-
-      uint128 _liquidity = _calculateLiquidityForAmounts(
-        _position, _sqrtPriceX96, _amount0ForPosition, _amount1ForPosition
-      );
+      uint128 _liquidity = _i == 0
+        ? _liquidity0.toUint128()
+        : FullMath.mulDiv(_liquidity0, _position.weight, _weight0).toUint128();
 
       _liquidityPerPosition[_i] = _liquidity;
+
+      (uint256 _amount0ForPosition, uint256 _amount1ForPosition) =
+        _getAmountsForLiquidity(_position, _sqrtPriceX96, _liquidity);
+      _amount0Required += _amount0ForPosition;
+      _amount1Required += _amount1ForPosition;
+    }
+
+    for (uint256 _i = 0; _i < positions.length; _i++) {
+      LiquidityPosition memory _position = positions[_i];
+      uint128 _liquidity = _liquidityPerPosition[_i];
 
       (BalanceDelta _delta, BalanceDelta _feeDelta) = POOL_MANAGER.modifyLiquidity(
         targetPoolKey,
@@ -440,6 +484,13 @@ contract LPVault is VaultShareToken, IUnlockCallback {
       _totalDelta1 += _delta.amount1() - _feeDelta.amount1();
       _totalFeeDelta0 += _feeDelta.amount0();
       _totalFeeDelta1 += _feeDelta.amount1();
+    }
+
+    _amount0Required = _totalDelta0 < 0 ? uint256(-_totalDelta0) : 0;
+    _amount1Required = _totalDelta1 < 0 ? uint256(-_totalDelta1) : 0;
+
+    if (_amount0Required > _amount0Max || _amount1Required > _amount1Max) {
+      revert LPVault__MaxAmountsExceeded();
     }
   }
 
@@ -461,6 +512,40 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     _liquidity = LiquidityAmounts.getLiquidityForAmounts(
       _sqrtPriceX96, _sqrtPriceLowerX96, _sqrtPriceUpperX96, _amount0, _amount1
     );
+  }
+
+  /// @notice Calculates token amounts needed for a position and liquidity amount.
+  /// @param _position The liquidity position configuration.
+  /// @param _sqrtPriceX96 The current sqrt price of the pool.
+  /// @param _liquidity The liquidity to add for the position.
+  /// @return _amount0 The amount of token0 required.
+  /// @return _amount1 The amount of token1 required.
+  function _getAmountsForLiquidity(
+    LiquidityPosition memory _position,
+    uint160 _sqrtPriceX96,
+    uint128 _liquidity
+  ) internal pure virtual returns (uint256 _amount0, uint256 _amount1) {
+    if (_liquidity == 0) return (0, 0);
+
+    uint160 _sqrtPriceLowerX96 = TickMath.getSqrtPriceAtTick(_position.tickLower);
+    uint160 _sqrtPriceUpperX96 = TickMath.getSqrtPriceAtTick(_position.tickUpper);
+
+    if (_sqrtPriceX96 <= _sqrtPriceLowerX96) {
+      _amount0 = SqrtPriceMath.getAmount0Delta(
+        _sqrtPriceLowerX96, _sqrtPriceUpperX96, _liquidity, true
+      );
+    } else if (_sqrtPriceX96 >= _sqrtPriceUpperX96) {
+      _amount1 = SqrtPriceMath.getAmount1Delta(
+        _sqrtPriceLowerX96, _sqrtPriceUpperX96, _liquidity, true
+      );
+    } else {
+      _amount0 = SqrtPriceMath.getAmount0Delta(
+        _sqrtPriceX96, _sqrtPriceUpperX96, _liquidity, true
+      );
+      _amount1 = SqrtPriceMath.getAmount1Delta(
+        _sqrtPriceLowerX96, _sqrtPriceX96, _liquidity, true
+      );
+    }
   }
 
   /// @notice Settles token deltas with the pool manager.
