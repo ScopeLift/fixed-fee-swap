@@ -1217,11 +1217,7 @@ contract Claim is VaultShareTokenTest {
     // User claims fees
     vm.expectEmit();
     emit VaultShareToken.FeesClaimed(
-      _user,
-      address(token0),
-      address(token1),
-      _accruedToken0BeforeClaiming,
-      _accruedToken1BeforeClaiming
+      _user, _accruedToken0BeforeClaiming, _accruedToken1BeforeClaiming
     );
     vaultShareToken.claim(_user);
   }
