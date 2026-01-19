@@ -3,8 +3,9 @@ pragma solidity 0.8.26;
 
 // External Imports
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {ERC20FlashMint} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20FlashMint.sol";
 
-contract PrincipalToken is ERC20 {
+contract PrincipalToken is ERC20, ERC20FlashMint {
   /*//////////////////////////////////////////////////////////////
                         ERRORS
   //////////////////////////////////////////////////////////////*/
