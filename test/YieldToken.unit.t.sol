@@ -946,9 +946,7 @@ contract Claim is YieldTokenTest {
       _calculateAccruedFees(_mintAmount, _globalFeeIndex1, _userIndex1Before);
 
     vm.expectEmit();
-    emit YieldToken.FeesClaimed(
-      _user, address(token0), address(token1), _expectedAccruedToken0, _expectedAccruedToken1
-    );
+    emit YieldToken.FeesClaimed(_user, _expectedAccruedToken0, _expectedAccruedToken1);
 
     vm.prank(hook);
     yieldToken.claim(_user);

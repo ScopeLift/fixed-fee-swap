@@ -55,17 +55,9 @@ contract VaultShareToken is ERC20 {
 
   /// @notice Emitted when a user claims their accrued fees.
   /// @param user The address that claimed fees.
-  /// @param token0 The address of the token0 to claim fees for.
-  /// @param token1 The address of the token1 to claim fees for.
   /// @param token0Amount Amount of token0 fees claimed.
   /// @param token1Amount Amount of token1 fees claimed.
-  event FeesClaimed(
-    address indexed user,
-    address indexed token0,
-    address indexed token1,
-    uint256 token0Amount,
-    uint256 token1Amount
-  );
+  event FeesClaimed(address indexed user, uint256 token0Amount, uint256 token1Amount);
 
   /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
@@ -180,7 +172,7 @@ contract VaultShareToken is ERC20 {
     (_claimedToken0, _claimedToken1) = userFees[_user]._resetAccruedFees();
 
     // Emit event for transparency
-    emit FeesClaimed(_user, FEE_TOKEN0, FEE_TOKEN1, _claimedToken0, _claimedToken1);
+    emit FeesClaimed(_user, _claimedToken0, _claimedToken1);
 
     // Transfer tokens to the user
     _transferAmount(FEE_TOKEN0, _user, _claimedToken0);
