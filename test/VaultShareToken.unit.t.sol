@@ -113,8 +113,7 @@ contract VaultShareTokenTest is Test {
     // Fees collected (global indices increase)
     _vaultShareToken.exposed_updateFees(_collectedFeeToken0, _collectedFeeToken1);
 
-    // Sync user fees to latest global indices
-    _vaultShareToken.exposed_updateUserFees(_user);
+    // Note: _updateUserFees will be called automatically by claim() or transfer() when needed
   }
 }
 
@@ -398,9 +397,12 @@ contract Transfer is VaultShareTokenTest {
     uint256 _globalFeeIndex0AfterRound2 = vaultShareToken.globalFeeIndex0Scaled();
     uint256 _globalFeeIndex1AfterRound2 = vaultShareToken.globalFeeIndex1Scaled();
 
-    // Update both users' fees to reflect the new fee collection via the public hook
-    vaultShareToken.exposed_updateUserFees(_params.from);
-    vaultShareToken.exposed_updateUserFees(_params.to);
+    // Trigger fee updates for both users via transfer (which automatically calls _updateUserFees)
+    // Transfer 0 amount to trigger _updateUserFees for sender without changing balances
+    vm.prank(_params.from);
+    vaultShareToken.transfer(_params.from, 0);
+    vm.prank(_params.to);
+    vaultShareToken.transfer(_params.to, 0);
 
     // Get sender's fees after round 2 (they have 0 balance)
     {
@@ -608,8 +610,8 @@ contract UpdateUserFees is VaultShareTokenTest {
   function testFuzz_UserWithNoSharesSyncsToZeroGlobalIndices(address _user) public {
     _assumeSafeAddress(_user);
 
-    // Perform the update for the user without vault shares
-    vaultShareToken.exposed_updateUserFees(_user);
+    // Trigger _updateUserFees via claim() when user has no shares (will sync to global indices)
+    vaultShareToken.claim(_user);
 
     // Get the global fee indices (should be 0 initially)
     uint256 _globalFeeIndex0 = vaultShareToken.globalFeeIndex0Scaled();
@@ -640,8 +642,8 @@ contract UpdateUserFees is VaultShareTokenTest {
     _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
     _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
 
-    // First, sync the user without shares when global indices are 0
-    vaultShareToken.exposed_updateUserFees(_userWithoutVaultShares);
+    // First, sync the user without shares when global indices are 0 via claim()
+    vaultShareToken.claim(_userWithoutVaultShares);
 
     // Mint shares for another user and collect fees to change global indices
     vaultShareToken.exposed_mint(_userWithVaultShares, _mintAmount);
@@ -651,8 +653,9 @@ contract UpdateUserFees is VaultShareTokenTest {
     uint256 _globalFeeIndex0 = vaultShareToken.globalFeeIndex0Scaled();
     uint256 _globalFeeIndex1 = vaultShareToken.globalFeeIndex1Scaled();
 
-    // Perform the update for the user without vault shares
-    vaultShareToken.exposed_updateUserFees(_userWithoutVaultShares);
+    // Trigger _updateUserFees for the user without vault shares via claim() (will sync to new
+    // global indices)
+    vaultShareToken.claim(_userWithoutVaultShares);
 
     // Destructure the tuple again after the update
     (
@@ -669,8 +672,8 @@ contract UpdateUserFees is VaultShareTokenTest {
   function testFuzz_UserWithNoSharesIndicesUnchangedWhenAlreadySynced(address _user) public {
     _assumeSafeAddress(_user);
 
-    // First sync: user indices should sync to global indices (which are 0)
-    vaultShareToken.exposed_updateUserFees(_user);
+    // First sync: user indices should sync to global indices (which are 0) via claim()
+    vaultShareToken.claim(_user);
 
     (uint256 _userFeeIndex0AfterFirstSync, uint256 _userFeeIndex1AfterFirstSync,,) =
       vaultShareToken.userFees(_user);
@@ -679,8 +682,9 @@ contract UpdateUserFees is VaultShareTokenTest {
     assertEq(_userFeeIndex0AfterFirstSync, 0);
     assertEq(_userFeeIndex1AfterFirstSync, 0);
 
-    // Second sync: indices should remain the same (already synced, no unnecessary update)
-    vaultShareToken.exposed_updateUserFees(_user);
+    // Second sync: indices should remain the same (already synced, no unnecessary update) via
+    // claim()
+    vaultShareToken.claim(_user);
 
     (uint256 _userFeeIndex0AfterSecondSync, uint256 _userFeeIndex1AfterSecondSync,,) =
       vaultShareToken.userFees(_user);
@@ -704,16 +708,16 @@ contract UpdateUserFees is VaultShareTokenTest {
     _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
     _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
 
-    // Sync user without shares when global indices are 0
-    vaultShareToken.exposed_updateUserFees(_userWithoutVaultShares);
+    // Sync user without shares when global indices are 0 via claim()
+    vaultShareToken.claim(_userWithoutVaultShares);
 
     // Mint shares for another user and collect fees to change global indices
     vaultShareToken.exposed_mint(_userWithVaultShares, _mintAmount);
     vaultShareToken.exposed_updateFees(_collectedFeeToken0, _collectedFeeToken1);
 
     // Update user without shares - even though global index > user index, accrued should remain 0
-    // because user has no balance
-    vaultShareToken.exposed_updateUserFees(_userWithoutVaultShares);
+    // because user has no balance (triggered via claim())
+    vaultShareToken.claim(_userWithoutVaultShares);
 
     (,, uint256 _userAccruedToken0, uint256 _userAccruedToken1) =
       vaultShareToken.userFees(_userWithoutVaultShares);
@@ -748,8 +752,9 @@ contract UpdateUserFees is VaultShareTokenTest {
     uint256 _userFeeIndex0Before = 0;
     uint256 _userFeeIndex1Before = 0;
 
-    // Perform the update for the user
-    vaultShareToken.exposed_updateUserFees(_user);
+    // Trigger _updateUserFees for the user via transfer (transfer to self with 0 amount)
+    vm.prank(_user);
+    vaultShareToken.transfer(_user, 0);
 
     // Destructure the tuple again after the update
     (
@@ -781,12 +786,17 @@ contract UpdateUserFees is VaultShareTokenTest {
     _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
     _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
 
-    // Mint shares, collect fees, and sync user fees
+    // Mint shares and collect fees
     _mintSharesAndCollectFeesHelper(
       _user, _mintAmount, _collectedFeeToken0, _collectedFeeToken1, vaultShareToken
     );
 
-    // Destructure the tuple again after the update
+    // First sync: trigger _updateUserFees for the user via transfer (transfer to self with 0
+    // amount)
+    vm.prank(_user);
+    vaultShareToken.transfer(_user, 0);
+
+    // Get state after first sync
     (
       uint256 _userFeeIndex0,
       uint256 _userFeeIndex1,
@@ -794,8 +804,9 @@ contract UpdateUserFees is VaultShareTokenTest {
       uint256 _userAccruedToken1
     ) = vaultShareToken.userFees(_user);
 
-    // Again perform the update for the user
-    vaultShareToken.exposed_updateUserFees(_user);
+    // Second sync: trigger _updateUserFees again (should not change state since already synced)
+    vm.prank(_user);
+    vaultShareToken.transfer(_user, 0);
 
     // Destructure the tuple again after the update
     (
@@ -832,8 +843,9 @@ contract UpdateUserFees is VaultShareTokenTest {
     // User's index before update is 0 (default for new user)
     uint256 _userFeeIndex0Before = 0;
 
-    // Perform the update for the user
-    vaultShareToken.exposed_updateUserFees(_user);
+    // Trigger _updateUserFees for the user via transfer (transfer to self with 0 amount)
+    vm.prank(_user);
+    vaultShareToken.transfer(_user, 0);
 
     // Destructure the tuple again after the update
     (
@@ -872,8 +884,9 @@ contract UpdateUserFees is VaultShareTokenTest {
     // User's index before update is 0 (default for new user)
     uint256 _userFeeIndex1Before = 0;
 
-    // Perform the update for the user
-    vaultShareToken.exposed_updateUserFees(_user);
+    // Trigger _updateUserFees for the user via transfer (transfer to self with 0 amount)
+    vm.prank(_user);
+    vaultShareToken.transfer(_user, 0);
 
     // Destructure the tuple again after the update
     (
@@ -924,8 +937,10 @@ contract UpdateUserFees is VaultShareTokenTest {
     uint256 _userFeeIndex0Before = 0;
     uint256 _userFeeIndex1Before = 0;
 
-    // Perform the update for the user - should accrue for BOTH rounds (delta from 0 to final)
-    vaultShareToken.exposed_updateUserFees(_user);
+    // Trigger _updateUserFees for the user via transfer - should accrue for BOTH rounds (delta from
+    // 0 to final) (transfer to self with 0 amount)
+    vm.prank(_user);
+    vaultShareToken.transfer(_user, 0);
 
     // Destructure the tuple after the update
     (
@@ -1048,8 +1063,10 @@ contract UpdateUserFees is VaultShareTokenTest {
     uint256 _finalGlobalFeeIndex0 = vaultShareToken.globalFeeIndex0Scaled();
     uint256 _finalGlobalFeeIndex1 = vaultShareToken.globalFeeIndex1Scaled();
 
-    // Perform the update for the user - should use CURRENT balance (amount1 + amount2)
-    vaultShareToken.exposed_updateUserFees(_params.user);
+    // Trigger _updateUserFees for the user via transfer - should use CURRENT balance (amount1 +
+    // amount2) (transfer to self with 0 amount)
+    vm.prank(_params.user);
+    vaultShareToken.transfer(_params.user, 0);
 
     // Get user fees after update
     (
@@ -1161,21 +1178,23 @@ contract Claim is VaultShareTokenTest {
     vm.deal(address(_vaultShareToken), _collectedFeeToken0); // Native token
     token1.mint(address(_vaultShareToken), _collectedFeeToken1); // ERC20 token
 
-    // Mint shares, collect fees, and sync user fees
+    // Mint shares and collect fees (claim() will sync internally)
     _mintSharesAndCollectFeesHelper(
       _user, _mintAmount, _collectedFeeToken0, _collectedFeeToken1, _vaultShareToken
     );
 
-    // Get accrued amounts before claiming
-    (,, uint256 _accruedToken0BeforeClaiming, uint256 _accruedToken1BeforeClaiming) =
-      _vaultShareToken.userFees(_user);
+    // Calculate expected accrued amounts (claim() will sync internally and calculate these)
+    uint256 _globalFeeIndex0 = _vaultShareToken.globalFeeIndex0Scaled();
+    uint256 _globalFeeIndex1 = _vaultShareToken.globalFeeIndex1Scaled();
+    uint256 _expectedAccruedToken0 = _calculateAccruedFees(_mintAmount, _globalFeeIndex0, 0);
+    uint256 _expectedAccruedToken1 = _calculateAccruedFees(_mintAmount, _globalFeeIndex1, 0);
 
-    // User claims fees
+    // User claims fees (this will sync internally and calculate accrued amounts)
     (uint256 _claimedToken0, uint256 _claimedToken1) = _vaultShareToken.claim(_user);
 
-    // Verify claimed amounts match accrued amounts
-    assertEq(_claimedToken0, _accruedToken0BeforeClaiming);
-    assertEq(_claimedToken1, _accruedToken1BeforeClaiming);
+    // Verify claimed amounts match expected accrued amounts
+    assertEq(_claimedToken0, _expectedAccruedToken0);
+    assertEq(_claimedToken1, _expectedAccruedToken1);
 
     // Verify tokens were transferred to user (check delta from initial balance)
     assertEq(_user.balance, _initialUserEthBalance + _claimedToken0);
@@ -1208,18 +1227,15 @@ contract Claim is VaultShareTokenTest {
     // Fees collected (global indices increase)
     vaultShareToken.exposed_updateFees(_collectedFeeToken0, _collectedFeeToken1);
 
-    // Sync user fees to latest global indices
-    vaultShareToken.exposed_updateUserFees(_user);
+    // Calculate expected accrued amounts (claim() will sync internally and calculate these)
+    uint256 _globalFeeIndex0 = vaultShareToken.globalFeeIndex0Scaled();
+    uint256 _globalFeeIndex1 = vaultShareToken.globalFeeIndex1Scaled();
+    uint256 _expectedAccruedToken0 = _calculateAccruedFees(_mintAmount, _globalFeeIndex0, 0);
+    uint256 _expectedAccruedToken1 = _calculateAccruedFees(_mintAmount, _globalFeeIndex1, 0);
 
-    // Get accrued amounts before claiming
-    (,, uint256 _accruedToken0BeforeClaiming, uint256 _accruedToken1BeforeClaiming) =
-      vaultShareToken.userFees(_user);
-
-    // User claims fees
+    // User claims fees (this will automatically call _updateUserFees internally)
     vm.expectEmit();
-    emit IFeeTrackingToken.FeesClaimed(
-      _user, _accruedToken0BeforeClaiming, _accruedToken1BeforeClaiming
-    );
+    emit IFeeTrackingToken.FeesClaimed(_user, _expectedAccruedToken0, _expectedAccruedToken1);
     vaultShareToken.claim(_user);
   }
 
@@ -1307,24 +1323,22 @@ contract Claim is VaultShareTokenTest {
     NonPayableContractMock _nonPayableContract = new NonPayableContractMock();
 
     // Mint and send native ETH fees to the vault
-    vm.deal(address(vaultShareToken), _collectedFeeToken0);
+    vm.deal(address(_vaultShareToken), _collectedFeeToken0);
 
     // User (non-payable contract) mints shares
-    vaultShareToken.exposed_mint(address(_nonPayableContract), _mintAmount);
+    _vaultShareToken.exposed_mint(address(_nonPayableContract), _mintAmount);
 
     // Fees collected (global indices increase)
-    vaultShareToken.exposed_updateFees(_collectedFeeToken0, 0);
+    _vaultShareToken.exposed_updateFees(_collectedFeeToken0, 0);
 
-    // Sync user fees to latest global indices
-    vaultShareToken.exposed_updateUserFees(address(_nonPayableContract));
-
-    // Get accrued amount before claiming
-    (,, uint256 _accruedToken0BeforeClaiming,) =
-      vaultShareToken.userFees(address(_nonPayableContract));
+    // Calculate expected accrued amount (claim() will sync internally and calculate this)
+    uint256 _globalFeeIndex0 = _vaultShareToken.globalFeeIndex0Scaled();
+    uint256 _expectedAccruedToken0 = _calculateAccruedFees(_mintAmount, _globalFeeIndex0, 0);
     // Ensure there are accrued fees to claim
-    vm.assume(_accruedToken0BeforeClaiming > 0);
+    vm.assume(_expectedAccruedToken0 > 0);
 
     // Attempt to claim should revert with VaultShareToken_TransferFailed
+    // (claim() will automatically call _updateUserFees internally before attempting transfer)
     vm.expectRevert(VaultShareToken.VaultShareToken_TransferFailed.selector);
     _vaultShareToken.claim(address(_nonPayableContract));
   }
