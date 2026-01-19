@@ -10,6 +10,7 @@ import {VaultShareTokenHarness} from "test/harness/VaultShareTokenHarness.sol";
 import {ERC20Mock} from "test/mock/ERC20Mock.sol";
 import {NonPayableContractMock} from "test/mock/NonPayableContractMock.sol";
 import {FeeTracking} from "src/lib/FeeTracking.sol";
+import {IFeeTrackingToken} from "src/interface/IFeeTrackingToken.sol";
 
 contract VaultShareTokenTest is Test {
   VaultShareTokenHarness public vaultShareToken;
@@ -594,7 +595,7 @@ contract UpdateFees is VaultShareTokenTest {
     uint256 _expectedFeeIndex1 = _calculateFeeIndex(_collectedFeeToken1, _mintAmount);
 
     vm.expectEmit();
-    emit VaultShareToken.FeeIndexesUpdated(
+    emit IFeeTrackingToken.FeeIndexesUpdated(
       _expectedFeeIndex0, _expectedFeeIndex1, _collectedFeeToken0, _collectedFeeToken1
     );
     vaultShareToken.exposed_updateFees(_collectedFeeToken0, _collectedFeeToken1);
@@ -1216,7 +1217,7 @@ contract Claim is VaultShareTokenTest {
 
     // User claims fees
     vm.expectEmit();
-    emit VaultShareToken.FeesClaimed(
+    emit IFeeTrackingToken.FeesClaimed(
       _user, _accruedToken0BeforeClaiming, _accruedToken1BeforeClaiming
     );
     vaultShareToken.claim(_user);
