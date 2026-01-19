@@ -43,7 +43,8 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   /// @notice Enum to distinguish callback actions.
   enum CallbackAction {
     Deposit,
-    Withdraw
+    Withdraw,
+    CollectFees
   }
 
   /// @notice Struct for passing deposit callback data.
@@ -119,6 +120,11 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     uint256 amount0,
     uint256 amount1
   );
+
+  /// @notice Emitted when fees are collected from all positions.
+  /// @param collectedFee0 The amount of token0 fees collected.
+  /// @param collectedFee1 The amount of token1 fees collected.
+  event FeesCollected(uint256 collectedFee0, uint256 collectedFee1);
 
   /// @notice Creates a new LP Vault with fixed positions.
   /// @param _poolManager The Uniswap v4 pool manager.
@@ -261,6 +267,19 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     emit Withdraw(msg.sender, _receiver, _shares, _amount0, _amount1);
   }
 
+  /// @notice Collects accumulated fees from all positions without modifying liquidity.
+  /// @dev Callable by anyone. Fees are kept in the vault and distributed to share holders.
+  /// @return _collectedFee0 The amount of token0 fees collected.
+  /// @return _collectedFee1 The amount of token1 fees collected.
+  function collectFees() external virtual returns (uint256 _collectedFee0, uint256 _collectedFee1) {
+    bytes memory _result =
+      POOL_MANAGER.unlock(abi.encode(CallbackAction.CollectFees, abi.encode("")));
+
+    (_collectedFee0, _collectedFee1) = abi.decode(_result, (uint256, uint256));
+
+    emit FeesCollected(_collectedFee0, _collectedFee1);
+  }
+
   /// @inheritdoc IUnlockCallback
   function unlockCallback(bytes calldata _data) external virtual returns (bytes memory) {
     if (msg.sender != address(POOL_MANAGER)) revert LPVault__OnlyPoolManager();
@@ -268,7 +287,8 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     (CallbackAction _action, bytes memory _actionData) = abi.decode(_data, (CallbackAction, bytes));
 
     if (_action == CallbackAction.Deposit) return _handleDepositCallback(_actionData);
-    return _handleWithdrawCallback(_actionData);
+    if (_action == CallbackAction.Withdraw) return _handleWithdrawCallback(_actionData);
+    return _handleCollectFeesCallback();
   }
 
   /// @notice Handles the deposit callback logic.
@@ -281,11 +301,19 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   {
     DepositCallbackData memory _callbackData = abi.decode(_actionData, (DepositCallbackData));
 
-    (uint128[] memory _liquidityPerPosition, int256 _totalDelta0, int256 _totalDelta1) =
-      _addLiquidityToPositions(_callbackData.amount0Max, _callbackData.amount1Max);
+    (
+      uint128[] memory _liquidityPerPosition,
+      int256 _totalDelta0,
+      int256 _totalDelta1,
+      int256 _totalFeeDelta0,
+      int256 _totalFeeDelta1
+    ) = _addLiquidityToPositions(_callbackData.amount0Max, _callbackData.amount1Max);
 
     (uint256 _amount0Used, uint256 _amount1Used) =
       _settleDeltas(_totalDelta0, _totalDelta1, _callbackData.sender);
+
+    // Collect fees and update fee-per-share indexes.
+    _collectFees(_totalFeeDelta0, _totalFeeDelta1);
 
     return abi.encode(_liquidityPerPosition, _amount0Used, _amount1Used);
   }
@@ -300,13 +328,65 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   {
     WithdrawCallbackData memory _callbackData = abi.decode(_actionData, (WithdrawCallbackData));
 
-    (int256 _totalDelta0, int256 _totalDelta1) =
+    (int256 _totalDelta0, int256 _totalDelta1, int256 _totalFeeDelta0, int256 _totalFeeDelta1) =
       _removeLiquidityFromPositions(_callbackData.liquidityToRemove);
 
     (uint256 _amount0Received, uint256 _amount1Received) =
       _settleWithdrawDeltas(_totalDelta0, _totalDelta1, _callbackData.receiver);
 
+    // Collect fees and update fee-per-share indexes.
+    _collectFees(_totalFeeDelta0, _totalFeeDelta1);
+
     return abi.encode(_amount0Received, _amount1Received);
+  }
+
+  /// @notice Handles the collect fees callback logic.
+  /// @return The encoded result containing fee amounts collected.
+  function _handleCollectFeesCallback() internal virtual returns (bytes memory) {
+    (int256 _totalFeeDelta0, int256 _totalFeeDelta1) = _collectFeesFromPositions();
+
+    uint256 _collectedFee0;
+    uint256 _collectedFee1;
+
+    if (_totalFeeDelta0 > 0) {
+      _collectedFee0 = uint256(_totalFeeDelta0);
+      POOL_MANAGER.take(targetPoolKey.currency0, address(this), _collectedFee0);
+    }
+    if (_totalFeeDelta1 > 0) {
+      _collectedFee1 = uint256(_totalFeeDelta1);
+      POOL_MANAGER.take(targetPoolKey.currency1, address(this), _collectedFee1);
+    }
+
+    if (_collectedFee0 > 0 || _collectedFee1 > 0) _updateFees(_collectedFee0, _collectedFee1);
+
+    return abi.encode(_collectedFee0, _collectedFee1);
+  }
+
+  /// @notice Collects fees from all positions without modifying liquidity.
+  /// @return _totalFeeDelta0 The total fee delta for token0 (positive = fees earned).
+  /// @return _totalFeeDelta1 The total fee delta for token1 (positive = fees earned).
+  function _collectFeesFromPositions()
+    internal
+    virtual
+    returns (int256 _totalFeeDelta0, int256 _totalFeeDelta1)
+  {
+    for (uint256 _i = 0; _i < positions.length; _i++) {
+      LiquidityPosition memory _position = positions[_i];
+
+      (, BalanceDelta _feeDelta) = POOL_MANAGER.modifyLiquidity(
+        targetPoolKey,
+        ModifyLiquidityParams({
+          tickLower: _position.tickLower,
+          tickUpper: _position.tickUpper,
+          liquidityDelta: 0,
+          salt: bytes32(0)
+        }),
+        ""
+      );
+
+      _totalFeeDelta0 += _feeDelta.amount0();
+      _totalFeeDelta1 += _feeDelta.amount1();
+    }
   }
 
   /// @notice Adds liquidity to all positions based on the provided token amounts.
@@ -315,10 +395,18 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   /// @return _liquidityPerPosition Array of liquidity added to each position.
   /// @return _totalDelta0 The total delta for token0 (negative = owed to pool).
   /// @return _totalDelta1 The total delta for token1 (negative = owed to pool).
+  /// @return _totalFeeDelta0 The total fee delta for token0 (positive = fees earned).
+  /// @return _totalFeeDelta1 The total fee delta for token1 (positive = fees earned).
   function _addLiquidityToPositions(uint256 _amount0Max, uint256 _amount1Max)
     internal
     virtual
-    returns (uint128[] memory _liquidityPerPosition, int256 _totalDelta0, int256 _totalDelta1)
+    returns (
+      uint128[] memory _liquidityPerPosition,
+      int256 _totalDelta0,
+      int256 _totalDelta1,
+      int256 _totalFeeDelta0,
+      int256 _totalFeeDelta1
+    )
   {
     PoolId _poolId = targetPoolKey.toId();
     (uint160 _sqrtPriceX96,,,) = POOL_MANAGER.getSlot0(_poolId);
@@ -337,7 +425,7 @@ contract LPVault is VaultShareToken, IUnlockCallback {
 
       _liquidityPerPosition[_i] = _liquidity;
 
-      (BalanceDelta _delta,) = POOL_MANAGER.modifyLiquidity(
+      (BalanceDelta _delta, BalanceDelta _feeDelta) = POOL_MANAGER.modifyLiquidity(
         targetPoolKey,
         ModifyLiquidityParams({
           tickLower: _position.tickLower,
@@ -348,8 +436,10 @@ contract LPVault is VaultShareToken, IUnlockCallback {
         ""
       );
 
-      _totalDelta0 += _delta.amount0();
-      _totalDelta1 += _delta.amount1();
+      _totalDelta0 += _delta.amount0() - _feeDelta.amount0();
+      _totalDelta1 += _delta.amount1() - _feeDelta.amount1();
+      _totalFeeDelta0 += _feeDelta.amount0();
+      _totalFeeDelta1 += _feeDelta.amount1();
     }
   }
 
@@ -410,17 +500,24 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   /// @param _liquidityToRemove Array of liquidity to remove from each position.
   /// @return _totalDelta0 The total delta for token0 (positive = pool owes us).
   /// @return _totalDelta1 The total delta for token1 (positive = pool owes us).
+  /// @return _totalFeeDelta0 The total fee delta for token0 (positive = fees earned).
+  /// @return _totalFeeDelta1 The total fee delta for token1 (positive = fees earned).
   function _removeLiquidityFromPositions(uint128[] memory _liquidityToRemove)
     internal
     virtual
-    returns (int256 _totalDelta0, int256 _totalDelta1)
+    returns (
+      int256 _totalDelta0,
+      int256 _totalDelta1,
+      int256 _totalFeeDelta0,
+      int256 _totalFeeDelta1
+    )
   {
     for (uint256 _i = 0; _i < positions.length; _i++) {
       uint128 _liquidity = _liquidityToRemove[_i];
 
       LiquidityPosition memory _position = positions[_i];
 
-      (BalanceDelta _delta,) = POOL_MANAGER.modifyLiquidity(
+      (BalanceDelta _delta, BalanceDelta _feeDelta) = POOL_MANAGER.modifyLiquidity(
         targetPoolKey,
         ModifyLiquidityParams({
           tickLower: _position.tickLower,
@@ -431,8 +528,12 @@ contract LPVault is VaultShareToken, IUnlockCallback {
         ""
       );
 
-      _totalDelta0 += _delta.amount0();
-      _totalDelta1 += _delta.amount1();
+      // Note: `_delta` (callerDelta) includes both principal and fees. We subtract
+      // the fee portion so withdrawers only receive principal, not vault's accrued fees.
+      _totalDelta0 += _delta.amount0() - _feeDelta.amount0();
+      _totalDelta1 += _delta.amount1() - _feeDelta.amount1();
+      _totalFeeDelta0 += _feeDelta.amount0();
+      _totalFeeDelta1 += _feeDelta.amount1();
     }
   }
 
@@ -457,5 +558,27 @@ contract LPVault is VaultShareToken, IUnlockCallback {
       _amount1Received = uint256(_delta1);
       POOL_MANAGER.take(targetPoolKey.currency1, _receiver, _amount1Received);
     }
+  }
+
+  /// @notice Collects fee tokens from the pool and updates the fee-per-share indexes.
+  /// @dev Fee deltas are positive when the pool owes us fees.
+  /// @param _feeDelta0 The fee delta for token0.
+  /// @param _feeDelta1 The fee delta for token1.
+  function _collectFees(int256 _feeDelta0, int256 _feeDelta1) internal virtual {
+    uint256 _collectedFee0;
+    uint256 _collectedFee1;
+
+    // Take fee tokens from the pool (positive delta = pool owes us).
+    if (_feeDelta0 > 0) {
+      _collectedFee0 = uint256(_feeDelta0);
+      POOL_MANAGER.take(targetPoolKey.currency0, address(this), _collectedFee0);
+    }
+    if (_feeDelta1 > 0) {
+      _collectedFee1 = uint256(_feeDelta1);
+      POOL_MANAGER.take(targetPoolKey.currency1, address(this), _collectedFee1);
+    }
+
+    // Update the global fee-per-share indexes if any fees were collected.
+    if (_collectedFee0 > 0 || _collectedFee1 > 0) _updateFees(_collectedFee0, _collectedFee1);
   }
 }
