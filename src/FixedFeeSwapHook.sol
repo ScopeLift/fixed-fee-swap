@@ -2,13 +2,7 @@
 pragma solidity 0.8.26;
 
 // External imports
-import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
-import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
-import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
-import {PoolKey} from "v4-core/types/PoolKey.sol";
-import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
-import {SwapParams} from "v4-core/types/PoolOperation.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -19,7 +13,7 @@ import {YieldToken} from "src/YieldToken.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
 import {FeeTracking} from "src/lib/FeeTracking.sol";
 
-contract FixedFeeSwapHook is BaseHook {
+contract FixedFeeSwapHook {
   using SafeERC20 for IERC20;
   /*//////////////////////////////////////////////////////////////
                         ERRORS
@@ -33,9 +27,6 @@ contract FixedFeeSwapHook is BaseHook {
 
   /// @notice Thrown when split is attempted with an invalid maturity.
   error FixedFeeSwapHook_InvalidMaturity();
-
-  /// @notice Thrown when split is attempted with an invalid manager.
-  error FixedFeeSwapHook_InvalidManager();
 
   /// @notice Thrown when split is attempted with an invalid vault share token.
   error FixedFeeSwapHook_InvalidVaultShareToken();
@@ -54,17 +45,12 @@ contract FixedFeeSwapHook is BaseHook {
   //////////////////////////////////////////////////////////////*/
 
   /// @notice Emitted when the hook is initialized.
-  /// @param poolManager The address of the pool manager.
   /// @param vaultShareToken The address of the vault share token.
   /// @param principalToken The address of the principal token.
   /// @param yieldToken The address of the yield token.
   /// @param maturity The maturity of the hook.
   event Initialized(
-    address indexed poolManager,
-    address vaultShareToken,
-    address principalToken,
-    address yieldToken,
-    uint256 maturity
+    address vaultShareToken, address principalToken, address yieldToken, uint256 maturity
   );
 
   /// @notice Emitted when a user deposits their vault share token into principal and yield tokens.
@@ -117,13 +103,9 @@ contract FixedFeeSwapHook is BaseHook {
   //////////////////////////////////////////////////////////////*/
 
   /// @notice Initializes the hook and deploys the principal and yield tokens.
-  /// @param _manager The pool manager.
   /// @param _vaultShareToken The vault share token.
   /// @param _maturity The maturity of the hook.
-  constructor(IPoolManager _manager, VaultShareToken _vaultShareToken, uint256 _maturity)
-    BaseHook(_manager)
-  {
-    if (address(_manager) == address(0)) revert FixedFeeSwapHook_InvalidManager();
+  constructor(VaultShareToken _vaultShareToken, uint256 _maturity) {
     if (address(_vaultShareToken) == address(0)) revert FixedFeeSwapHook_InvalidVaultShareToken();
     if (_maturity <= block.timestamp) revert FixedFeeSwapHook_InvalidMaturity();
 
@@ -149,38 +131,13 @@ contract FixedFeeSwapHook is BaseHook {
     MATURITY = _maturity;
 
     emit Initialized(
-      address(_manager),
-      address(_vaultShareToken),
-      address(PRINCIPAL_TOKEN),
-      address(YIELD_TOKEN),
-      _maturity
+      address(_vaultShareToken), address(PRINCIPAL_TOKEN), address(YIELD_TOKEN), _maturity
     );
   }
 
   /*//////////////////////////////////////////////////////////////
                         EXTERNAL FUNCTIONS
   //////////////////////////////////////////////////////////////*/
-
-  /// @notice Returns the permissions for the hook.
-  /// @dev This function is used to validate the hook address at deployment.
-  function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
-    return Hooks.Permissions({
-      beforeInitialize: false,
-      afterInitialize: false,
-      beforeAddLiquidity: false,
-      afterAddLiquidity: false,
-      beforeRemoveLiquidity: false,
-      afterRemoveLiquidity: false,
-      beforeSwap: false,
-      afterSwap: false,
-      beforeDonate: false,
-      afterDonate: false,
-      beforeSwapReturnDelta: false,
-      afterSwapReturnDelta: false,
-      afterAddLiquidityReturnDelta: false,
-      afterRemoveLiquidityReturnDelta: false
-    });
-  }
 
   /// @notice Deposits the vault share token into principal and yield tokens.
   /// @param _amount The amount of vault share token to deposit.
@@ -338,7 +295,7 @@ contract FixedFeeSwapHook is BaseHook {
   /// @param _token The address of the token to transfer.
   /// @param _to The address to transfer the tokens to.
   /// @param _amount The amount of tokens to transfer.
-  /// @dev Following Uniswap v4's convention: address(0) represents native ETH.
+  /// @dev address(0) represents native ETH.
   function _transferFeeToken(address _token, address _to, uint256 _amount) internal {
     if (_token == address(0)) {
       (bool _success,) = payable(_to).call{value: _amount}("");
