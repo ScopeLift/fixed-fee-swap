@@ -761,6 +761,64 @@ contract FixedFeeSwapMarket is BaseHook {
     return _getCashSwapAmountWithinTick(amountIn, principalToBoundary, cashOutToBoundary, priceDiff);
   }
 
+  /// @notice Calculate the PT out for a provided amount of cash in up to the next tick boundary.
+  /// @param _amountIn The amount of cash available to trade for PT.
+  /// @param _currentPrice The price calculated with the current yield tick.
+  /// @param _nextTick The next initialized tick within one word which is set as the boundary.
+  /// @dev This note documents a cash→PT swap where the trader provides cash in and receives PT out. This
+  /// function computes a single segment; the outer loop in `_executeSwapLoop` orchestrates multiple segments
+  /// and handles tick crossing. The swap may cross one or more initialized tick boundaries. Because the price is expressed via the
+  /// discount factor exp(-r * t), the swap must be evaluated segment-by-segment between initialized
+  /// ticks, consuming cash to move the yield from the current yield r0 toward the next boundary yield rNext.
+  /// 
+  /// The concrete scenario assumed by this note is t = 0.5, an initial yield r0 = 665, and the next
+  /// initialized tick boundary at rNext = 650. The swap starts in segment 1 with active liquidity
+  /// L1 = 3,500,000. If the swap reaches the boundary and crosses the initialized tick, the active
+  /// liquidity updates to L2 = 1,000,000 for segment 2. The trader is selling 6,000 units of cash.
+  /// 
+  /// The implementation first computes how much cash is required to move from the current yield r to the
+  /// next initialized tick at yield rNext within the current segment liquidity L. The cash required to
+  /// reach the next tick boundary is:
+  /// 
+  ///     Cash_in_seg = (L / t) * (exp(-rNext * t) - exp(-r * t))
+  /// 
+  /// where r is the yield at the start of the segment step and L is the active segment liquidity
+  /// (L = L1 before the first crossing, and L = L2 after crossing to the next segment).
+  ///
+  /// If `Cash_in_seg` is less than or equal to the trader's remaining cash budget, then the swap reaches the
+  /// boundary at rNext = 650. In that case, the implementation consumes exactly `Cash_in_seg` cash, updates
+  /// the state to the boundary yield, and returns `(cashInToBoundary, principalOutToBoundary, nextTickPrice,
+  /// nextTick)`, signaling to the caller that a tick crossing is needed. The caller crosses the initialized
+  /// tick (updating `feeGrowthOutside` and adjusting `activeLiquidity` from L1 to L2) before invoking this
+  /// function again. This loop continues until either the cash is fully consumed or the swap can no longer
+  /// reach the next boundary with the remaining cash.
+  /// 
+  /// If instead the trader’s remaining cash is insufficient to reach the next initialized tick, the swap
+  /// stays within the current segment. In that partial-fill case, the remaining cash amount C moves the
+  /// discount factor from exp(-r0 * t) to a new level exp(-r1 * t) according to the segment liquidity.
+  /// Solving for the end yield r1 gives:
+  /// 
+  ///     r1 = -(1 / t) * ln( exp(-r0 * t) + (t / L) * C )
+  /// 
+  /// where r0 is the yield at the start of this final segment step (665 for the first segment in this
+  /// scenario), L is the active liquidity for that step (L1 unless the boundary has already been crossed),
+  /// and C is the remaining cash being swapped in during this step. The implementation must ensure the
+  /// quantity inside the logarithm remains strictly positive; under correct direction conventions this
+  /// should hold automatically, but defensive checks are appropriate because an invalid sign convention or
+  /// an over-consumption bug would violate the domain of ln().
+  /// 
+  /// Once r1 is computed, the swap finalizes within the segment, and the PT out for that final step (and
+  /// thus the total PT out for the trade) is derived from the protocol's cash→PT accounting using the
+  /// updated end yield. When the swap completes within a tick range, this function delegates to
+  /// `_getPrincipalSwapAmountWithinTick`, which computes the partial amounts proportionally. The total swap
+  /// outcome is the cumulative PT out across any full boundary-crossing steps plus the PT out from this
+  /// final in-segment step, and the final yield state is r1 (or the final boundary yield if the last step
+  /// landed exactly on an initialized tick).
+  /// @return amountInConsumed Cash consumed in this step. Equals `_amountIn` if the swap completes within
+  /// the tick range, otherwise equals `cashInToBoundary` when the boundary is reached.
+  /// @return principalOut PT tokens to send to the trader for this segment.
+  /// @return newPrice Price after this step, to be used as `_currentPrice` in the next iteration.
+  /// @return newTick Tick after this step. If equal to `_nextTick`, the caller should cross the tick.
   function _getPrincipalSwapAmount(int256 _amountIn, int256 _currentPrice, int24 _nextTick)
     internal
     returns (uint256, uint256, int256, int24)
