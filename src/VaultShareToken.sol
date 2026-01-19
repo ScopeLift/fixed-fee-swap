@@ -8,6 +8,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 // Internal imports
 import {FeeTracking} from "src/lib/FeeTracking.sol";
+import {IFeeTrackingToken} from "src/interface/IFeeTrackingToken.sol";
 
 /// @title VaultShareToken
 /// @author [ScopeLift](https://scopelift.co)
@@ -26,7 +27,7 @@ import {FeeTracking} from "src/lib/FeeTracking.sol";
 ///     - Users only earn while they hold shares
 ///     - Reward distribution never loops over all holders
 ///     - Mint/burn/transfer are correctly compensated over time
-contract VaultShareToken is ERC20 {
+contract VaultShareToken is ERC20, IFeeTrackingToken {
   using FeeTracking for FeeTracking.GlobalFees;
   using FeeTracking for FeeTracking.UserFees;
 
@@ -36,28 +37,6 @@ contract VaultShareToken is ERC20 {
 
   /// @notice Thrown when a transfer fails.
   error VaultShareToken_TransferFailed();
-
-  /*//////////////////////////////////////////////////////////////
-                          EVENTS
-  //////////////////////////////////////////////////////////////*/
-
-  /// @notice Emitted when the global cumulative fee index for token0 and token1 are updated.
-  /// @param newglobalFeeIndex0Scaled Updated global cumulative fee index for token0
-  /// @param newglobalFeeIndex1Scaled Updated global cumulative fee index for token1
-  /// @param collectedFeeToken0 Amount of token0 fees collected from the pool.
-  /// @param collectedFeeToken1 Amount of token1 fees collected from the pool.
-  event FeeIndexesUpdated(
-    uint256 newglobalFeeIndex0Scaled,
-    uint256 newglobalFeeIndex1Scaled,
-    uint256 collectedFeeToken0,
-    uint256 collectedFeeToken1
-  );
-
-  /// @notice Emitted when a user claims their accrued fees.
-  /// @param user The address that claimed fees.
-  /// @param token0Amount Amount of token0 fees claimed.
-  /// @param token1Amount Amount of token1 fees claimed.
-  event FeesClaimed(address indexed user, uint256 token0Amount, uint256 token1Amount);
 
   /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
