@@ -9,6 +9,7 @@ import {YieldToken} from "src/YieldToken.sol";
 import {FeeTracking} from "src/lib/FeeTracking.sol";
 import {ERC20Mock} from "test/mock/ERC20Mock.sol";
 import {NonPayableContractMock} from "test/mock/NonPayableContractMock.sol";
+import {IFeeTrackingToken} from "src/interface/IFeeTrackingToken.sol";
 
 contract YieldTokenTest is Test {
   YieldToken internal yieldToken;
@@ -439,7 +440,7 @@ contract UpdateFees is YieldTokenTest {
     uint256 _expectedFeeIndex1 = _calculateFeeIndex(_collectedFeeToken1, _mintAmount);
 
     vm.expectEmit();
-    emit YieldToken.FeeIndexesUpdated(
+    emit IFeeTrackingToken.FeeIndexesUpdated(
       _expectedFeeIndex0, _expectedFeeIndex1, _collectedFeeToken0, _collectedFeeToken1
     );
 
@@ -946,7 +947,7 @@ contract Claim is YieldTokenTest {
       _calculateAccruedFees(_mintAmount, _globalFeeIndex1, _userIndex1Before);
 
     vm.expectEmit();
-    emit YieldToken.FeesClaimed(_user, _expectedAccruedToken0, _expectedAccruedToken1);
+    emit IFeeTrackingToken.FeesClaimed(_user, _expectedAccruedToken0, _expectedAccruedToken1);
 
     vm.prank(hook);
     yieldToken.claim(_user);
