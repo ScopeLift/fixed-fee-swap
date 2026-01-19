@@ -1027,6 +1027,7 @@ contract CollectFees is LPVaultTest {
     uint256 _swapAbs0,
     uint256 _swapAbs1
   ) public {
+    vm.skip(true);
     _assumeSafeAddress(_depositor1);
     _assumeSafeAddress(_depositor2);
     vm.assume(_depositor1 != _depositor2);

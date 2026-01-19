@@ -45,7 +45,7 @@ contract ZapperTest is Test {
     // Choose a maturity strictly in the future
     maturity = block.timestamp + 30 days;
 
-    fixedFeeSwapHook = new FixedFeeSwapHookHarness(poolManager, vaultShareToken, maturity);
+    fixedFeeSwapHook = new FixedFeeSwapHookHarness(vaultShareToken, maturity);
 
     zapper = new Zapper(fixedFeeSwapHook);
 
