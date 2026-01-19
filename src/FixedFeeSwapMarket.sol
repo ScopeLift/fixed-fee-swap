@@ -109,6 +109,7 @@ contract FixedFeeSwapMarket is BaseHook {
     uint24 _feeRate,
     IPoolManager _manager
   ) BaseHook(_manager) {
+    if (_feeRate >= FEE_DENOMINATOR) revert FixedFeeSwap__FeeRateTooHigh();
     START_TIME = uint48(block.timestamp);
     MATURITY = uint48(block.timestamp) + _lengthOfMarket;
     TOKEN0 = IERC20(_token0);
@@ -146,6 +147,13 @@ contract FixedFeeSwapMarket is BaseHook {
   error FixedFeeSwap__LiquidityDeltaMustBeNegative();
 
   error FixedFeeSwap__InsufficientPositionLiquidity();
+
+  error FixedFeeSwap__FeeRateTooHigh();
+
+  /// @notice Emitted when fees are collected from a position
+  event FeesCollected(
+    bytes32 indexed positionId, address indexed recipient, uint128 amount0, uint128 amount1
+  );
 
   function _scaledTimeElapsedWad() internal view returns (uint256) {
     uint256 elapsed = block.timestamp - START_TIME;
@@ -298,7 +306,8 @@ contract FixedFeeSwapMarket is BaseHook {
       _calculateSwap(amountInNet.toInt256(), currentPrice, nextTick, ctx.principalForCash);
     if (stepNet == 0) revert FixedFeeSwap__SwapStepProducedZeroIn();
 
-    // Convert NET to GROSS
+    // Convert NET to GROSS. Clamp to remaining gross to handle rounding edge cases
+    // where _grossFromNet slightly overshoots due to rounding up.
     stepGross = _grossFromNet(stepNet);
     if (stepGross > amountInGrossRemaining) stepGross = amountInGrossRemaining;
     if (stepGross < stepNet) revert FixedFeeSwap__InvalidHookParams();
@@ -366,8 +375,9 @@ contract FixedFeeSwapMarket is BaseHook {
     // Update liquidity without overwriting fee fields
     position.liquidity = position.liquidity + _liquidity.toInt128();
 
-    // Initialize or refresh snapshots when liquidity transitions from 0 -> positive
-    if (isNew || liquidityBefore == 0) {
+    // Initialize snapshots when liquidity transitions from 0 -> positive
+    // (isNew implies liquidityBefore == 0, so we only need to check liquidityBefore)
+    if (liquidityBefore == 0) {
       _refreshFeeSnapshots(position);
     }
 
@@ -464,13 +474,13 @@ contract FixedFeeSwapMarket is BaseHook {
     // Accrue pending fees before collection
     _accruePositionFees(position);
 
-    // Calculate amounts to collect
-    amount0 = amount0Requested == 0
+    // Calculate amounts to collect (0 means collect all, otherwise min of requested and owed)
+    amount0 = (amount0Requested == 0 || amount0Requested > position.tokensOwed0)
       ? position.tokensOwed0
-      : (amount0Requested > position.tokensOwed0 ? position.tokensOwed0 : amount0Requested);
-    amount1 = amount1Requested == 0
+      : amount0Requested;
+    amount1 = (amount1Requested == 0 || amount1Requested > position.tokensOwed1)
       ? position.tokensOwed1
-      : (amount1Requested > position.tokensOwed1 ? position.tokensOwed1 : amount1Requested);
+      : amount1Requested;
 
     // Update owed amounts (CEI: update state before transfers)
     position.tokensOwed0 -= amount0;
@@ -479,6 +489,8 @@ contract FixedFeeSwapMarket is BaseHook {
     // Transfer fees
     if (amount0 > 0) TOKEN0.safeTransfer(recipient, amount0);
     if (amount1 > 0) TOKEN1.safeTransfer(recipient, amount1);
+
+    emit FeesCollected(positionId, recipient, amount0, amount1);
   }
 
   /// @notice Validates position exists and caller is owner, returns storage pointer
@@ -557,8 +569,6 @@ contract FixedFeeSwapMarket is BaseHook {
         });
       }
     }
-
-    return BalanceDelta({amount0: 0, amount1: 0});
   }
 
   function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
@@ -753,6 +763,8 @@ contract FixedFeeSwapMarket is BaseHook {
     (uint256 fg0, uint256 fg1) = _getFeeGrowthInside(position.tickLower, position.tickUpper);
     uint256 liq = uint256(uint128(position.liquidity));
 
+    // Note: Cast to uint128 assumes fee amounts won't exceed type(uint128).max.
+    // This is safe in practice as it would require mass fee accumulation beyond realistic volumes.
     position.tokensOwed0 += uint128(FixedPointMathLib.mulDiv(fg0 - position.feeGrowthInside0LastX128, liq, Q128));
     position.tokensOwed1 += uint128(FixedPointMathLib.mulDiv(fg1 - position.feeGrowthInside1LastX128, liq, Q128));
 
@@ -794,6 +806,8 @@ contract FixedFeeSwapMarket is BaseHook {
   }
 
   /// @notice Updates fee growth outside values when crossing a tick
+  /// @dev Crossing a tick flips the meaning of "outside" - subtracting from global inverts
+  ///      the above/below perspective. This is the standard Uniswap v3 tick crossing pattern.
   /// @param tick The tick being crossed
   function _crossTick(int24 tick) internal {
     TickInfo storage info = ticks[tick];
