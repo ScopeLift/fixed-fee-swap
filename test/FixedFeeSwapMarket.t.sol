@@ -3394,7 +3394,8 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     _warpFromStart(MARKET_LENGTH / 2);
     _initializePrice();
 
-    // Move yield positive so cash->principal increases price toward a higher limit while staying < 1.
+    // Move yield positive so cash->principal increases price toward a higher limit while staying <
+    // 1.
     _swap(bob, int256(_ptForOneBip() * 500), true, 0);
 
     uint256 priceLimit = uint256(hook.tickToPrice(300));
