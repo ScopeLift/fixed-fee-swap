@@ -3789,7 +3789,11 @@ contract LPFees is _BeforeSwap {
 
     assertGt(collected0, 0, "Should have collected TOKEN0 fees");
     assertEq(collected1, 0, "Should not have collected TOKEN1 fees (no cash->principal swaps)");
-    assertEq(aliceToken0After - aliceToken0Before, collected0, "Balance should increase by collected amount");
+    assertEq(
+      aliceToken0After - aliceToken0Before,
+      collected0,
+      "Balance should increase by collected amount"
+    );
   }
 
   /// @dev Only position owner can collect fees
@@ -3897,7 +3901,7 @@ contract LPFees is _BeforeSwap {
     feeHook.increaseLiquidity(positionId, 1e19, type(uint256).max, type(uint256).max);
 
     // Check position after
-    (,, , int128 liqAfter) = feeHook.getPositionInfo(positionId);
+    (,,, int128 liqAfter) = feeHook.getPositionInfo(positionId);
     assertEq(liqAfter, liqBefore + int128(1e19), "Liquidity should increase");
 
     // The fees should still be collectible
@@ -3976,8 +3980,8 @@ contract LPFees is _BeforeSwap {
 /// @dev These tests validate that _getCashSwapAmountWithinTick (using expWad) and
 /// _getPrincipalSwapAmountWithinTick (using lnWad) produce correct results for
 /// fractional tick movements.
-/// @dev Deprecated: these tests were moved into `_BeforeSwap` to match the file's test organization.
-/// Kept abstract to avoid running twice in CI while preserving history.
+/// @dev Deprecated: these tests were moved into `_BeforeSwap` to match the file's test
+/// organization. Kept abstract to avoid running twice in CI while preserving history.
 abstract contract WithinTickExactMath is FixedFeeSwapMarketTest {
   using FixedPointMathLib for int256;
   using FixedPointMathLib for uint256;
@@ -4076,7 +4080,9 @@ abstract contract WithinTickExactMath is FixedFeeSwapMarketTest {
     uint256 cashAfter = token1.balanceOf(bob);
     uint256 cashOut = cashAfter - cashBefore;
 
-    assertEq(hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick");
+    assertEq(
+      hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick"
+    );
 
     // Price should change (decrease for PT→cash)
     assertTrue(priceAfter < priceBefore, "Price should decrease for PT->cash swap");
@@ -4088,13 +4094,17 @@ abstract contract WithinTickExactMath is FixedFeeSwapMarketTest {
     assertEq(tickAfter, tickBefore, "Tick should not change for sub-1-bip PT->cash swap");
 
     // Prevent "snap-to-tick" price updates: if tick didn't change, the new price must still move.
-    assertTrue(priceAfter < tickPriceBefore, "Price should be strictly below tick price after fractional move");
+    assertTrue(
+      priceAfter < tickPriceBefore,
+      "Price should be strictly below tick price after fractional move"
+    );
   }
 
   /// @notice Verify small cash→PT swaps produce non-zero PT output
   function testFuzz_SmallCashSwapProducesNonZeroPT(uint256 smallAmount) public {
     // First do a PT→cash swap to move tick positive (so we have room to swap back)
-    uint256 setupAmount = _ptForOneBip() * 100; // Move 100 bips to ensure we're well into positive territory
+    uint256 setupAmount = _ptForOneBip() * 100; // Move 100 bips to ensure we're well into positive
+    // territory
     _swap(bob, int256(setupAmount), true, 0);
 
     // Use a range of cash amounts - not tied to exact boundary calculations
@@ -4112,7 +4122,9 @@ abstract contract WithinTickExactMath is FixedFeeSwapMarketTest {
     uint256 ptAfter = token0.balanceOf(bob);
     uint256 ptOut = ptAfter - ptBefore;
 
-    assertEq(hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick");
+    assertEq(
+      hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick"
+    );
 
     // PT output should be non-zero for reasonable input sizes
     assertTrue(ptOut > 0, "Cash swap should produce non-zero PT output");
@@ -4162,7 +4174,9 @@ abstract contract WithinTickExactMath is FixedFeeSwapMarketTest {
 
     _swap(bob, int256(smallAmount), true, 0);
 
-    assertEq(hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick");
+    assertEq(
+      hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick"
+    );
     assertEq(hook.getCurrentTick(), tickBefore, "Tick should not change for sub-1-bip swap");
 
     uint256 cashOut = token1.balanceOf(bob) - cashBefore;
@@ -4192,7 +4206,9 @@ abstract contract WithinTickExactMath is FixedFeeSwapMarketTest {
 
     _swap(bob, int256(smallAmount), false, 0);
 
-    assertEq(hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick");
+    assertEq(
+      hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick"
+    );
     assertLe(hook.getCurrentTick(), tickBefore, "Tick should not increase for cash->PT swap");
 
     uint256 ptOut = token0.balanceOf(bob) - ptBefore;
@@ -4201,7 +4217,9 @@ abstract contract WithinTickExactMath is FixedFeeSwapMarketTest {
     uint256 expectedLinear = (smallAmount * SCALE_FACTOR) / uint256(priceBefore);
 
     // Should be within 20% for these swap sizes (accounting for tick effects and time value)
-    _assertApproxEqRelBps(ptOut, expectedLinear, 2000, "Cash swap should approximate linear relationship");
+    _assertApproxEqRelBps(
+      ptOut, expectedLinear, 2000, "Cash swap should approximate linear relationship"
+    );
   }
 
   /// @notice Verify that price updates even when tick doesn't change (fractional movement)
@@ -4225,7 +4243,9 @@ abstract contract WithinTickExactMath is FixedFeeSwapMarketTest {
     uint256 cashAfter = token1.balanceOf(bob);
     uint256 cashOut = cashAfter - cashBefore;
 
-    assertEq(hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick");
+    assertEq(
+      hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick"
+    );
 
     // For very small swaps, tick might not change (floor rounding)
     // But price MUST change - this is the key behavior we're testing
@@ -4236,15 +4256,30 @@ abstract contract WithinTickExactMath is FixedFeeSwapMarketTest {
     // Sub-1-bip PT input should not advance the discrete tick.
     assertEq(tickAfter, tickBefore, "Tick should not change for sub-1-bip PT->cash swap");
 
-    // Detect snap-to-tick bugs: if tick didn't change, price must not equal the discrete tick price.
-    assertTrue(priceAfter < tickPriceBefore, "Price should be strictly below tick price after fractional move");
+    // Detect snap-to-tick bugs: if tick didn't change, price must not equal the discrete tick
+    // price.
+    assertTrue(
+      priceAfter < tickPriceBefore,
+      "Price should be strictly below tick price after fractional move"
+    );
 
     // Repeat: a second fractional swap should not snap price back up to the discrete tick price.
     _swap(bob, int256(subBipAmount), true, 0);
-    assertEq(hook.getCurrentTick(), tickBefore, "Tick should remain unchanged across repeated sub-bip swaps");
-    assertEq(hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should remain unchanged across repeated swaps");
+    assertEq(
+      hook.getCurrentTick(),
+      tickBefore,
+      "Tick should remain unchanged across repeated sub-bip swaps"
+    );
+    assertEq(
+      hook.getActiveLiquidity(),
+      liquidityBefore,
+      "Active liquidity should remain unchanged across repeated swaps"
+    );
     int256 priceAfter2 = hook.getCurrentPrice();
     assertTrue(priceAfter2 <= priceAfter, "Price should not increase for repeated PT->cash swaps");
-    assertTrue(priceAfter2 < tickPriceBefore, "Price should remain below tick price after repeated fractional moves");
+    assertTrue(
+      priceAfter2 < tickPriceBefore,
+      "Price should remain below tick price after repeated fractional moves"
+    );
   }
 }
