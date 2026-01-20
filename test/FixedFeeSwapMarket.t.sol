@@ -2751,8 +2751,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
     // User should have less TOKEN0
     assertLt(token0.balanceOf(bob), balance0Before, "User should send TOKEN0");
-    // User may receive TOKEN1 (could be 0 for very small swaps due to precision)
-    assertGe(token1.balanceOf(bob), balance1Before, "User should receive TOKEN1 or same");
+    assertGt(token1.balanceOf(bob), balance1Before, "User should receive TOKEN1");
 
     // Hook should have more TOKEN0
     assertGt(token0.balanceOf(address(hook)), hookBalance0Before, "Hook should receive TOKEN0");
@@ -3060,6 +3059,42 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertTrue(priceAfter2 < tickPriceBefore, "Price should remain below tick price");
   }
 
+  function test_WithinTick_ToBoundaryFromMidTick_ConsumesLessThanOneBip() public {
+    _warpFromStart(MARKET_LENGTH / 2);
+    _initializePrice();
+
+    // Initialize an adjacent tick boundary at +1.
+    _mintLiquidityAtTicks(alice, -10, 1, 1e20);
+
+    // Move to mid-tick without crossing +1.
+    uint256 subBipAmount = _ptForOneBip() / 10;
+    _swap(bob, int256(subBipAmount), true, 0);
+
+    int256 priceMid = hook.getCurrentPrice();
+    assertTrue(priceMid > 0, "Price must be initialized");
+
+    uint256 t = (uint256(block.timestamp - hook.getStartTime()) * SCALE_FACTOR)
+      / uint256(hook.getMaturity() - hook.getStartTime());
+    int256 lnP = FixedPointMathLib.lnWad(priceMid);
+    int256 tickBpsMidWad = int256(FixedPointMathLib.mulDiv(uint256(-lnP), BIPS * 1e18, t));
+
+    int256 deltaToBoundaryWad = int256(1e18) - tickBpsMidWad;
+    assertTrue(deltaToBoundaryWad > 0, "Must be below tick +1");
+
+    uint256 ptToBoundary = FixedPointMathLib.mulDivUp(
+      uint256(deltaToBoundaryWad), uint256(hook.getActiveLiquidity()), BIPS * 1e18
+    );
+
+    // Starting mid-tick should require less than a full 1-bip worth of PT to reach +1.
+    assertLt(ptToBoundary, _ptForOneBip(), "PT to boundary should be < 1-bip PT");
+
+    (uint256 consumed,, int256 boundaryPrice, int24 stepTick) =
+      hook.exposed_getCashSwapAmount(int256(ptToBoundary + 1), priceMid, 1);
+    assertEq(stepTick, int24(1), "Should step to tick +1 boundary");
+    assertEq(consumed, ptToBoundary, "Should consume PT to boundary");
+    assertEq(boundaryPrice, hook.tickToPrice(1), "Boundary price should match tickToPrice(+1)");
+  }
+
   // ============ Tick Crossing Tests ============
 
   /// @dev Crossing tick updates active liquidity
@@ -3223,8 +3258,24 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
     if (consumed < amountIn) {
       int256 finalPrice = hook.getCurrentPrice();
-      assertLe(uint256(finalPrice.abs()), priceLimit, "Price should meet/cross limit");
+      assertEq(uint256(finalPrice), priceLimit, "Price should stop at limit");
     }
+  }
+
+  function test_PriceLimitStopsSwap_PrincipalForCash_StopsExactlyAtLimit() public {
+    _warpFromStart(MARKET_LENGTH / 2);
+    _initializePrice();
+
+    // Choose a limit that is reachable within the current word (below tick 255).
+    uint256 priceLimit = uint256(hook.tickToPrice(250));
+    uint256 amountIn = (uint256(hook.getActiveLiquidity()) * 260) / BIPS;
+
+    uint256 balance0Before = token0.balanceOf(bob);
+    _swap(bob, int256(amountIn), true, priceLimit);
+
+    uint256 consumed = balance0Before - token0.balanceOf(bob);
+    assertLt(consumed, amountIn, "Should stop early due to price limit");
+    assertEq(uint256(hook.getCurrentPrice()), priceLimit, "Final price should equal limit");
   }
 
   /// @dev If the price limit is already satisfied at entry, the swap should be a no-op (except lazy
@@ -3335,8 +3386,26 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
     if (consumed < amountIn) {
       int256 finalPrice = hook.getCurrentPrice();
-      assertGe(uint256(finalPrice.abs()), priceLimit, "Price should meet/cross limit");
+      assertEq(uint256(finalPrice), priceLimit, "Price should stop at limit");
     }
+  }
+
+  function test_PriceLimitStopsSwap_CashForPrincipal_StopsExactlyAtLimit() public {
+    _warpFromStart(MARKET_LENGTH / 2);
+    _initializePrice();
+
+    // Move yield positive so cash->principal increases price toward a higher limit while staying < 1.
+    _swap(bob, int256(_ptForOneBip() * 500), true, 0);
+
+    uint256 priceLimit = uint256(hook.tickToPrice(300));
+    uint256 amountIn = (uint256(hook.getActiveLiquidity()) * 250) / BIPS;
+
+    uint256 balance1Before = token1.balanceOf(bob);
+    _swap(bob, int256(amountIn), false, priceLimit);
+
+    uint256 consumed = balance1Before - token1.balanceOf(bob);
+    assertLt(consumed, amountIn, "Should stop early due to price limit");
+    assertEq(uint256(hook.getCurrentPrice()), priceLimit, "Final price should equal limit");
   }
 
   // ============ Edge Case Tests ============
@@ -3652,6 +3721,24 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
     vm.expectRevert(stdError.arithmeticError);
     hook.exposed_beforeSwap(poorUser, poolKey, defaultSwapParams, hookParams);
+  }
+
+  // ============ Revert: Zero Output ============
+
+  function test_RevertWhen_SwapStepProducesZeroOut_PrincipalForCash() public {
+    _warpFromStart(MARKET_LENGTH / 2);
+    _initializePrice();
+
+    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__SwapStepProducedZeroOut.selector);
+    _swap(bob, 1, true, 0);
+  }
+
+  function test_RevertWhen_SwapStepProducesZeroOut_CashForPrincipal() public {
+    _warpFromStart(MARKET_LENGTH / 2);
+    _initializePrice();
+
+    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__SwapStepProducedZeroOut.selector);
+    _swap(bob, 1, false, 0);
   }
 }
 
