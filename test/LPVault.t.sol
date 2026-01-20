@@ -7,6 +7,7 @@ import {Deployers} from "lib/v4-periphery/lib/v4-core/test/utils/Deployers.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {LPVault} from "src/LPVault.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {ImmutableState} from "v4-periphery/src/base/ImmutableState.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {PoolId} from "v4-core/types/PoolId.sol";
 import {Currency} from "v4-core/types/Currency.sol";
@@ -556,7 +557,7 @@ contract Deposit is LPVaultTest {
     });
 
     vm.prank(_caller);
-    vm.expectRevert(LPVault.LPVault__OnlyPoolManager.selector);
+    vm.expectRevert(ImmutableState.NotPoolManager.selector);
     vault.unlockCallback(abi.encode(LPVault.CallbackAction.Deposit, abi.encode(_callbackData)));
   }
 
