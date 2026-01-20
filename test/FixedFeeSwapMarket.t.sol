@@ -2709,6 +2709,33 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     return hook.exposed_beforeSwap(sender, poolKey, defaultSwapParams, hookParams);
   }
 
+  function _ptForOneBip() internal view returns (uint256) {
+    return uint256(hook.getActiveLiquidity()) / BIPS;
+  }
+
+  function _initializePrice() internal returns (int256) {
+    if (hook.getCurrentPrice() != 0) return hook.getCurrentPrice();
+
+    int24 tick = hook.getCurrentTick();
+    int256 expectedPrice = hook.tickToPrice(tick);
+    _swap(bob, 1, true, uint256(expectedPrice));
+
+    int256 price = hook.getCurrentPrice();
+    assertTrue(price > 0, "Price must be initialized");
+    return price;
+  }
+
+  function _assertApproxEqRelBps(uint256 a, uint256 b, uint256 toleranceBps, string memory err)
+    internal
+    pure
+  {
+    if (a == 0 && b == 0) return;
+    uint256 diff = a > b ? a - b : b - a;
+    uint256 maxVal = a > b ? a : b;
+    uint256 maxDiff = (maxVal * toleranceBps) / BIPS;
+    assertTrue(diff <= maxDiff, err);
+  }
+
   // ============ Token Transfer Tests ============
 
   /// @dev Principal for cash: user sends TOKEN0, receives TOKEN1
@@ -2879,6 +2906,158 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     // (This may not hold if the swap crosses a tick boundary)
     uint128 activeAfter = hook.getActiveLiquidity();
     assertEq(activeAfter, activeBefore, "Active liquidity unchanged within tick");
+  }
+
+  // ============ Within-Tick Tests ============
+
+  function testFuzz_WithinTick_SmallPTSwapProducesNonZeroCash(uint256 smallAmount) public {
+    _warpFromStart(MARKET_LENGTH / 2);
+    _initializePrice();
+
+    uint256 ptForOneBip = _ptForOneBip();
+    smallAmount = bound(smallAmount, ptForOneBip / 100, ptForOneBip - 1);
+
+    uint128 liquidityBefore = hook.getActiveLiquidity();
+    int24 tickBefore = hook.getCurrentTick();
+    int256 priceBefore = hook.getCurrentPrice();
+    int256 tickPriceBefore = hook.tickToPrice(tickBefore);
+    uint256 cashBefore = token1.balanceOf(bob);
+
+    _swap(bob, int256(smallAmount), true, 0);
+
+    assertEq(
+      hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick"
+    );
+    assertEq(hook.getCurrentTick(), tickBefore, "Tick should not change for sub-1-bip PT->cash");
+
+    int256 priceAfter = hook.getCurrentPrice();
+    uint256 cashOut = token1.balanceOf(bob) - cashBefore;
+
+    assertTrue(priceAfter < priceBefore, "Price should decrease for PT->cash");
+    assertTrue(cashOut > 0, "Small PT swap should produce non-zero cash output");
+    assertTrue(priceAfter < tickPriceBefore, "Price should be strictly below tick price");
+  }
+
+  function testFuzz_WithinTick_SmallCashSwapProducesNonZeroPT(uint256 smallAmount) public {
+    _warpFromStart(MARKET_LENGTH / 2);
+    _initializePrice();
+
+    // Move yield positive so we have room to swap back.
+    uint256 setupAmount = _ptForOneBip() * 100;
+    _swap(bob, int256(setupAmount), true, 0);
+
+    smallAmount = bound(smallAmount, 1e16, 1e18);
+
+    uint128 liquidityBefore = hook.getActiveLiquidity();
+    int24 tickBefore = hook.getCurrentTick();
+    int256 priceBefore = hook.getCurrentPrice();
+    uint256 ptBefore = token0.balanceOf(bob);
+
+    _swap(bob, int256(smallAmount), false, 0);
+
+    assertEq(
+      hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick"
+    );
+
+    int24 tickAfter = hook.getCurrentTick();
+    int256 priceAfter = hook.getCurrentPrice();
+    uint256 ptOut = token0.balanceOf(bob) - ptBefore;
+
+    assertTrue(ptOut > 0, "Cash swap should produce non-zero PT output");
+    assertTrue(priceAfter > priceBefore, "Price should increase for cash->PT");
+    assertLe(tickAfter, tickBefore, "Tick should not increase for cash->PT");
+  }
+
+  function testFuzz_WithinTick_SmallPTSwap_ApproximatesLinear(uint256 smallAmount) public {
+    _warpFromStart(MARKET_LENGTH / 2);
+    _initializePrice();
+
+    uint256 ptForOneBip = _ptForOneBip();
+    smallAmount = bound(smallAmount, ptForOneBip / 1000, ptForOneBip / 10);
+
+    uint128 liquidityBefore = hook.getActiveLiquidity();
+    int24 tickBefore = hook.getCurrentTick();
+    int256 priceBefore = hook.getCurrentPrice();
+    uint256 cashBefore = token1.balanceOf(bob);
+
+    _swap(bob, int256(smallAmount), true, 0);
+
+    assertEq(
+      hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick"
+    );
+    assertEq(hook.getCurrentTick(), tickBefore, "Tick should not change for sub-1-bip swap");
+
+    uint256 cashOut = token1.balanceOf(bob) - cashBefore;
+    uint256 expectedLinear = (uint256(priceBefore) * smallAmount) / SCALE_FACTOR;
+
+    _assertApproxEqRelBps(cashOut, expectedLinear, 500, "Small PT swap should approximate linear");
+  }
+
+  function testFuzz_WithinTick_SmallCashSwap_ApproximatesLinear(uint256 smallAmount) public {
+    _warpFromStart(MARKET_LENGTH / 2);
+    _initializePrice();
+
+    uint256 setupAmount = _ptForOneBip() * 100;
+    _swap(bob, int256(setupAmount), true, 0);
+
+    smallAmount = bound(smallAmount, 1e15, 1e17);
+
+    uint128 liquidityBefore = hook.getActiveLiquidity();
+    int24 tickBefore = hook.getCurrentTick();
+    int256 priceBefore = hook.getCurrentPrice();
+    assertTrue(priceBefore > 0, "Price must be initialized");
+    uint256 ptBefore = token0.balanceOf(bob);
+
+    _swap(bob, int256(smallAmount), false, 0);
+
+    assertEq(
+      hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick"
+    );
+    assertLe(hook.getCurrentTick(), tickBefore, "Tick should not increase for cash->PT swap");
+
+    uint256 ptOut = token0.balanceOf(bob) - ptBefore;
+    uint256 expectedLinear = (smallAmount * SCALE_FACTOR) / uint256(priceBefore);
+
+    _assertApproxEqRelBps(ptOut, expectedLinear, 2000, "Cash swap should approximate linear");
+  }
+
+  function test_WithinTick_FractionalMove_UpdatesPriceButNotTick() public {
+    _warpFromStart(MARKET_LENGTH / 2);
+    _initializePrice();
+
+    uint256 subBipAmount = _ptForOneBip() / 10;
+
+    uint128 liquidityBefore = hook.getActiveLiquidity();
+    int24 tickBefore = hook.getCurrentTick();
+    int256 priceBefore = hook.getCurrentPrice();
+    int256 tickPriceBefore = hook.tickToPrice(tickBefore);
+    uint256 cashBefore = token1.balanceOf(bob);
+
+    _swap(bob, int256(subBipAmount), true, 0);
+
+    assertEq(
+      hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick"
+    );
+    assertEq(hook.getCurrentTick(), tickBefore, "Tick should not change for sub-1-bip PT->cash");
+
+    int256 priceAfter = hook.getCurrentPrice();
+    uint256 cashOut = token1.balanceOf(bob) - cashBefore;
+
+    assertTrue(priceAfter != priceBefore, "Price must change even for sub-bip swaps");
+    assertTrue(priceAfter < priceBefore, "Price should decrease for PT->cash");
+    assertTrue(cashOut > 0, "Fractional swap should produce non-zero output");
+    assertTrue(priceAfter < tickPriceBefore, "Price should be strictly below tick price");
+
+    _swap(bob, int256(subBipAmount), true, 0);
+    assertEq(hook.getCurrentTick(), tickBefore, "Tick should remain unchanged across repeats");
+    assertEq(
+      hook.getActiveLiquidity(),
+      liquidityBefore,
+      "Active liquidity should remain unchanged across repeats"
+    );
+    int256 priceAfter2 = hook.getCurrentPrice();
+    assertTrue(priceAfter2 <= priceAfter, "Price should not increase for repeated PT->cash");
+    assertTrue(priceAfter2 < tickPriceBefore, "Price should remain below tick price");
   }
 
   // ============ Tick Crossing Tests ============
@@ -3786,5 +3965,286 @@ contract LPFees is _BeforeSwap {
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__InsufficientPositionLiquidity.selector);
     vm.prank(alice);
     feeHook.decreaseLiquidity(positionId, -(liqBefore + 1), 0, 0);
+  }
+}
+
+// ============================================================================
+// WithinTickExactMath - Tests for ln/exp exact math implementation
+// ============================================================================
+
+/// @notice Tests verifying the exact math implementation in within-tick calculations
+/// @dev These tests validate that _getCashSwapAmountWithinTick (using expWad) and
+/// _getPrincipalSwapAmountWithinTick (using lnWad) produce correct results for
+/// fractional tick movements.
+/// @dev Deprecated: these tests were moved into `_BeforeSwap` to match the file's test organization.
+/// Kept abstract to avoid running twice in CI while preserving history.
+abstract contract WithinTickExactMath is FixedFeeSwapMarketTest {
+  using FixedPointMathLib for int256;
+  using FixedPointMathLib for uint256;
+
+  PoolKey internal poolKey;
+  SwapParams internal defaultSwapParams;
+
+  // Large liquidity to allow testing sub-1-bip swaps
+  uint128 internal constant TEST_LIQUIDITY = 1e24;
+
+  function setUp() public virtual override {
+    super.setUp();
+
+    poolKey = PoolKey({
+      currency0: Currency.wrap(address(token0)),
+      currency1: Currency.wrap(address(token1)),
+      fee: 0,
+      tickSpacing: 1,
+      hooks: IHooks(address(hook))
+    });
+
+    defaultSwapParams = SwapParams({zeroForOne: true, amountSpecified: -1e18, sqrtPriceLimitX96: 0});
+
+    // Use a stable, non-trivial time fraction so cash deltas and rounding are measurable.
+    _warpFromStart(MARKET_LENGTH / 2);
+    // Mint large liquidity to allow testing very small relative swaps
+    _mintLiquidityAtTicks(alice, -1000, 1000, TEST_LIQUIDITY);
+  }
+
+  // ============ Helper Functions ============
+
+  function _encodeHookParams(int256 amountIn, bool principalForCash, uint256 priceLimitWad)
+    internal
+    pure
+    returns (bytes memory)
+  {
+    return abi.encode(amountIn, principalForCash, priceLimitWad);
+  }
+
+  function _swap(address sender, int256 amountIn, bool principalForCash, uint256 priceLimitWad)
+    internal
+    returns (bytes4, BeforeSwapDelta, uint24)
+  {
+    bytes memory hookParams = _encodeHookParams(amountIn, principalForCash, priceLimitWad);
+    return hook.exposed_beforeSwap(sender, poolKey, defaultSwapParams, hookParams);
+  }
+
+  /// @notice Returns the PT amount needed to move exactly 1 bip
+  function _ptForOneBip() internal view returns (uint256) {
+    return uint256(hook.getActiveLiquidity()) / BIPS;
+  }
+
+  /// @notice Asserts two values are approximately equal within a relative tolerance (in bps)
+  function _assertApproxEqRelBps(uint256 a, uint256 b, uint256 toleranceBps, string memory err)
+    internal
+    pure
+  {
+    if (a == 0 && b == 0) return;
+    uint256 diff = a > b ? a - b : b - a;
+    uint256 maxVal = a > b ? a : b;
+    uint256 maxDiff = (maxVal * toleranceBps) / BIPS;
+    assertTrue(diff <= maxDiff, err);
+  }
+
+  // ============ Category 1: Fractional Yield / Small Swap Behavior ============
+
+  /// @notice Initialize price by doing a small swap, returns the price after initialization
+  function _initializePrice() internal returns (int256) {
+    // `currentPrice` is lazily initialized in `_beforeSwap`. Use a minimal swap to trigger it.
+    if (hook.getCurrentPrice() == 0) _swap(bob, 1, true, 0);
+    int256 price = hook.getCurrentPrice();
+    assertTrue(price > 0, "Price must be initialized");
+    return price;
+  }
+
+  /// @notice Verify small PT→cash swaps (sub-1-bip) produce non-zero cash output
+  /// @dev The key improvement of exact math: fractional tick movements still produce output
+  function testFuzz_SmallPTSwapProducesNonZeroCash(uint256 smallAmount) public {
+    // Initialize price first
+    _initializePrice();
+
+    uint256 ptForOneBip = _ptForOneBip();
+    // Bound to sub-1-bip amounts (but not too small to avoid rounding to 0)
+    smallAmount = bound(smallAmount, ptForOneBip / 100, ptForOneBip - 1);
+
+    uint128 liquidityBefore = hook.getActiveLiquidity();
+    int24 tickBefore = hook.getCurrentTick();
+    int256 priceBefore = hook.getCurrentPrice();
+    int256 tickPriceBefore = hook.tickToPrice(tickBefore);
+    uint256 cashBefore = token1.balanceOf(bob);
+
+    _swap(bob, int256(smallAmount), true, 0); // PT→cash
+
+    int24 tickAfter = hook.getCurrentTick();
+    int256 priceAfter = hook.getCurrentPrice();
+    uint256 cashAfter = token1.balanceOf(bob);
+    uint256 cashOut = cashAfter - cashBefore;
+
+    assertEq(hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick");
+
+    // Price should change (decrease for PT→cash)
+    assertTrue(priceAfter < priceBefore, "Price should decrease for PT->cash swap");
+
+    // Cash output should be non-zero for reasonable input sizes
+    assertTrue(cashOut > 0, "Small PT swap should produce non-zero cash output");
+
+    // Sub-1-bip inputs should not advance the discrete tick.
+    assertEq(tickAfter, tickBefore, "Tick should not change for sub-1-bip PT->cash swap");
+
+    // Prevent "snap-to-tick" price updates: if tick didn't change, the new price must still move.
+    assertTrue(priceAfter < tickPriceBefore, "Price should be strictly below tick price after fractional move");
+  }
+
+  /// @notice Verify small cash→PT swaps produce non-zero PT output
+  function testFuzz_SmallCashSwapProducesNonZeroPT(uint256 smallAmount) public {
+    // First do a PT→cash swap to move tick positive (so we have room to swap back)
+    uint256 setupAmount = _ptForOneBip() * 100; // Move 100 bips to ensure we're well into positive territory
+    _swap(bob, int256(setupAmount), true, 0);
+
+    // Use a range of cash amounts - not tied to exact boundary calculations
+    smallAmount = bound(smallAmount, 1e16, 1e18); // 0.01 to 1 token
+
+    uint128 liquidityBefore = hook.getActiveLiquidity();
+    int24 tickBefore = hook.getCurrentTick();
+    int256 priceBefore = hook.getCurrentPrice();
+    uint256 ptBefore = token0.balanceOf(bob);
+
+    _swap(bob, int256(smallAmount), false, 0); // cash→PT
+
+    int24 tickAfter = hook.getCurrentTick();
+    int256 priceAfter = hook.getCurrentPrice();
+    uint256 ptAfter = token0.balanceOf(bob);
+    uint256 ptOut = ptAfter - ptBefore;
+
+    assertEq(hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick");
+
+    // PT output should be non-zero for reasonable input sizes
+    assertTrue(ptOut > 0, "Cash swap should produce non-zero PT output");
+
+    // Price should increase for cash→PT swaps
+    assertTrue(priceAfter > priceBefore, "Price should increase for cash->PT swap");
+
+    // Tick should decrease or stay same (cash→PT decreases yield)
+    assertLe(tickAfter, tickBefore, "Tick should not increase for cash->PT swap");
+  }
+
+  /// @notice First swap initializes price and produces output
+  function test_FirstSwapInitializesPriceAndProducesOutput() public {
+    // For a very first swap, currentPrice starts at 0 and gets initialized
+    // Then the swap updates it. We test that it's properly initialized and updated.
+    uint256 swapAmount = 1e18;
+
+    assertEq(hook.getCurrentPrice(), 0, "Price should be 0 before first swap");
+
+    uint256 cashBefore = token1.balanceOf(bob);
+    _swap(bob, int256(swapAmount), true, 0); // PT→cash
+
+    int256 priceAfter = hook.getCurrentPrice();
+    uint256 cashOut = token1.balanceOf(bob) - cashBefore;
+
+    // After swap, price should be initialized and non-zero
+    assertTrue(priceAfter != 0, "Price should be non-zero after swap");
+
+    // Cash output should be non-zero
+    assertTrue(cashOut > 0, "Swap should produce non-zero output");
+  }
+
+  /// @notice Verify PT→cash output approximates linear relationship for small swaps
+  /// @dev For small swaps: cashOut ≈ P0 * ptIn (first-order approximation)
+  function testFuzz_SmallPTSwap_ApproximatesLinear(uint256 smallAmount) public {
+    // Initialize price first
+    _initializePrice();
+
+    uint256 ptForOneBip = _ptForOneBip();
+    // Use very small amounts where linear approximation is most accurate
+    smallAmount = bound(smallAmount, ptForOneBip / 1000, ptForOneBip / 10);
+
+    uint128 liquidityBefore = hook.getActiveLiquidity();
+    int256 priceBefore = hook.getCurrentPrice();
+    int24 tickBefore = hook.getCurrentTick();
+    uint256 cashBefore = token1.balanceOf(bob);
+
+    _swap(bob, int256(smallAmount), true, 0);
+
+    assertEq(hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick");
+    assertEq(hook.getCurrentTick(), tickBefore, "Tick should not change for sub-1-bip swap");
+
+    uint256 cashOut = token1.balanceOf(bob) - cashBefore;
+
+    // Linear approximation: cashOut ≈ price * ptIn / 1e18 (price is WAD-scaled)
+    uint256 expectedLinear = (uint256(priceBefore) * smallAmount) / SCALE_FACTOR;
+
+    // Should be within 5% for small swaps (accounting for second-order effects and rounding)
+    _assertApproxEqRelBps(cashOut, expectedLinear, 500, "Small PT swap should approximate linear");
+  }
+
+  /// @notice Verify cash→PT output approximates linear relationship for small swaps
+  /// @dev For small swaps: ptOut ≈ cashIn / P0 (first-order approximation)
+  function testFuzz_SmallCashSwap_ApproximatesLinear(uint256 smallAmount) public {
+    // First move tick positive
+    uint256 setupAmount = _ptForOneBip() * 100;
+    _swap(bob, int256(setupAmount), true, 0);
+
+    // Use a small but reasonable amount range
+    smallAmount = bound(smallAmount, 1e15, 1e17); // 0.001 to 0.1 token
+
+    uint128 liquidityBefore = hook.getActiveLiquidity();
+    int256 priceBefore = hook.getCurrentPrice();
+    assertTrue(priceBefore > 0, "Price must be initialized");
+    int24 tickBefore = hook.getCurrentTick();
+    uint256 ptBefore = token0.balanceOf(bob);
+
+    _swap(bob, int256(smallAmount), false, 0);
+
+    assertEq(hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick");
+    assertLe(hook.getCurrentTick(), tickBefore, "Tick should not increase for cash->PT swap");
+
+    uint256 ptOut = token0.balanceOf(bob) - ptBefore;
+
+    // Linear approximation: ptOut ≈ cashIn * 1e18 / price
+    uint256 expectedLinear = (smallAmount * SCALE_FACTOR) / uint256(priceBefore);
+
+    // Should be within 20% for these swap sizes (accounting for tick effects and time value)
+    _assertApproxEqRelBps(ptOut, expectedLinear, 2000, "Cash swap should approximate linear relationship");
+  }
+
+  /// @notice Verify that price updates even when tick doesn't change (fractional movement)
+  function test_FractionalMove_UpdatesPriceButNotTick() public {
+    // Initialize price first
+    _initializePrice();
+
+    // Use amount that's definitely less than 1 bip
+    uint256 subBipAmount = _ptForOneBip() / 10;
+
+    uint128 liquidityBefore = hook.getActiveLiquidity();
+    int24 tickBefore = hook.getCurrentTick();
+    int256 priceBefore = hook.getCurrentPrice();
+    int256 tickPriceBefore = hook.tickToPrice(tickBefore);
+    uint256 cashBefore = token1.balanceOf(bob);
+
+    _swap(bob, int256(subBipAmount), true, 0);
+
+    int24 tickAfter = hook.getCurrentTick();
+    int256 priceAfter = hook.getCurrentPrice();
+    uint256 cashAfter = token1.balanceOf(bob);
+    uint256 cashOut = cashAfter - cashBefore;
+
+    assertEq(hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should not change within tick");
+
+    // For very small swaps, tick might not change (floor rounding)
+    // But price MUST change - this is the key behavior we're testing
+    assertTrue(priceAfter != priceBefore, "Price must change even for sub-bip swaps");
+    assertTrue(priceAfter < priceBefore, "Price should decrease for PT->cash");
+    assertTrue(cashOut > 0, "Fractional swap should produce non-zero output");
+
+    // Sub-1-bip PT input should not advance the discrete tick.
+    assertEq(tickAfter, tickBefore, "Tick should not change for sub-1-bip PT->cash swap");
+
+    // Detect snap-to-tick bugs: if tick didn't change, price must not equal the discrete tick price.
+    assertTrue(priceAfter < tickPriceBefore, "Price should be strictly below tick price after fractional move");
+
+    // Repeat: a second fractional swap should not snap price back up to the discrete tick price.
+    _swap(bob, int256(subBipAmount), true, 0);
+    assertEq(hook.getCurrentTick(), tickBefore, "Tick should remain unchanged across repeated sub-bip swaps");
+    assertEq(hook.getActiveLiquidity(), liquidityBefore, "Active liquidity should remain unchanged across repeated swaps");
+    int256 priceAfter2 = hook.getCurrentPrice();
+    assertTrue(priceAfter2 <= priceAfter, "Price should not increase for repeated PT->cash swaps");
+    assertTrue(priceAfter2 < tickPriceBefore, "Price should remain below tick price after repeated fractional moves");
   }
 }
