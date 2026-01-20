@@ -5,15 +5,16 @@ import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {Currency} from "v4-core/types/Currency.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
-import {IUnlockCallback} from "v4-core/interfaces/callback/IUnlockCallback.sol";
-import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
+import {BalanceDelta, toBalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {SqrtPriceMath} from "v4-core/libraries/SqrtPriceMath.sol";
 import {SafeCast} from "v4-core/libraries/SafeCast.sol";
 import {FullMath} from "v4-core/libraries/FullMath.sol";
-import {LiquidityAmounts} from "v4-periphery/src/libraries/LiquidityAmounts.sol";
+import {SafeCallback} from "v4-periphery/src/base/SafeCallback.sol";
+import {DeltaResolver} from "v4-periphery/src/base/DeltaResolver.sol";
+import {SlippageCheck} from "v4-periphery/src/libraries/SlippageCheck.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
@@ -22,10 +23,11 @@ import {VaultShareToken} from "src/VaultShareToken.sol";
 /// @author [ScopeLift](https://scopelift.co)
 /// @notice A contract that wraps a set of static LP positions in a single Uniswap v4 pool.
 /// @dev Positions and their weight distributions are fixed at contract creation.
-contract LPVault is VaultShareToken, IUnlockCallback {
+contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   using PoolIdLibrary for PoolKey;
   using StateLibrary for IPoolManager;
   using SafeCast for uint256;
+  using SafeCast for int256;
   using SafeERC20 for IERC20;
 
   /// @notice Structure for liquidity position configuration.
@@ -92,14 +94,8 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   /// @notice Thrown when the total liquidity is zero.
   error LPVault__ZeroLiquidity();
 
-  /// @notice Thrown when required token amounts exceed the provided maximums.
-  error LPVault__MaxAmountsExceeded();
-
   /// @notice Thrown when the shares amount is invalid (zero or exceeds balance).
   error LPVault__InvalidShares();
-
-  /// @notice Thrown when the callback is called by a non-pool manager.
-  error LPVault__OnlyPoolManager();
 
   /// @notice Emitted when the pool manager is set during construction.
   /// @param poolManager The address of the Uniswap v4 pool manager.
@@ -150,6 +146,7 @@ contract LPVault is VaultShareToken, IUnlockCallback {
       Currency.unwrap(_targetPoolKey.currency0),
       Currency.unwrap(_targetPoolKey.currency1)
     )
+    SafeCallback(_poolManager)
   {
     POOL_MANAGER = _poolManager;
     emit PoolManagerSet(address(_poolManager));
@@ -285,10 +282,8 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     emit FeesCollected(_collectedFee0, _collectedFee1);
   }
 
-  /// @inheritdoc IUnlockCallback
-  function unlockCallback(bytes calldata _data) external virtual returns (bytes memory) {
-    if (msg.sender != address(POOL_MANAGER)) revert LPVault__OnlyPoolManager();
-
+  /// @inheritdoc SafeCallback
+  function _unlockCallback(bytes calldata _data) internal virtual override returns (bytes memory) {
     (CallbackAction _action, bytes memory _actionData) = abi.decode(_data, (CallbackAction, bytes));
 
     if (_action == CallbackAction.Deposit) return _handleDepositCallback(_actionData);
@@ -472,31 +467,10 @@ contract LPVault is VaultShareToken, IUnlockCallback {
       _totalFeeDelta1 += _feeDelta.amount1();
     }
 
-    if (_totalDelta0 < 0 && uint256(-_totalDelta0) > _amount0Max) {
-      revert LPVault__MaxAmountsExceeded();
-    }
-    if (_totalDelta1 < 0 && uint256(-_totalDelta1) > _amount1Max) {
-      revert LPVault__MaxAmountsExceeded();
-    }
-  }
-
-  /// @notice Calculates the liquidity for a single position based on token amounts.
-  /// @param _position The liquidity position configuration.
-  /// @param _sqrtPriceX96 The current sqrt price of the pool.
-  /// @param _amount0 The amount of token0 for this position.
-  /// @param _amount1 The amount of token1 for this position.
-  /// @return _liquidity The calculated liquidity for this position.
-  function _calculateLiquidityForAmounts(
-    LiquidityPosition memory _position,
-    uint160 _sqrtPriceX96,
-    uint256 _amount0,
-    uint256 _amount1
-  ) internal pure virtual returns (uint128 _liquidity) {
-    uint160 _sqrtPriceLowerX96 = TickMath.getSqrtPriceAtTick(_position.tickLower);
-    uint160 _sqrtPriceUpperX96 = TickMath.getSqrtPriceAtTick(_position.tickUpper);
-
-    _liquidity = LiquidityAmounts.getLiquidityForAmounts(
-      _sqrtPriceX96, _sqrtPriceLowerX96, _sqrtPriceUpperX96, _amount0, _amount1
+    SlippageCheck.validateMaxIn(
+      toBalanceDelta(_totalDelta0.toInt128(), _totalDelta1.toInt128()),
+      _amount0Max.toUint128(),
+      _amount1Max.toUint128()
     );
   }
 
@@ -543,22 +517,17 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     // Settle tokens owed to the pool (negative delta).
     if (_delta0 < 0) {
       _amount0Used = uint256(-_delta0);
-      _settleToken(targetPoolKey.currency0, _payer, _amount0Used);
+      _settle(targetPoolKey.currency0, _payer, _amount0Used);
     }
     if (_delta1 < 0) {
       _amount1Used = uint256(-_delta1);
-      _settleToken(targetPoolKey.currency1, _payer, _amount1Used);
+      _settle(targetPoolKey.currency1, _payer, _amount1Used);
     }
   }
 
-  /// @notice Settles a token payment to the pool manager.
-  /// @param _currency The currency to settle.
-  /// @param _payer The address paying the tokens.
-  /// @param _amount The amount to settle.
-  function _settleToken(Currency _currency, address _payer, uint256 _amount) internal virtual {
-    POOL_MANAGER.sync(_currency);
+  /// @inheritdoc DeltaResolver
+  function _pay(Currency _currency, address _payer, uint256 _amount) internal virtual override {
     IERC20(Currency.unwrap(_currency)).safeTransferFrom(_payer, address(POOL_MANAGER), _amount);
-    POOL_MANAGER.settle();
   }
 
   /// @notice Removes liquidity from all positions based on the provided amounts.
@@ -617,11 +586,11 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     // Take tokens owed to us by the pool (positive delta).
     if (_delta0 > 0) {
       _amount0Received = uint256(_delta0);
-      POOL_MANAGER.take(targetPoolKey.currency0, _receiver, _amount0Received);
+      _take(targetPoolKey.currency0, _receiver, _amount0Received);
     }
     if (_delta1 > 0) {
       _amount1Received = uint256(_delta1);
-      POOL_MANAGER.take(targetPoolKey.currency1, _receiver, _amount1Received);
+      _take(targetPoolKey.currency1, _receiver, _amount1Received);
     }
   }
 
