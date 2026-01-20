@@ -9,8 +9,8 @@ import {SwapParams} from "v4-core/types/PoolOperation.sol";
 import {BeforeSwapDelta} from "v4-core/types/BeforeSwapDelta.sol";
 
 contract FixedFeeSwapMarketHarness is FixedFeeSwapMarket {
-  constructor(uint48 _length, address _t0, address _t1, IPoolManager _mgr)
-    FixedFeeSwapMarket(_length, _t0, _t1, _mgr)
+  constructor(uint48 _length, address _t0, address _t1, uint24 _feeRate, IPoolManager _mgr)
+    FixedFeeSwapMarket(_length, _t0, _t1, _feeRate, _mgr)
   {}
 
   /// @notice Skip hook address validation for testing
