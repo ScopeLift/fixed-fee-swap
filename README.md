@@ -1,159 +1,235 @@
-# ScopeLift Foundry Template
+# Fixed Fee Swap: Principal and Yield Token Separation
 
-An opinionated template for [Foundry](https://github.com/foundry-rs/foundry) projects.
+- [Fixed Fee Swap: Principal and Yield Token Separation](#fixed-fee-swap-principal-and-yield-token-separation)
+  - [About](#about)
+  - [Architecture](#architecture)
+    - [Summary](#summary)
+    - [Component Summary](#component-summary)
+      - [LPVault](#lpvault)
+      - [VaultShareToken](#vaultsharetoken)
+      - [FixedFeeSwap](#fixedfeeswap)
+      - [PrincipalToken](#principaltoken)
+      - [YieldToken](#yieldtoken)
+      - [FeeTracking Library](#feetracking-library)
+      - [Zapper](#zapper)
+    - [Diagram](#diagram)
+  - [Development](#development)
+    - [Getting Started](#getting-started)
+    - [Build](#build)
+    - [Test](#test)
+  - [License](#license)
 
-_**Please read the full README before using this template.**_
+## About
 
-- [Usage](#usage)
-- [Overview](#overview)
-  - [`foundry.toml`](#foundrytoml)
-  - [CI](#ci)
-  - [Test Structure](#test-structure)
-- [Configuration](#configuration)
-  - [Coverage](#coverage)
-  - [Slither](#slither)
-  - [GitHub Code Scanning](#github-code-scanning)
+Fixed Fee Swap is a protocol for separating LP positions into their principal and yield components. It allows liquidity providers to tokenize their Uniswap v4 LP positions and split them into Principal Tokens (PT) and Yield Tokens (YT), enabling more flexible yield strategies.
 
-## Usage
+Key features:
 
-To use this template, use one of the below approaches:
+- **Principal/Yield Separation**: Split vault shares into PT (representing principal) and YT (representing future yield/fees)
+- **Time-based Maturity**: Each split has a defined maturity date after which PT holders can redeem 1:1 for the underlying vault shares
+- **Pro-rata Fee Distribution**: Fees earned by the LP position are distributed to YT holders proportionally using an efficient cumulative fee-per-share index model
+- **Flash Loan Support**: PT tokens support ERC-3156 flash loans, enabling advanced DeFi strategies
 
-1. Run `forge init --template ScopeLift/foundry-template` in an empty directory.
-2. Click [here](https://github.com/ScopeLift/foundry-template/generate) to generate a new repository from this template.
-3. Click the "Use this template" button from this repo's [home page](https://github.com/ScopeLift/foundry-template).
+## Architecture
 
-It's also recommend to install [scopelint](https://github.com/ScopeLift/scopelint), which is used in CI.
-You can run this locally with `scopelint fmt` and `scopelint check`.
-Note that these are supersets of `forge fmt` and `forge fmt --check`, so you do not need to run those forge commands when using scopelint.
+### Summary
 
-## Overview
+The system consists of smart contracts that manage Uniswap v4 LP positions and enable principal/yield separation:
 
-This template is designed to be a simple but powerful configuration for Foundry projects, that aims to help you follow Solidity and Foundry [best practices](https://book.getfoundry.sh/tutorials/best-practices)
-Writing secure contracts is hard, so it ships with strict defaults that you can loosen as needed.
+1. **LPVault**: Wraps Uniswap v4 LP positions and issues VaultShareTokens (VST) representing proportional ownership
+2. **FixedFeeSwap**: Enables splitting VST into Principal Tokens and Yield Tokens before a maturity date
+3. **Token System**: PT and YT tokens with built-in fee tracking and distribution mechanisms
+4. **Zapper**: Helper contract for easily buying/selling YT tokens using flash loans
 
-### `foundry.toml`
+### Component Summary
 
-The `foundry.toml` config file comes with:
+#### LPVault
 
-- A `fmt` configuration.
-- `default`, `lite`, and `ci` profiles.
+A contract that wraps a set of static LP positions in a single Uniswap v4 pool. Positions and their weight distributions are fixed at contract creation.
 
-Both of these can of course be modified.
-The `default` and `ci` profiles use the same solc build settings, which are intended to be the production settings, but the `ci` profile is configured to run deeper fuzz and invariant tests.
-The `lite` profile turns the optimizer off, which is useful for speeding up compilation times during development.
+- Manages liquidity across multiple tick ranges with configurable weights (summing to 100%)
+- Issues VaultShareTokens proportional to deposited liquidity
+- Collects swap fees from the pool and distributes them to share holders
+- Inherits from VaultShareToken for integrated fee tracking
 
-It's recommended to keep the solidity configuration of the `default` and `ci` profiles in sync, to avoid accidentally deploying contracts with suboptimal configuration settings when running `forge script`.
-This means you can change the solc settings in the `default` profile and the `lite` profile, but never for the `ci` profile.
+#### VaultShareToken
 
-Note that the `foundry.toml` file is formatted using [Taplo](https://taplo.tamasfe.dev/) via `scopelint fmt`.
+An ERC20 token representing proportional ownership of an LP vault with built-in fee accounting.
 
-### CI
+- Implements fee distribution via cumulative "fee-per-share" indexes
+- Users accrue fees lazily: `accrued += balance * (globalIndex - userIndex) / PRECISION`
+- Ensures O(1) fee accounting per operation with no iteration over holders
+- Supports native ETH as a fee token (using `address(0)` following Uniswap v4 convention)
 
-Robust CI is also included, with a GitHub Actions workflow that does the following:
+#### FixedFeeSwap
 
-- Runs tests with the `ci` profile.
-- Verifies contracts are within the [size limit](https://eips.ethereum.org/EIPS/eip-170) of 24576 bytes.
-- Runs `forge coverage` and verifies a minimum coverage threshold is met.
-- Runs `slither`, integrated with GitHub's [code scanning](https://docs.github.com/en/code-security/code-scanning). See the [Configuration](#configuration) section to learn more.
+The core contract that enables splitting VaultShareTokens into Principal and Yield tokens.
 
-The CI also runs [scopelint](https://github.com/ScopeLift/scopelint) to verify formatting and best practices:
+- **Deposit**: Before maturity, users can deposit VST and receive 1:1 PT and YT
+- **Redeem (before maturity)**: Users must burn equal amounts of PT and YT to receive VST back
+- **Redeem (at/after maturity)**:
+  - The first redeem at or after maturity still requires PT + YT (this closes YT fee collection via `ytFeeCollectionClosed`)
+  - Subsequent redeems only require PT; fees accrued after maturity are distributed proportionally to PT holders
+- Deploys new PT and YT contracts for each maturity period
 
-- Checks that Solidity and TOML files have been formatted.
-  - Solidity checks use the `foundry.toml` config.
-  - Currently the TOML formatting cannot be customized.
-- Validates test names follow a convention of `test(Fork)?(Fuzz)?_(Revert(If_|When_){1})?\w{1,}`. [^naming-convention]
-- Validates constants and immutables are in `ALL_CAPS`.
-- Validates internal functions in `src/` start with a leading underscore.
-- Validates function names and visibility in forge scripts to 1 public `run` method per script. [^script-abi]
+#### PrincipalToken
 
-Note that the foundry-toolchain GitHub Action will cache RPC responses in CI by default, and it will also update the cache when you update your fork tests.
+An ERC20 token representing the principal value of deposited vault shares.
 
-### Test Structure
+- Redeemable 1:1 for VaultShareTokens after maturity
+- Supports ERC-3156 flash loans for capital-efficient strategies
+- Can only be minted/burned by the FixedFeeSwap contract
 
-The test structure is configured to follow recommended [best practices](https://book.getfoundry.sh/tutorials/best-practices).
-It's strongly recommended to read that document, as it covers a range of aspects.
-Consequently, the test structure is as follows:
+#### YieldToken
 
-- The core protocol deploy script is `script/Deploy.sol`.
-  This deploys the contracts and saves their addresses to storage variables.
-- The tests inherit from this deploy script and execute `Deploy.run()` in their `setUp` method.
-  This has the effect of running all tests against your deploy script, giving confidence that your deploy script is correct.
-- Each test contract serves as `describe` block to unit test a function, e.g. `contract Increment` to test the `increment` function.
+An ERC20 token representing the right to fees earned by the underlying LP position.
 
-## Configuration
+- Tracks and distributes fees using the same cumulative index model as VaultShareToken
+- Fees are automatically claimed when tokens are burned
+- After maturity, holders can claim remaining fees and burn their YT via `claimYTFeesAfterMaturity()`
+- Can only be minted/burned by the FixedFeeSwap contract
 
-After creating a new repository from this template, make sure to set any desired [branch protections](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/defining-the-mergeability-of-pull-requests/about-protected-branches) on your repo.
+#### FeeTracking Library
 
-### Coverage
+A shared library implementing the cumulative "fee-per-share" index model for pro-rata fee distribution.
 
-The [`ci.yml`](.github/workflows/ci.yml) has `coverage` configured by default, and contains comments explaining how to modify the configuration.
-It uses:
-The [lcov] CLI tool to filter out the `test/` and `script/` folders from the coverage report.
+- Global fee indexes track total fees earned per share over time
+- Each user stores a checkpoint of the last index they synced to
+- User earnings are accrued lazily on interaction (mint, burn, transfer, claim)
+- Guarantees O(1) fee accounting and prevents over-distribution
 
-- The [romeovs/lcov-reporter-action](https://github.com/romeovs/lcov-reporter-action) action to post a detailed coverage report to the PR. Subsequent commits on the same branch will automatically delete stale coverage comments and post new ones.
-- The [zgosalvez/github-actions-report-lcov](https://github.com/zgosalvez/github-actions-report-lcov) action to fail coverage if a minimum coverage threshold is not met.
+#### Zapper
 
-Be aware of foundry's current coverage limitations:
+A helper contract for buying and selling YT tokens using flash loans.
 
-- You cannot filter files/folders from `forge` directly, so `lcov` is used to do this.
-- `forge coverage` always runs with the optimizer off and without via-ir, so if you need either of these to compile you will not be able to run coverage.
+- **Sell YT**: Flash loan PT, combine with YT to redeem VST, swap portion back to PT to repay loan
+- **Buy YT**: Flash loan PT, swap for VST, deposit to get PT+YT, repay loan with PT, keep YT
 
-Remember not to optimize for coverage, but to optimize for [well thought-out tests](https://book.getfoundry.sh/tutorials/best-practices?highlight=coverage#best-practices-1).
+### Diagram
 
-### Slither
-
-In [`ci.yml`](.github/workflows/ci.yml), you'll notice Slither is configured as follows:
-
-```yml
-slither-args: --filter-paths "./lib|./test" --exclude naming-convention,solc-version
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              Uniswap v4 Pool                                │
+│                         (token0 / token1 liquidity)                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      │ LP positions
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                  LPVault                                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                         VaultShareToken                              │   │
+│  │  • Deposit token0 + token1 → receive VST shares                     │   │
+│  │  • Withdraw VST shares → receive token0 + token1                    │   │
+│  │  • Collect fees from LP positions                                   │   │
+│  │  • Fee tracking via cumulative index                                │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      │ VST
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              FixedFeeSwap                                   │
+│                                                                             │
+│  deposit(VST) ──────────────────────────────────────────────► PT + YT      │
+│                                                                             │
+│  redeem(PT + YT) ◄────────────────── (before maturity) ────── VST          │
+│  redeem(PT only) ◄────────────────── (after maturity) ─────── VST + fees   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                           │                    │
+              ┌────────────┘                    └────────────┐
+              │                                              │
+              ▼                                              ▼
+┌─────────────────────────────┐            ┌─────────────────────────────────┐
+│       PrincipalToken        │            │          YieldToken             │
+│                             │            │                                 │
+│  • Represents principal     │            │  • Represents yield rights      │
+│  • 1:1 redeemable after     │            │  • Receives LP fees before      │
+│    maturity                 │            │    maturity                     │
+│  • ERC-3156 flash loans     │            │  • Fee tracking via cumulative  │
+│                             │            │    index                        │
+└─────────────────────────────┘            └─────────────────────────────────┘
+              │                                              │
+              └────────────────────┬─────────────────────────┘
+                                   │
+                                   ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                 Zapper                                      │
+│                                                                             │
+│  sellYieldToken(YT) ────► Flash loan PT ────► Redeem ────► Swap ────► VST  │
+│  buyYieldToken(VST) ────► Flash loan PT ────► Swap ────► Deposit ────► YT  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-This means Slither is not run on the `lib` or `test` folders, and the [`naming-convention`](https://github.com/crytic/slither/wiki/Detector-Documentation#conformance-to-solidity-naming-conventions) and [solc-version](https://github.com/crytic/slither/wiki/Detector-Documentation#incorrect-versions-of-solidity) checks are disabled.
+## Development
 
-This `slither-args` field is where you can change the Slither configuration for your project, and the defaults above can of course be changed.
+### Getting Started
 
-Notice that Slither will run against `script/` by default.
-Carefully written and tested scripts are key to ensuring complex deployment and scripting pipelines execute as planned, but you are free to disable Slither checks on the scripts folder if it feels like overkill for your use case.
+This repo is built using [Foundry](https://github.com/foundry-rs/foundry).
 
-For more information on configuration Slither, see [the documentation](https://github.com/crytic/slither/wiki/Usage). For more information on configuring the slither action, see the [slither-action](https://github.com/crytic/slither-action) repo.
+1. [Install Foundry](https://book.getfoundry.sh/getting-started/installation)
 
-### GitHub Code Scanning
+2. Clone the repository
 
-As mentioned, the Slither CI step is integrated with GitHub's [code scanning](https://docs.github.com/en/code-security/code-scanning) feature.
-This means when your jobs execute, you'll see two related checks:
+```bash
+git clone https://github.com/ScopeLift/fixed-fee-swap.git
+cd fixed-fee-swap
+```
 
-1. `CI / slither-analyze`
-2. `Code scanning results / Slither`
+3. Install dependencies
 
-The first check is the actual Slither analysis.
-You'll notice in the [`ci.yml`](.github/workflows/ci.yml) file that this check has a configuration of `fail-on: none`.
-This means this step will _never_ fail CI, no matter how many findings there are or what their severity is.
-Instead, this check outputs the findings to a SARIF file[^sarif] to be used in the next check.
+```bash
+forge install
+```
 
-The second check is the GitHub code scanning check.
-The `slither-analyze` job uploads the SARIF report to GitHub, which is then analyzed by GitHub's code scanning feature in this step.
-This is the check that will fail CI if there are Slither findings.
+4. (Optional) Install [scopelint](https://github.com/ScopeLift/scopelint) for formatting and linting
 
-By default when you create a repository, only alerts with the severity level of `Error` will cause a pull request check failure, and checks will succeed with alerts of lower severities.
-However, you can [configure](https://docs.github.com/en/code-security/code-scanning/automatically-scanning-your-code-for-vulnerabilities-and-errors/configuring-code-scanning#defining-the-severities-causing-pull-request-check-failure) which level of slither results cause PR check failures.
+```bash
+cargo install scopelint
+```
 
-It's recommended to conservatively set the failure level to `Any` to start, and to reduce the failure level if you are unable to sufficiently tune Slither or find it to be too noisy.
+### Build
 
-Findings are shown directly on the PR, as well as in your repo's "Security" tab, under the "Code scanning" section.
-Alerts that are dismissed are remembered by GitHub, and will not be shown again on future PRs.
+Build contracts:
 
-Note that code scanning integration [only works](https://docs.github.com/en/code-security/code-scanning/automatically-scanning-your-code-for-vulnerabilities-and-errors/setting-up-code-scanning-for-a-repository) for public repos, or private repos with GitHub Enterprise Cloud and a license for GitHub Advanced Security.
-If you have a private repo and don't want to purchase a license, the best option is probably to:
+```bash
+forge build
+```
 
-- Remove the `Upload SARIF file` step from CI.
-- Change the `Run Slither` step to `fail-on` whichever level you like, and remove the `sarif` output.
-- Use [triage mode](https://github.com/crytic/slither/wiki/Usage#triage-mode) locally and commit the resulting `slither.db.json` file, and make sure CI has access to that file.
+Format code (if scopelint is installed):
 
-[^naming-convention]:
-    A rigorous test naming convention is important for ensuring that tests are easy to understand and maintain, while also making filtering much easier.
-    For example, one benefit is filtering out all reverting tests when generating gas reports.
+```bash
+scopelint fmt
+```
 
-[^script-abi]: Limiting scripts to a single public method makes it easier to understand a script's purpose, and facilitates composability of simple, atomic scripts.
-[^sarif]:
-    [SARIF](https://sarifweb.azurewebsites.net/) (Static Analysis Results Interchange Format) is an industry standard for static analysis results.
-    You can read learn more about SARIF [here](https://github.com/microsoft/sarif-tutorials) and read about GitHub's SARIF support [here](https://docs.github.com/en/code-security/code-scanning/integrating-with-code-scanning/sarif-support-for-code-scanning).
+### Test
+
+Run tests:
+
+```bash
+forge test
+```
+
+Run tests with verbose output:
+
+```bash
+forge test -vvv
+```
+
+Run tests with gas reporting:
+
+```bash
+forge test --gas-report
+```
+
+Run coverage:
+
+```bash
+forge coverage
+```
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
