@@ -48,7 +48,8 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   enum CallbackAction {
     Deposit,
     Withdraw,
-    CollectFees
+    CollectFees,
+    InitializeLiquidity
   }
 
   /// @notice Struct for passing deposit callback data.
@@ -56,6 +57,7 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     address sender;
     uint256 amount0Max;
     uint256 amount1Max;
+    uint128[] liquidityPerPosition;
   }
 
   /// @notice Struct for passing withdraw callback data.
@@ -82,6 +84,9 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   /// @notice The predefined liquidity positions for this vault.
   LiquidityPosition[] public positions;
 
+  /// @notice Whether liquidity has been initialized.
+  bool public liquidityInitialized;
+
   /// @notice Thrown when the sum of position weights doesn't equal BIPS (10,000 BIPs).
   error LPVault__InvalidLiquidityDistribution();
 
@@ -96,6 +101,12 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
 
   /// @notice Thrown when the shares amount is invalid (zero or exceeds balance).
   error LPVault__InvalidShares();
+
+  /// @notice Thrown when liquidity has already been initialized.
+  error LPVault__AlreadyInitialized();
+
+  /// @notice Thrown when attempting deposit before initialization.
+  error LPVault__NotInitialized();
 
   /// @notice Emitted when the pool manager is set during construction.
   /// @param poolManager The address of the Uniswap v4 pool manager.
@@ -179,49 +190,106 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     if (_totalWeight != BIPS) revert LPVault__InvalidLiquidityDistribution();
   }
 
-  /// @notice Deposits tokens into the vault, distributing liquidity across positions by weight.
-  /// @param _amount0Max The maximum amount of token0 to deposit across all positions.
-  /// @param _amount1Max The maximum amount of token1 to deposit across all positions.
-  /// @dev Mints the maximum shares possible given the provided token amounts. Any tokens not used
-  /// for liquidity provision will be returned to the depositor.
+  /// @notice Initializes liquidity for all positions based on configured weights. Can only be called once.
+  /// @param _amount0Max Maximum amount of token0 willing to provide.
+  /// @param _amount1Max Maximum amount of token1 willing to provide.
   /// @return _shares The amount of vault shares minted.
   /// @return _amount0Used The actual amount of token0 used.
   /// @return _amount1Used The actual amount of token1 used.
-  function deposit(uint256 _amount0Max, uint256 _amount1Max)
+  function initializeLiquidity(uint256 _amount0Max, uint256 _amount1Max)
     external
     virtual
     returns (uint256 _shares, uint256 _amount0Used, uint256 _amount1Used)
   {
+    if (liquidityInitialized) revert LPVault__AlreadyInitialized();
+    (uint128[] memory _liquidityPerPosition, uint128 _liquidity0) =
+      _calculateInitialLiquidity(_amount0Max, _amount1Max);
+
+    liquidityInitialized = true;
+
     bytes memory _result = POOL_MANAGER.unlock(
       abi.encode(
-        CallbackAction.Deposit,
+        CallbackAction.InitializeLiquidity,
         abi.encode(
           DepositCallbackData({
-            sender: msg.sender, amount0Max: _amount0Max, amount1Max: _amount1Max
+            sender: msg.sender,
+            amount0Max: _amount0Max,
+            amount1Max: _amount1Max,
+            liquidityPerPosition: _liquidityPerPosition
           })
         )
       )
     );
 
-    (uint128[] memory _liquidityPerPosition, uint256 _amount0, uint256 _amount1) =
-      abi.decode(_result, (uint128[], uint256, uint256));
+    (_amount0Used, _amount1Used) = abi.decode(_result, (uint256, uint256));
 
-    uint128 _newLiquidity = _liquidityPerPosition[0];
-    if (_newLiquidity == 0) revert LPVault__ZeroLiquidity();
+    // Update position liquidity tracking
+    for (uint256 _i = 0; _i < _liquidityPerPosition.length; _i++) {
+      positions[_i].liquidity = _liquidityPerPosition[_i];
+    }
 
-    // Use the first position's liquidity as the share amount since it serves as the reference
-    // for proportional distribution across all positions based on their weights.
-    _shares = uint256(_newLiquidity);
+    // Mint shares equal to position0's liquidity
+    _shares = uint256(_liquidity0);
+    _mint(msg.sender, _shares);
+
+    emit Deposited(msg.sender, _shares, _amount0Used, _amount1Used);
+  }
+
+  /// @notice Deposits tokens into the vault by specifying desired position0 liquidity.
+  /// @param _amount0Max The maximum amount of token0 to deposit across all positions.
+  /// @param _amount1Max The maximum amount of token1 to deposit across all positions.
+  /// @param _liquidity The liquidity to add to position0. Other positions calculated proportionally.
+  /// @dev Requires liquidity to be initialized first via initializeLiquidity().
+  /// @return _shares The amount of vault shares minted (equal to _liquidity).
+  /// @return _amount0Used The actual amount of token0 used.
+  /// @return _amount1Used The actual amount of token1 used.
+  function deposit(uint256 _amount0Max, uint256 _amount1Max, uint128 _liquidity)
+    external
+    virtual
+    returns (uint256 _shares, uint256 _amount0Used, uint256 _amount1Used)
+  {
+    if (!liquidityInitialized) revert LPVault__NotInitialized();
+    if (_liquidity == 0) revert LPVault__ZeroLiquidity();
+
+    // Calculate liquidity for each position based on current ratios
+    uint128[] memory _liquidityPerPosition = new uint128[](positions.length);
+    uint128 _position0Liquidity = positions[0].liquidity;
+
+    for (uint256 _i = 0; _i < positions.length; _i++) {
+      if (_i == 0) {
+        _liquidityPerPosition[0] = _liquidity;
+      } else {
+        // positionN.liquidity / position0.liquidity * requested_liquidity
+        _liquidityPerPosition[_i] =
+          FullMath.mulDiv(_liquidity, positions[_i].liquidity, _position0Liquidity).toUint128();
+      }
+    }
+
+    bytes memory _result = POOL_MANAGER.unlock(
+      abi.encode(
+        CallbackAction.Deposit,
+        abi.encode(
+          DepositCallbackData({
+            sender: msg.sender,
+            amount0Max: _amount0Max,
+            amount1Max: _amount1Max,
+            liquidityPerPosition: _liquidityPerPosition
+          })
+        )
+      )
+    );
+
+    (_amount0Used, _amount1Used) = abi.decode(_result, (uint256, uint256));
 
     // Update per-position liquidity.
     for (uint256 _i = 0; _i < _liquidityPerPosition.length; _i++) {
       positions[_i].liquidity += _liquidityPerPosition[_i];
     }
 
+    // Mint shares equal to position0's liquidity added
+    _shares = uint256(_liquidity);
     _mint(msg.sender, _shares);
 
-    _amount0Used = _amount0;
-    _amount1Used = _amount1;
     emit Deposited(msg.sender, _shares, _amount0Used, _amount1Used);
   }
 
@@ -242,14 +310,21 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
 
     // Calculate liquidity to remove from each position.
     // Position 0 uses shares directly (1:1 mapping), while other positions
-    // are calculated proportionally based on their liquidity relative to total supply.
+    // are calculated proportionally based on their liquidity relative to position0's liquidity.
+    uint128 _position0Liquidity = positions[0].liquidity;
     for (uint256 _i = 0; _i < positions.length; _i++) {
       if (_i == 0) {
         _liquidityToRemove[0] = uint128(_shares);
       } else {
-        _liquidityToRemove[_i] = uint128((_shares * positions[_i].liquidity) / totalSupply());
+        _liquidityToRemove[_i] =
+          FullMath.mulDiv(_shares, positions[_i].liquidity, _position0Liquidity).toUint128();
       }
       positions[_i].liquidity -= _liquidityToRemove[_i];
+    }
+
+    // If all liquidity is withdrawn, reset initialization to allow re-initialization.
+    if (positions[0].liquidity == 0) {
+      liquidityInitialized = false;
     }
 
     // Burn shares before making external calls (reentrancy protection).
@@ -288,12 +363,13 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
 
     if (_action == CallbackAction.Deposit) return _handleDepositCallback(_actionData);
     if (_action == CallbackAction.Withdraw) return _handleWithdrawCallback(_actionData);
+    if (_action == CallbackAction.InitializeLiquidity) return _handleInitializeLiquidityCallback(_actionData);
     return _handleCollectFeesCallback();
   }
 
   /// @notice Handles the deposit callback logic.
   /// @param _actionData The encoded deposit callback data.
-  /// @return The encoded result containing liquidity per position and amounts used.
+  /// @return The encoded result containing amounts used.
   function _handleDepositCallback(bytes memory _actionData)
     internal
     virtual
@@ -301,13 +377,10 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   {
     DepositCallbackData memory _callbackData = abi.decode(_actionData, (DepositCallbackData));
 
-    (
-      uint128[] memory _liquidityPerPosition,
-      int256 _totalDelta0,
-      int256 _totalDelta1,
-      int256 _totalFeeDelta0,
-      int256 _totalFeeDelta1
-    ) = _addLiquidityToPositions(_callbackData.amount0Max, _callbackData.amount1Max);
+    (int256 _totalDelta0, int256 _totalDelta1, int256 _totalFeeDelta0, int256 _totalFeeDelta1) =
+      _addLiquidityToPositions(
+        _callbackData.liquidityPerPosition, _callbackData.amount0Max, _callbackData.amount1Max
+      );
 
     (uint256 _amount0Used, uint256 _amount1Used) =
       _settleDeltas(_totalDelta0, _totalDelta1, _callbackData.sender);
@@ -315,7 +388,27 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     // Collect fees and update fee-per-share indexes.
     _collectFees(_totalFeeDelta0, _totalFeeDelta1);
 
-    return abi.encode(_liquidityPerPosition, _amount0Used, _amount1Used);
+    return abi.encode(_amount0Used, _amount1Used);
+  }
+
+  /// @notice Handles the initialize liquidity callback logic.
+  /// @param _actionData The encoded callback data.
+  /// @return The encoded result containing amounts used.
+  function _handleInitializeLiquidityCallback(bytes memory _actionData)
+    internal
+    virtual
+    returns (bytes memory)
+  {
+    DepositCallbackData memory _callbackData = abi.decode(_actionData, (DepositCallbackData));
+
+    (int256 _totalDelta0, int256 _totalDelta1,,) = _addLiquidityToPositions(
+      _callbackData.liquidityPerPosition, _callbackData.amount0Max, _callbackData.amount1Max
+    );
+
+    (uint256 _amount0Used, uint256 _amount1Used) =
+      _settleDeltas(_totalDelta0, _totalDelta1, _callbackData.sender);
+
+    return abi.encode(_amount0Used, _amount1Used);
   }
 
   /// @notice Handles the withdraw callback logic.
@@ -389,66 +482,72 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     }
   }
 
-  /// @notice Adds liquidity to all positions based on proportional liquidity weights.
-  /// @param _amount0Max The maximum amount of token0 available for the deposit.
-  /// @param _amount1Max The maximum amount of token1 available for the deposit.
-  /// @return _liquidityPerPosition Array of liquidity added to each position.
-  /// @return _totalDelta0 The total delta for token0 (negative = owed to pool).
-  /// @return _totalDelta1 The total delta for token1 (negative = owed to pool).
-  /// @return _totalFeeDelta0 The total fee delta for token0 (positive = fees earned).
-  /// @return _totalFeeDelta1 The total fee delta for token1 (positive = fees earned).
-  function _addLiquidityToPositions(uint256 _amount0Max, uint256 _amount1Max)
+  /// @notice Calculates initial per-position liquidity based on weights and max token amounts.
+  /// @param _amount0Max Maximum amount of token0 willing to provide.
+  /// @param _amount1Max Maximum amount of token1 willing to provide.
+  /// @return _liquidityPerPosition Array of liquidity amounts for each position.
+  /// @return _liquidity0 The liquidity assigned to position0.
+  function _calculateInitialLiquidity(uint256 _amount0Max, uint256 _amount1Max)
     internal
-    virtual
-    returns (
-      uint128[] memory _liquidityPerPosition,
-      int256 _totalDelta0,
-      int256 _totalDelta1,
-      int256 _totalFeeDelta0,
-      int256 _totalFeeDelta1
-    )
+    view
+    returns (uint128[] memory _liquidityPerPosition, uint128 _liquidity0)
   {
     (uint160 _sqrtPriceX96,,,) = POOL_MANAGER.getSlot0(targetPoolKey.toId());
-
-    _liquidityPerPosition = new uint128[](positions.length);
 
     uint16 _weight0 = positions[0].weight;
     if (_weight0 == 0) revert LPVault__ZeroLiquidity();
 
-    uint256 _liquidity0;
-    {
-      uint256 _totalAmount0Ref;
-      uint256 _totalAmount1Ref;
-      for (uint256 _i = 0; _i < positions.length; _i++) {
-        LiquidityPosition memory _position = positions[_i];
-        (uint256 _amount0Ref, uint256 _amount1Ref) =
-          _getAmountsForLiquidity(_position, _sqrtPriceX96, uint128(_position.weight));
-        _totalAmount0Ref += _amount0Ref;
-        _totalAmount1Ref += _amount1Ref;
-      }
-
-      if (_totalAmount0Ref == 0 && _totalAmount1Ref == 0) revert LPVault__ZeroLiquidity();
-
-      _liquidity0 = type(uint256).max;
-      if (_totalAmount0Ref > 0) {
-        _liquidity0 = FullMath.mulDiv(_amount0Max, _weight0, _totalAmount0Ref);
-      }
-
-      if (_totalAmount1Ref > 0) {
-        uint256 _liquidity0ByAmount1 = FullMath.mulDiv(_amount1Max, _weight0, _totalAmount1Ref);
-        if (_liquidity0ByAmount1 < _liquidity0) _liquidity0 = _liquidity0ByAmount1;
-      }
-    }
-    if (_liquidity0 == 0) revert LPVault__ZeroLiquidity();
-
+    uint256 _totalAmount0Ref;
+    uint256 _totalAmount1Ref;
     for (uint256 _i = 0; _i < positions.length; _i++) {
       LiquidityPosition memory _position = positions[_i];
+      (uint256 _amount0Ref, uint256 _amount1Ref) =
+        _getAmountsForLiquidity(_position, _sqrtPriceX96, uint128(_position.weight));
+      _totalAmount0Ref += _amount0Ref;
+      _totalAmount1Ref += _amount1Ref;
+    }
 
-      uint128 _liquidity = _i == 0
-        ? _liquidity0.toUint128()
-        : FullMath.mulDiv(_liquidity0, _position.weight, _weight0).toUint128();
+    if (_totalAmount0Ref == 0 && _totalAmount1Ref == 0) revert LPVault__ZeroLiquidity();
 
-      _liquidityPerPosition[_i] = _liquidity;
+    uint256 _liquidity0Full = type(uint256).max;
+    if (_totalAmount0Ref > 0) {
+      _liquidity0Full = FullMath.mulDiv(_amount0Max, _weight0, _totalAmount0Ref);
+    }
+    if (_totalAmount1Ref > 0) {
+      uint256 _liquidity0ByAmount1 = FullMath.mulDiv(_amount1Max, _weight0, _totalAmount1Ref);
+      if (_liquidity0ByAmount1 < _liquidity0Full) _liquidity0Full = _liquidity0ByAmount1;
+    }
+    if (_liquidity0Full == 0) revert LPVault__ZeroLiquidity();
+
+    _liquidity0 = _liquidity0Full.toUint128();
+    _liquidityPerPosition = new uint128[](positions.length);
+    _liquidityPerPosition[0] = _liquidity0;
+    for (uint256 _i = 1; _i < positions.length; _i++) {
+      _liquidityPerPosition[_i] =
+        FullMath.mulDiv(_liquidity0Full, positions[_i].weight, _weight0).toUint128();
+    }
+  }
+
+  /// @notice Adds liquidity to all positions using pre-calculated amounts.
+  /// @param _liquidityPerPosition Array of liquidity to add to each position.
+  /// @param _amount0Max Maximum token0 for slippage protection.
+  /// @param _amount1Max Maximum token1 for slippage protection.
+  /// @return _totalDelta0 The total delta for token0 (negative = owed to pool).
+  /// @return _totalDelta1 The total delta for token1 (negative = owed to pool).
+  /// @return _totalFeeDelta0 The total fee delta for token0 (positive = fees earned).
+  /// @return _totalFeeDelta1 The total fee delta for token1 (positive = fees earned).
+  function _addLiquidityToPositions(
+    uint128[] memory _liquidityPerPosition,
+    uint256 _amount0Max,
+    uint256 _amount1Max
+  )
+    internal
+    virtual
+    returns (int256 _totalDelta0, int256 _totalDelta1, int256 _totalFeeDelta0, int256 _totalFeeDelta1)
+  {
+    for (uint256 _i = 0; _i < positions.length; _i++) {
+      LiquidityPosition memory _position = positions[_i];
+      uint128 _liquidity = _liquidityPerPosition[_i];
 
       (BalanceDelta _delta, BalanceDelta _feeDelta) = POOL_MANAGER.modifyLiquidity(
         targetPoolKey,
