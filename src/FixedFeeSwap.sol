@@ -13,32 +13,32 @@ import {YieldToken} from "src/YieldToken.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
 import {FeeTracking} from "src/lib/FeeTracking.sol";
 
-contract FixedFeeSwapHook {
+contract FixedFeeSwap {
   using SafeERC20 for IERC20;
   /*//////////////////////////////////////////////////////////////
                         ERRORS
   //////////////////////////////////////////////////////////////*/
 
   /// @notice Thrown when split is attempted after maturity is reached.
-  error FixedFeeSwapHook_SplitAfterMaturity();
+  error FixedFeeSwap_SplitAfterMaturity();
 
   /// @notice Thrown when deposit is attempted with an invalid amount.
-  error FixedFeeSwapHook_InvalidAmount();
+  error FixedFeeSwap_InvalidAmount();
 
   /// @notice Thrown when split is attempted with an invalid maturity.
-  error FixedFeeSwapHook_InvalidMaturity();
+  error FixedFeeSwap_InvalidMaturity();
 
   /// @notice Thrown when split is attempted with an invalid vault share token.
-  error FixedFeeSwapHook_InvalidVaultShareToken();
+  error FixedFeeSwap_InvalidVaultShareToken();
 
   /// @notice Thrown when action is attempted with an insufficient balance.
-  error FixedFeeSwapHook_InsufficientBalance();
+  error FixedFeeSwap_InsufficientBalance();
 
   /// @notice Thrown when an action is attempted before maturity is reached.
-  error FixedFeeSwapHook_BeforeMaturity();
+  error FixedFeeSwap_BeforeMaturity();
 
   /// @notice Thrown when a transfer fails.
-  error FixedFeeSwapHook_TransferFailed();
+  error FixedFeeSwap_TransferFailed();
 
   /*//////////////////////////////////////////////////////////////
                         EVENTS
@@ -106,8 +106,8 @@ contract FixedFeeSwapHook {
   /// @param _vaultShareToken The vault share token.
   /// @param _maturity The maturity of the hook.
   constructor(VaultShareToken _vaultShareToken, uint256 _maturity) {
-    if (address(_vaultShareToken) == address(0)) revert FixedFeeSwapHook_InvalidVaultShareToken();
-    if (_maturity <= block.timestamp) revert FixedFeeSwapHook_InvalidMaturity();
+    if (address(_vaultShareToken) == address(0)) revert FixedFeeSwap_InvalidVaultShareToken();
+    if (_maturity <= block.timestamp) revert FixedFeeSwap_InvalidMaturity();
 
     VAULT_SHARE_TOKEN = _vaultShareToken;
 
@@ -145,12 +145,12 @@ contract FixedFeeSwapHook {
   /// @return _ytAmount The amount of yield token minted.
   /// @dev The caller must have approved the hook to spend the vault share token.
   function deposit(uint256 _amount) external returns (uint256 _ptAmount, uint256 _ytAmount) {
-    if (block.timestamp >= MATURITY) revert FixedFeeSwapHook_SplitAfterMaturity();
+    if (block.timestamp >= MATURITY) revert FixedFeeSwap_SplitAfterMaturity();
 
-    if (_amount == 0) revert FixedFeeSwapHook_InvalidAmount();
+    if (_amount == 0) revert FixedFeeSwap_InvalidAmount();
 
     if (VAULT_SHARE_TOKEN.balanceOf(msg.sender) < _amount) {
-      revert FixedFeeSwapHook_InsufficientBalance();
+      revert FixedFeeSwap_InsufficientBalance();
     }
 
     // Transfer VaultShareToken from caller to the hook
@@ -180,11 +180,11 @@ contract FixedFeeSwapHook {
   ///    - After maturity, the caller will claim fees proportionally based on their PT ownership.
   ///      Fees are calculated as: (contractBalance × amount) / totalSupply for each fee token.
   function redeem(uint256 _amount) external returns (uint256 _vstAmount) {
-    if (_amount == 0) revert FixedFeeSwapHook_InvalidAmount();
+    if (_amount == 0) revert FixedFeeSwap_InvalidAmount();
 
     // Caller should always have enough PT tokens
     if (PRINCIPAL_TOKEN.balanceOf(msg.sender) < _amount) {
-      revert FixedFeeSwapHook_InsufficientBalance();
+      revert FixedFeeSwap_InsufficientBalance();
     }
 
     bool _maturityReached = block.timestamp >= MATURITY;
@@ -203,7 +203,7 @@ contract FixedFeeSwapHook {
     // Transfer VaultShareToken from the hook to the caller
     _vstAmount = _amount;
     if (VAULT_SHARE_TOKEN.balanceOf(address(this)) < _vstAmount) {
-      revert FixedFeeSwapHook_InsufficientBalance();
+      revert FixedFeeSwap_InsufficientBalance();
     }
 
     VAULT_SHARE_TOKEN.transfer(msg.sender, _vstAmount);
@@ -218,11 +218,11 @@ contract FixedFeeSwapHook {
   ///  - Burns the YT tokens after claiming fees.
   ///  - Useful for users who have leftover YT tokens after maturity.
   function claimYTFeesAfterMaturity() external {
-    if (block.timestamp < MATURITY) revert FixedFeeSwapHook_BeforeMaturity();
+    if (block.timestamp < MATURITY) revert FixedFeeSwap_BeforeMaturity();
 
     uint256 _amount = YIELD_TOKEN.balanceOf(msg.sender);
 
-    if (_amount == 0) revert FixedFeeSwapHook_InvalidAmount();
+    if (_amount == 0) revert FixedFeeSwap_InvalidAmount();
 
     _claimAndBurnYieldTokens(msg.sender, _amount);
   }
@@ -237,7 +237,7 @@ contract FixedFeeSwapHook {
   /// @dev Burns the YT tokens, which internally claims fees before burning.
   function _claimAndBurnYieldTokens(address _user, uint256 _amount) internal {
     // Caller should have enough YT tokens
-    if (YIELD_TOKEN.balanceOf(_user) < _amount) revert FixedFeeSwapHook_InsufficientBalance();
+    if (YIELD_TOKEN.balanceOf(_user) < _amount) revert FixedFeeSwap_InsufficientBalance();
 
     // Burn YT tokens (which internally claims fees before burning)
     YIELD_TOKEN.burn(_user, _amount);
@@ -253,7 +253,7 @@ contract FixedFeeSwapHook {
     // Get total PT supply to calculate proportional share
     uint256 _totalSupply = PRINCIPAL_TOKEN.totalSupply();
 
-    if (_totalSupply == 0) revert FixedFeeSwapHook_InsufficientBalance();
+    if (_totalSupply == 0) revert FixedFeeSwap_InsufficientBalance();
 
     // Get contract balances for both fee tokens
     address _feeToken0 = VAULT_SHARE_TOKEN.FEE_TOKEN0();
@@ -299,7 +299,7 @@ contract FixedFeeSwapHook {
   function _transferFeeToken(address _token, address _to, uint256 _amount) internal {
     if (_token == address(0)) {
       (bool _success,) = payable(_to).call{value: _amount}("");
-      if (!_success) revert FixedFeeSwapHook_TransferFailed();
+      if (!_success) revert FixedFeeSwap_TransferFailed();
     } else {
       IERC20(_token).safeTransfer(_to, _amount);
     }

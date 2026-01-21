@@ -31,8 +31,8 @@ contract Constructor is PrincipalTokenTest {
     assertEq(principalToken.symbol(), "PT");
     assertEq(principalToken.decimals(), 18);
 
-    // fixedFeeSwapHook is set to deployer
-    assertEq(principalToken.FIXED_FEE_SWAP_HOOK(), hook);
+    // fixedFeeSwap is set to deployer
+    assertEq(principalToken.FIXED_FEE_SWAP(), hook);
   }
 }
 

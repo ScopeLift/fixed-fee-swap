@@ -18,7 +18,7 @@ contract PrincipalToken is ERC20, ERC20FlashMint {
   //////////////////////////////////////////////////////////////*/
 
   /// @notice The fixed fee swap hook address.
-  address public immutable FIXED_FEE_SWAP_HOOK;
+  address public immutable FIXED_FEE_SWAP;
 
   /*//////////////////////////////////////////////////////////////
                         CONSTRUCTOR
@@ -27,11 +27,11 @@ contract PrincipalToken is ERC20, ERC20FlashMint {
   /// @notice Initializes the principal token metadata.
   /// @param _name ERC20 name value.
   /// @param _symbol ERC20 symbol value.
-  /// @param _fixedFeeSwapHook The fixed fee swap hook address.
-  constructor(string memory _name, string memory _symbol, address _fixedFeeSwapHook)
+  /// @param _fixedFeeSwap The fixed fee swap hook address.
+  constructor(string memory _name, string memory _symbol, address _fixedFeeSwap)
     ERC20(_name, _symbol)
   {
-    FIXED_FEE_SWAP_HOOK = _fixedFeeSwapHook;
+    FIXED_FEE_SWAP = _fixedFeeSwap;
   }
 
   /*//////////////////////////////////////////////////////////////
@@ -60,6 +60,6 @@ contract PrincipalToken is ERC20, ERC20FlashMint {
 
   /// @notice Requires the caller to be the fixed fee swap hook.
   function _requireHook() internal view {
-    if (msg.sender != FIXED_FEE_SWAP_HOOK) revert PrincipalToken_NotAuthorized();
+    if (msg.sender != FIXED_FEE_SWAP) revert PrincipalToken_NotAuthorized();
   }
 }
