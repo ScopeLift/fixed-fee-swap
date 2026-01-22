@@ -72,7 +72,7 @@ contract FixedFeeSwapMarket is BaseHook {
   uint128 activeLiquidity;
   int24 constant YIELD_PER_TICK = 1;
 
-  uint256 constant SCALE_FACTOR = 1e18;
+  uint256 constant WAD = 1e18;
   uint256 constant BIPS = 10_000;
   uint48 immutable MATURITY;
   uint48 immutable START_TIME;
@@ -178,14 +178,14 @@ contract FixedFeeSwapMarket is BaseHook {
   function _scaledTimeElapsedWad() internal view returns (uint256) {
     uint256 elapsed = block.timestamp - START_TIME;
     if (elapsed == 0) revert FixedFeeSwap__TimeElapsedIsZero();
-    return (elapsed * SCALE_FACTOR) / (MATURITY - START_TIME);
+    return (elapsed * WAD) / (MATURITY - START_TIME);
   }
 
   /// @notice Converts a WAD-scaled yield value to an int24 tick using floor division
   /// @param yieldWad The WAD-scaled yield value to convert
   /// @return The tick as int24, floored toward negative infinity
   function _wadToTick(int256 yieldWad) internal pure returns (int24) {
-    int256 oneWad = int256(1e18);
+    int256 oneWad = int256(WAD);
     if (yieldWad >= 0) return int24(yieldWad / oneWad);
     return int24((yieldWad - oneWad + 1) / oneWad);
   }
@@ -198,9 +198,9 @@ contract FixedFeeSwapMarket is BaseHook {
   function _yieldWadFromPrice(int256 price, uint256 scaledTime) internal pure returns (int256) {
     int256 lnP = FixedPointMathLib.lnWad(price);
     if (lnP <= 0) {
-      return int256(FixedPointMathLib.mulDiv(uint256(-lnP), BIPS * 1e18, scaledTime));
+      return int256(FixedPointMathLib.mulDiv(uint256(-lnP), BIPS * WAD, scaledTime));
     }
-    return -int256(FixedPointMathLib.mulDiv(uint256(lnP), BIPS * 1e18, scaledTime));
+    return -int256(FixedPointMathLib.mulDiv(uint256(lnP), BIPS * WAD, scaledTime));
   }
 
   /// @notice Derives a discount factor price from a WAD-scaled yield
@@ -211,9 +211,9 @@ contract FixedFeeSwapMarket is BaseHook {
   function _priceFromYieldWad(int256 yieldWad, uint256 scaledTime) internal pure returns (int256) {
     int256 exponentWad;
     if (yieldWad >= 0) {
-      exponentWad = -int256(FixedPointMathLib.mulDiv(uint256(yieldWad), scaledTime, BIPS * 1e18));
+      exponentWad = -int256(FixedPointMathLib.mulDiv(uint256(yieldWad), scaledTime, BIPS * WAD));
     } else {
-      exponentWad = int256(FixedPointMathLib.mulDiv(uint256(-yieldWad), scaledTime, BIPS * 1e18));
+      exponentWad = int256(FixedPointMathLib.mulDiv(uint256(-yieldWad), scaledTime, BIPS * WAD));
     }
     return exponentWad.expWad();
   }
@@ -237,7 +237,7 @@ contract FixedFeeSwapMarket is BaseHook {
 
     // Yield movement is linear in PT: Δyield = PT_in * BIPS / L
     int256 endYieldWad = startYieldWad
-      + int256(FixedPointMathLib.mulDiv(amountIn, BIPS * 1e18, uint256(activeLiquidity)));
+      + int256(FixedPointMathLib.mulDiv(amountIn, BIPS * WAD, uint256(activeLiquidity)));
     newPrice = _priceFromYieldWad(endYieldWad, scaledTime);
 
     // Cash_out = (L / scaledTime) * (startPrice - newPrice)
@@ -275,7 +275,7 @@ contract FixedFeeSwapMarket is BaseHook {
       startPrice + int256(FixedPointMathLib.mulDiv(scaledTime, amountIn, uint256(activeLiquidity)));
     if (newPrice < startPrice) revert FixedFeeSwap__InvalidPriceDirection();
 
-    // endYieldWad = -ln(newPrice) / scaledTime * BIPS * 1e18
+    // endYieldWad = -ln(newPrice) / scaledTime * BIPS * WAD
     int256 endYieldWad = _yieldWadFromPrice(newPrice, scaledTime);
     newTick = _wadToTick(endYieldWad);
 
@@ -283,7 +283,7 @@ contract FixedFeeSwapMarket is BaseHook {
     int256 yieldMovedWad = startYieldWad - endYieldWad;
     if (yieldMovedWad <= 0) return (amountInConsumed, 0, newPrice, newTick);
     principalOut =
-      FixedPointMathLib.mulDiv(uint256(activeLiquidity), uint256(yieldMovedWad), BIPS * 1e18);
+      FixedPointMathLib.mulDiv(uint256(activeLiquidity), uint256(yieldMovedWad), BIPS * WAD);
   }
 
   /// @notice Hook called before liquidity is added via PoolManager
@@ -740,7 +740,7 @@ contract FixedFeeSwapMarket is BaseHook {
     // exp(- Y * time to maturity)
     int256 _yieldTick = (_tick * YIELD_PER_TICK);
     uint256 _timeBetweenMaturity = (BIPS * (MATURITY - START_TIME));
-    uint256 _scaledTimeSinceMaturity = (block.timestamp - START_TIME) * SCALE_FACTOR;
+    uint256 _scaledTimeSinceMaturity = (block.timestamp - START_TIME) * WAD;
     int256 _scaledPriceExponent =
       -1 * (_yieldTick * _scaledTimeSinceMaturity.toInt128()) / _timeBetweenMaturity.toInt128();
     int256 _price = _scaledPriceExponent.expWad();
@@ -932,7 +932,7 @@ contract FixedFeeSwapMarket is BaseHook {
     // For PT→cash, price decreases so the limit is a minimum price.
     // Use the limit as target if it's higher (closer) than the tick boundary.
     int256 targetPrice = nextTickPrice;
-    int256 targetYieldWad = int256(_nextTick) * int256(1e18);
+    int256 targetYieldWad = int256(_nextTick) * int256(WAD);
     if (targetYieldWad <= startYieldWad) revert FixedFeeSwap__InvalidTickTraversal();
     if (_priceLimitWad != 0 && int256(_priceLimitWad) > targetPrice) {
       targetPrice = int256(_priceLimitWad);
@@ -943,7 +943,7 @@ contract FixedFeeSwapMarket is BaseHook {
     if (targetYieldWad <= startYieldWad) revert FixedFeeSwap__InvalidTickTraversal();
 
     uint256 principalToTarget = FixedPointMathLib.mulDivUp(
-      uint256(targetYieldWad - startYieldWad), uint256(activeLiquidity), BIPS * 1e18
+      uint256(targetYieldWad - startYieldWad), uint256(activeLiquidity), BIPS * WAD
     );
     if (principalToTarget == 0) revert FixedFeeSwap__InvalidTickTraversal();
 
@@ -1058,7 +1058,7 @@ contract FixedFeeSwapMarket is BaseHook {
     // For cash→PT, price increases so the limit is a maximum price.
     // Use the limit as target if it's lower (closer) than the tick boundary.
     int256 targetPrice = nextTickPrice;
-    int256 targetYieldWad = int256(_nextTick) * int256(1e18);
+    int256 targetYieldWad = int256(_nextTick) * int256(WAD);
     if (targetYieldWad >= startYieldWad) revert FixedFeeSwap__InvalidTickTraversal();
     if (_priceLimitWad != 0 && int256(_priceLimitWad) < targetPrice) {
       targetPrice = int256(_priceLimitWad);
@@ -1078,7 +1078,7 @@ contract FixedFeeSwapMarket is BaseHook {
       newPrice = targetPrice;
 
       uint256 yieldDeltaWad = uint256(startYieldWad - targetYieldWad);
-      principalOut = FixedPointMathLib.mulDiv(uint256(activeLiquidity), yieldDeltaWad, BIPS * 1e18);
+      principalOut = FixedPointMathLib.mulDiv(uint256(activeLiquidity), yieldDeltaWad, BIPS * WAD);
       newTick = targetPrice == nextTickPrice ? _nextTick : _wadToTick(targetYieldWad);
       return (amountInConsumed, principalOut, newPrice, newTick);
     }
