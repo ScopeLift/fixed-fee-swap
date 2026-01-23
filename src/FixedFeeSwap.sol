@@ -83,6 +83,10 @@ contract FixedFeeSwap {
                         STATE VARIABLES
   //////////////////////////////////////////////////////////////*/
 
+  /// @notice Native ETH address following Uniswap v4 `Currency` convention.
+  /// @dev See: https://github.com/Uniswap/v4-core/blob/main/src/types/Currency.sol#L37-L38
+  address private constant NATIVE = address(0);
+
   /// @notice The vault share token.
   VaultShareToken public immutable VAULT_SHARE_TOKEN;
 
@@ -282,7 +286,7 @@ contract FixedFeeSwap {
   /// @param _token The address of the token to get the balance of.
   /// @return The balance of the token in the contract.
   function _getTokenBalance(address _token) internal view returns (uint256) {
-    if (_token == address(0)) return address(this).balance;
+    if (_token == NATIVE) return address(this).balance;
     else return IERC20(_token).balanceOf(address(this));
   }
 
@@ -290,9 +294,10 @@ contract FixedFeeSwap {
   /// @param _token The address of the token to transfer.
   /// @param _to The address to transfer the tokens to.
   /// @param _amount The amount of tokens to transfer.
-  /// @dev address(0) represents native ETH.
+  /// @dev Following Uniswap v4's `Currency` convention: NATIVE represents native ETH.
+  ///      See: https://github.com/Uniswap/v4-core/blob/main/src/types/Currency.sol#L37-L38
   function _transferFeeToken(address _token, address _to, uint256 _amount) internal {
-    if (_token == address(0)) {
+    if (_token == NATIVE) {
       (bool _success,) = payable(_to).call{value: _amount}("");
       if (!_success) revert FixedFeeSwap_TransferFailed();
     } else {

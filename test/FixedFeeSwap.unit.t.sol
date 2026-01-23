@@ -16,6 +16,10 @@ import {ERC20Mock} from "test/mock/ERC20Mock.sol";
 import {NonPayableContractMock} from "test/mock/NonPayableContractMock.sol";
 
 contract FixedFeeSwapTest is Test {
+  /// @notice Native ETH address following Uniswap v4 `Currency` convention.
+  /// @dev See: https://github.com/Uniswap/v4-core/blob/main/src/types/Currency.sol#L37-L38
+  address internal constant NATIVE = address(0);
+
   FixedFeeSwap internal fixedFeeSwap;
   VaultShareToken internal vaultShareToken;
   ERC20Mock internal token0;
@@ -494,9 +498,9 @@ contract Redeem is FixedFeeSwapTest {
     // Assume user is a safe address (allows both EOAs and contracts that can receive ETH)
     _assumeSafeAddressForEth(user);
 
-    // Create a VaultShareToken with native ETH (address(0)) as token0 and ERC20 as token1
+    // Create a VaultShareToken with native ETH (NATIVE) as token0 and ERC20 as token1
     VaultShareToken _vstWithEth =
-      new VaultShareToken("Vault Share Token", "VST", address(0), address(token1));
+      new VaultShareToken("Vault Share Token", "VST", NATIVE, address(token1));
 
     // Create a new hook with the ETH-enabled VST
     FixedFeeSwap _hookWithEth = new FixedFeeSwap(_vstWithEth, maturity);
@@ -569,9 +573,9 @@ contract Redeem is FixedFeeSwapTest {
     // Assume user is a safe address (allows both EOAs and contracts that can receive ETH)
     _assumeSafeAddressForEth(user);
 
-    // Create a VaultShareToken with native ETH (address(0)) as token0 and ERC20 as token1
+    // Create a VaultShareToken with native ETH (NATIVE) as token0 and ERC20 as token1
     VaultShareToken _vstWithEth =
-      new VaultShareToken("Vault Share Token", "VST", address(0), address(token1));
+      new VaultShareToken("Vault Share Token", "VST", NATIVE, address(token1));
 
     // Create a new hook with the ETH-enabled VST
     FixedFeeSwap _hookWithEth = new FixedFeeSwap(_vstWithEth, maturity);
@@ -606,9 +610,9 @@ contract Redeem is FixedFeeSwapTest {
     vm.prank(user);
     _hookWithEth.PRINCIPAL_TOKEN().approve(address(_hookWithEth), _redeemAmount);
 
-    // Expect FeesClaimed event (with native ETH address(0) and ERC20 token1)
+    // Expect FeesClaimed event (with native ETH (NATIVE) and ERC20 token1)
     vm.expectEmit();
-    emit FixedFeeSwap.FeesClaimed(user, address(0), address(token1), _expectedFee0, _expectedFee1);
+    emit FixedFeeSwap.FeesClaimed(user, NATIVE, address(token1), _expectedFee0, _expectedFee1);
 
     // Redeem
     vm.prank(user);
@@ -729,9 +733,9 @@ contract Redeem is FixedFeeSwapTest {
     // Ensure we have fees to claim - need significant fees to avoid rounding to zero
     vm.assume(_feeEth >= _depositAmount && _depositAmount > 0);
 
-    // Create a VaultShareToken with native ETH (address(0)) as token0
+    // Create a VaultShareToken with native ETH (NATIVE) as token0
     VaultShareToken _vstWithEth =
-      new VaultShareToken("Vault Share Token", "VST", address(0), address(token1));
+      new VaultShareToken("Vault Share Token", "VST", NATIVE, address(token1));
 
     // Create a new hook with the ETH-enabled VST
     FixedFeeSwap _hookWithEth = new FixedFeeSwap(_vstWithEth, maturity);
