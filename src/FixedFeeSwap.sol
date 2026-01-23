@@ -218,8 +218,8 @@ contract FixedFeeSwap {
   ///  - Claims any fees accrued on the YT tokens before maturity.
   ///  - Burns the YT tokens after claiming fees.
   ///  - Useful for users who have leftover YT tokens after maturity.
-  ///  - Note: This function internally calls `burn()` on the YT token, which claims fees before burning.
-  ///    Fees are claimed through the YT token's burn mechanism.
+  ///  - Note: This function internally calls `burn()` on the YT token, which claims fees before
+  /// burning. Fees are claimed through the YT token's burn mechanism.
   function claimYTFeesAfterMaturity() external {
     if (block.timestamp < MATURITY) revert FixedFeeSwap_BeforeMaturity();
 
