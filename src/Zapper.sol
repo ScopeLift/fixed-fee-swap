@@ -204,7 +204,7 @@ contract Zapper is IERC3156FlashBorrower {
 
     // Split all VST into PT + YT
     IERC20(address(VAULT_SHARE_TOKEN)).approve(address(FIXED_FEE_SWAP), _totalVst);
-    (uint256 _ptMinted,) = FIXED_FEE_SWAP.deposit(_totalVst);
+    FIXED_FEE_SWAP.deposit(_totalVst);
 
     // Approve PT contract to spend PT to repay flash loan
     IERC20(address(PRINCIPAL_TOKEN)).approve(address(PRINCIPAL_TOKEN), _amount);
@@ -232,8 +232,9 @@ contract Zapper is IERC3156FlashBorrower {
 
     // Use deposit to swap VST for PT+YT (mock: 1 VST = 1 PT + 1 YT)
     IERC20(address(VAULT_SHARE_TOKEN)).approve(address(FIXED_FEE_SWAP), _vstToSwap);
-    (uint256 _ptAmount, uint256 _ytAmount) = FIXED_FEE_SWAP.deposit(_vstToSwap);
-    _swappedPT = _ptAmount;
+    FIXED_FEE_SWAP.deposit(_vstToSwap);
+    // When we split VST, we split it into equal amounts of YT + PT (1:1 ratio)
+    _swappedPT = _vstToSwap;
     // YT amount is unused but left in contract
 
     // Note: This mock always leaves VST for the user since we swap 2x the needed PT

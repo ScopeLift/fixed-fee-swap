@@ -262,11 +262,7 @@ contract OnFlashLoan is ZapperTest {
     zapper.onFlashLoan(address(zapper), _token, _amount, 0, "");
   }
 
-  function testFuzz_RevertIf_CallerIsNotPrincipalToken(
-    address _msgSender,
-    address _token,
-    uint256 _amount
-  ) public {
+  function testFuzz_RevertIf_CallerIsNotPrincipalToken(address _msgSender, uint256 _amount) public {
     PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
 
     vm.assume(_msgSender != address(_pt));
@@ -287,7 +283,6 @@ contract OnFlashLoan is ZapperTest {
 
     // Get PT contract
     PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
-    YieldToken _yt = fixedFeeSwap.YIELD_TOKEN();
 
     // Call onFlashLoan from PT contract
     vm.prank(address(_pt));

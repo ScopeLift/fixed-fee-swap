@@ -55,10 +55,8 @@ contract FixedFeeSwap {
 
   /// @notice Emitted when a user deposits their vault share token into principal and yield tokens.
   /// @param user The address of the user who deposited.
-  /// @param vsAmount The amount of vault share token deposited.
-  /// @param ptAmount The amount of principal token minted to the user.
-  /// @param ytAmount The amount of yield token minted to the user.
-  event Deposit(address indexed user, uint256 vsAmount, uint256 ptAmount, uint256 ytAmount);
+  /// @param amount The amount of vault share token deposited.
+  event Deposit(address indexed user, uint256 amount);
 
   /// @notice Emitted when a user redeems their principal and yield tokens back into the vault share
   /// token.
@@ -141,10 +139,9 @@ contract FixedFeeSwap {
 
   /// @notice Deposits the vault share token into principal and yield tokens.
   /// @param _amount The amount of vault share token to deposit.
-  /// @return _ptAmount The amount of principal token minted.
-  /// @return _ytAmount The amount of yield token minted.
   /// @dev The caller must have approved the hook to spend the vault share token.
-  function deposit(uint256 _amount) external returns (uint256 _ptAmount, uint256 _ytAmount) {
+  /// @dev When we split VST, we split it into equal amounts of YT + PT (1:1 ratio).
+  function deposit(uint256 _amount) external {
     if (block.timestamp >= MATURITY) revert FixedFeeSwap_SplitAfterMaturity();
 
     if (_amount == 0) revert FixedFeeSwap_InvalidAmount();
@@ -156,16 +153,14 @@ contract FixedFeeSwap {
     // Transfer VaultShareToken from caller to the hook
     VAULT_SHARE_TOKEN.transferFrom(msg.sender, address(this), _amount);
 
-    // Split the vault share token into principal and yield tokens in a 1:1 ratio
-    (_ptAmount, _ytAmount) = (_amount, _amount);
-
+    // When we split VST, we split it into equal amounts of YT + PT (1:1 ratio)
     // Mint PrincipalToken to the caller
-    PRINCIPAL_TOKEN.mint(msg.sender, _ptAmount);
+    PRINCIPAL_TOKEN.mint(msg.sender, _amount);
 
     // Mint YieldToken to the caller
-    YIELD_TOKEN.mint(msg.sender, _ytAmount);
+    YIELD_TOKEN.mint(msg.sender, _amount);
 
-    emit Deposit(msg.sender, _amount, _ptAmount, _ytAmount);
+    emit Deposit(msg.sender, _amount);
   }
 
   /// @notice Redeems the principal and yield tokens back into the vault share token.

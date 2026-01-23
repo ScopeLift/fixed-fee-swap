@@ -221,7 +221,7 @@ contract Deposit is FixedFeeSwapTest {
     vaultShareToken.approve(address(fixedFeeSwap), _amount);
 
     vm.prank(user);
-    (uint256 _ptAmount, uint256 _ytAmount) = fixedFeeSwap.deposit(_amount);
+    fixedFeeSwap.deposit(_amount);
 
     assertEq(vaultShareToken.balanceOf(user), _initialUserVstBalance - _amount);
     assertEq(vaultShareToken.balanceOf(address(fixedFeeSwap)), _initialHookVstBalance + _amount);
@@ -229,9 +229,6 @@ contract Deposit is FixedFeeSwapTest {
     assertEq(fixedFeeSwap.YIELD_TOKEN().totalSupply(), _initialYtSupply + _amount);
     assertEq(fixedFeeSwap.PRINCIPAL_TOKEN().balanceOf(user), _initialPtUserBalance + _amount);
     assertEq(fixedFeeSwap.YIELD_TOKEN().balanceOf(user), _initialYtUserBalance + _amount);
-
-    assertEq(_ptAmount, _amount);
-    assertEq(_ytAmount, _amount);
   }
 
   function testFuzz_EmitsDepositEvent(uint256 _amount) public {
@@ -240,11 +237,8 @@ contract Deposit is FixedFeeSwapTest {
     vm.prank(user);
     vaultShareToken.approve(address(fixedFeeSwap), _amount);
 
-    uint256 _ptAmount = _amount;
-    uint256 _ytAmount = _amount;
-
     vm.expectEmit();
-    emit FixedFeeSwap.Deposit(user, _amount, _ptAmount, _ytAmount);
+    emit FixedFeeSwap.Deposit(user, _amount);
     vm.prank(user);
     fixedFeeSwap.deposit(_amount);
   }
