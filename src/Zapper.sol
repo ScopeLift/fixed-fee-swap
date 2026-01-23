@@ -6,7 +6,7 @@ import {PrincipalToken} from "src/PrincipalToken.sol";
 import {YieldToken} from "src/YieldToken.sol";
 import {LPVault} from "src/LPVault.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
-import {FixedFeeSwapHook} from "src/FixedFeeSwapHook.sol";
+import {FixedFeeSwap} from "src/FixedFeeSwap.sol";
 import {FeeTracking} from "src/lib/FeeTracking.sol";
 // External Imports
 import {IERC3156FlashBorrower} from "@openzeppelin/contracts/interfaces/IERC3156FlashBorrower.sol";
@@ -69,21 +69,21 @@ contract Zapper is IERC3156FlashBorrower {
   VaultShareToken public immutable VAULT_SHARE_TOKEN;
 
   /// @notice The fixed fee swap hook address.
-  FixedFeeSwapHook public immutable FIXED_FEE_SWAP_HOOK;
+  FixedFeeSwap public immutable FIXED_FEE_SWAP;
 
   /*//////////////////////////////////////////////////////////////
                         CONSTRUCTOR
   //////////////////////////////////////////////////////////////*/
 
   /// @notice Initializes the zapper.
-  /// @param _fixedFeeSwapHook The fixed fee swap hook address.
-  constructor(FixedFeeSwapHook _fixedFeeSwapHook) {
-    if (address(_fixedFeeSwapHook) == address(0)) revert Zapper_InvalidAddress();
+  /// @param _fixedFeeSwap The fixed fee swap address.
+  constructor(FixedFeeSwap _fixedFeeSwap) {
+    if (address(_fixedFeeSwap) == address(0)) revert Zapper_InvalidAddress();
 
-    FIXED_FEE_SWAP_HOOK = _fixedFeeSwapHook;
-    YIELD_TOKEN = _fixedFeeSwapHook.YIELD_TOKEN();
-    PRINCIPAL_TOKEN = _fixedFeeSwapHook.PRINCIPAL_TOKEN();
-    VAULT_SHARE_TOKEN = _fixedFeeSwapHook.VAULT_SHARE_TOKEN();
+    FIXED_FEE_SWAP = _fixedFeeSwap;
+    YIELD_TOKEN = _fixedFeeSwap.YIELD_TOKEN();
+    PRINCIPAL_TOKEN = _fixedFeeSwap.PRINCIPAL_TOKEN();
+    VAULT_SHARE_TOKEN = _fixedFeeSwap.VAULT_SHARE_TOKEN();
   }
 
   /*//////////////////////////////////////////////////////////////
@@ -179,11 +179,11 @@ contract Zapper is IERC3156FlashBorrower {
   /// @param _amount The amount of PT flash loaned.
   function _handleSellFlashLoan(uint256 _amount) internal {
     // Approve hook to spend PT and YT
-    IERC20(address(PRINCIPAL_TOKEN)).approve(address(FIXED_FEE_SWAP_HOOK), _amount);
-    IERC20(address(YIELD_TOKEN)).approve(address(FIXED_FEE_SWAP_HOOK), _amount);
+    IERC20(address(PRINCIPAL_TOKEN)).approve(address(FIXED_FEE_SWAP), _amount);
+    IERC20(address(YIELD_TOKEN)).approve(address(FIXED_FEE_SWAP), _amount);
 
     // Burn PT and YT to mint VST
-    uint256 _vstMinted = FIXED_FEE_SWAP_HOOK.redeem(_amount);
+    uint256 _vstMinted = FIXED_FEE_SWAP.redeem(_amount);
 
     // Calculate and swap portion of VST for PT to repay flash loan
     uint256 _swappedPT = _calculateAndSwapVSTForPT(_vstMinted, _amount);
@@ -203,8 +203,8 @@ contract Zapper is IERC3156FlashBorrower {
     uint256 _totalVst = VAULT_SHARE_TOKEN.balanceOf(address(this));
 
     // Split all VST into PT + YT
-    IERC20(address(VAULT_SHARE_TOKEN)).approve(address(FIXED_FEE_SWAP_HOOK), _totalVst);
-    (uint256 _ptMinted,) = FIXED_FEE_SWAP_HOOK.deposit(_totalVst);
+    IERC20(address(VAULT_SHARE_TOKEN)).approve(address(FIXED_FEE_SWAP), _totalVst);
+    (uint256 _ptMinted,) = FIXED_FEE_SWAP.deposit(_totalVst);
 
     // Approve PT contract to spend PT to repay flash loan
     IERC20(address(PRINCIPAL_TOKEN)).approve(address(PRINCIPAL_TOKEN), _amount);
@@ -231,8 +231,8 @@ contract Zapper is IERC3156FlashBorrower {
     if (_vstToSwap > _availableVST) _vstToSwap = _availableVST;
 
     // Use deposit to swap VST for PT+YT (mock: 1 VST = 1 PT + 1 YT)
-    IERC20(address(VAULT_SHARE_TOKEN)).approve(address(FIXED_FEE_SWAP_HOOK), _vstToSwap);
-    (uint256 _ptAmount, uint256 _ytAmount) = FIXED_FEE_SWAP_HOOK.deposit(_vstToSwap);
+    IERC20(address(VAULT_SHARE_TOKEN)).approve(address(FIXED_FEE_SWAP), _vstToSwap);
+    (uint256 _ptAmount, uint256 _ytAmount) = FIXED_FEE_SWAP.deposit(_vstToSwap);
     _swappedPT = _ptAmount;
     // YT amount is unused but left in contract
 

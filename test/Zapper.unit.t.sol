@@ -9,8 +9,7 @@ import {IERC3156FlashBorrower} from "@openzeppelin/contracts/interfaces/IERC3156
 
 // Internal imports
 import {Zapper} from "src/Zapper.sol";
-import {FixedFeeSwapHook} from "src/FixedFeeSwapHook.sol";
-import {FixedFeeSwapHookHarness} from "test/harness/FixedFeeSwapHookHarness.sol";
+import {FixedFeeSwap} from "src/FixedFeeSwap.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
 import {PrincipalToken} from "src/PrincipalToken.sol";
 import {YieldToken} from "src/YieldToken.sol";
@@ -18,7 +17,7 @@ import {ERC20Mock} from "test/mock/ERC20Mock.sol";
 
 contract ZapperTest is Test {
   Zapper internal zapper;
-  FixedFeeSwapHookHarness internal fixedFeeSwapHook;
+  FixedFeeSwap internal fixedFeeSwap;
   VaultShareToken internal vaultShareToken;
   ERC20Mock internal token0;
   ERC20Mock internal token1;
@@ -45,9 +44,9 @@ contract ZapperTest is Test {
     // Choose a maturity strictly in the future
     maturity = block.timestamp + 30 days;
 
-    fixedFeeSwapHook = new FixedFeeSwapHookHarness(vaultShareToken, maturity);
+    fixedFeeSwap = new FixedFeeSwap(vaultShareToken, maturity);
 
-    zapper = new Zapper(fixedFeeSwapHook);
+    zapper = new Zapper(fixedFeeSwap);
 
     user = makeAddr("user");
   }
@@ -66,9 +65,9 @@ contract ZapperTest is Test {
   function _depositVstForUser(address _user, uint256 _depositAmount) internal {
     deal(address(vaultShareToken), _user, _depositAmount);
     vm.prank(_user);
-    vaultShareToken.approve(address(fixedFeeSwapHook), _depositAmount);
+    vaultShareToken.approve(address(fixedFeeSwap), _depositAmount);
     vm.prank(_user);
-    fixedFeeSwapHook.deposit(_depositAmount);
+    fixedFeeSwap.deposit(_depositAmount);
   }
 
   /// @notice Helper function to set up fees on YT.
@@ -76,8 +75,8 @@ contract ZapperTest is Test {
   /// @param _feeToken1 Amount of token1 fees to add.
   function _updateYieldTokenFees(uint256 _feeToken0, uint256 _feeToken1) internal {
     // Update fees on YT
-    YieldToken _yt = fixedFeeSwapHook.YIELD_TOKEN();
-    vm.prank(address(fixedFeeSwapHook));
+    YieldToken _yt = fixedFeeSwap.YIELD_TOKEN();
+    vm.prank(address(fixedFeeSwap));
     _yt.updateFees(_feeToken0, _feeToken1);
 
     // Fund the YieldToken contract with fee tokens so it can pay out claims
@@ -89,16 +88,16 @@ contract ZapperTest is Test {
 }
 
 contract Constructor is ZapperTest {
-  function test_RevertIf_FixedFeeSwapHookIsZero() public {
+  function test_RevertIf_FixedFeeSwapIsZero() public {
     vm.expectRevert(Zapper.Zapper_InvalidAddress.selector);
-    new Zapper(FixedFeeSwapHook(address(0)));
+    new Zapper(FixedFeeSwap(address(0)));
   }
 
   function test_SetsAllParamsCorrectly() public {
-    assertEq(address(zapper.FIXED_FEE_SWAP_HOOK()), address(fixedFeeSwapHook));
-    assertEq(address(zapper.YIELD_TOKEN()), address(fixedFeeSwapHook.YIELD_TOKEN()));
-    assertEq(address(zapper.PRINCIPAL_TOKEN()), address(fixedFeeSwapHook.PRINCIPAL_TOKEN()));
-    assertEq(address(zapper.VAULT_SHARE_TOKEN()), address(fixedFeeSwapHook.VAULT_SHARE_TOKEN()));
+    assertEq(address(zapper.FIXED_FEE_SWAP()), address(fixedFeeSwap));
+    assertEq(address(zapper.YIELD_TOKEN()), address(fixedFeeSwap.YIELD_TOKEN()));
+    assertEq(address(zapper.PRINCIPAL_TOKEN()), address(fixedFeeSwap.PRINCIPAL_TOKEN()));
+    assertEq(address(zapper.VAULT_SHARE_TOKEN()), address(fixedFeeSwap.VAULT_SHARE_TOKEN()));
   }
 }
 
@@ -115,13 +114,13 @@ contract SellYieldToken is ZapperTest {
     _depositVstForUser(user, _ytAmount);
 
     // Verify user has YT
-    assertEq(fixedFeeSwapHook.YIELD_TOKEN().balanceOf(user), _ytAmount, "User should have YT");
+    assertEq(fixedFeeSwap.YIELD_TOKEN().balanceOf(user), _ytAmount, "User should have YT");
 
     // Ensure hook has enough VST to transfer back after redeem
-    deal(address(vaultShareToken), address(fixedFeeSwapHook), _ytAmount);
+    deal(address(vaultShareToken), address(fixedFeeSwap), _ytAmount);
 
     // User approves zapper to spend YT
-    YieldToken _yt = fixedFeeSwapHook.YIELD_TOKEN();
+    YieldToken _yt = fixedFeeSwap.YIELD_TOKEN();
     vm.prank(user);
     _yt.approve(address(zapper), _ytAmount);
 
@@ -139,7 +138,7 @@ contract SellYieldToken is ZapperTest {
     zapper.sellYieldToken(_ytAmount);
 
     // Check balances - user should have no YT left (PT was flash loaned, not owned by user)
-    assertEq(fixedFeeSwapHook.YIELD_TOKEN().balanceOf(user), 0, "User should have no YT");
+    assertEq(fixedFeeSwap.YIELD_TOKEN().balanceOf(user), 0, "User should have no YT");
 
     // User should receive VST
     // Note: With the mock swap implementation (1:1 ratio), when we redeem _ytAmount PT+YT,
@@ -165,10 +164,10 @@ contract SellYieldToken is ZapperTest {
     _depositVstForUser(user, _ytAmount);
 
     // Ensure hook has enough VST to transfer back after redeem
-    deal(address(vaultShareToken), address(fixedFeeSwapHook), _ytAmount);
+    deal(address(vaultShareToken), address(fixedFeeSwap), _ytAmount);
 
     // User approves zapper to spend YT
-    YieldToken _yt = fixedFeeSwapHook.YIELD_TOKEN();
+    YieldToken _yt = fixedFeeSwap.YIELD_TOKEN();
     vm.prank(user);
     _yt.approve(address(zapper), _ytAmount);
 
@@ -207,7 +206,7 @@ contract BuyYieldToken is ZapperTest {
     vaultShareToken.approve(address(zapper), _vstAmount);
 
     // Get initial balances
-    uint256 _initialUserYT = fixedFeeSwapHook.YIELD_TOKEN().balanceOf(user);
+    uint256 _initialUserYT = fixedFeeSwap.YIELD_TOKEN().balanceOf(user);
     uint256 _initialUserVST = vaultShareToken.balanceOf(user);
 
     // Execute buy
@@ -221,7 +220,7 @@ contract BuyYieldToken is ZapperTest {
     );
 
     // User should receive YT
-    uint256 _ytReceived = fixedFeeSwapHook.YIELD_TOKEN().balanceOf(user) - _initialUserYT;
+    uint256 _ytReceived = fixedFeeSwap.YIELD_TOKEN().balanceOf(user) - _initialUserYT;
     assertGt(_ytReceived, 0, "User should receive YT");
   }
 
@@ -257,7 +256,7 @@ contract OnFlashLoan is ZapperTest {
   }
 
   function testFuzz_RevertIf_TokenIsNotPrincipalToken(address _token, uint256 _amount) public {
-    vm.assume(_token != address(fixedFeeSwapHook.PRINCIPAL_TOKEN()));
+    vm.assume(_token != address(fixedFeeSwap.PRINCIPAL_TOKEN()));
 
     vm.expectRevert(Zapper.Zapper_InvalidFlashLoanToken.selector);
     zapper.onFlashLoan(address(zapper), _token, _amount, 0, "");
@@ -268,7 +267,7 @@ contract OnFlashLoan is ZapperTest {
     address _token,
     uint256 _amount
   ) public {
-    PrincipalToken _pt = fixedFeeSwapHook.PRINCIPAL_TOKEN();
+    PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
 
     vm.assume(_msgSender != address(_pt));
 
@@ -284,11 +283,11 @@ contract OnFlashLoan is ZapperTest {
     _depositVstForUser(address(zapper), _amount);
 
     // Ensure hook has enough VST to transfer back after redeem
-    deal(address(vaultShareToken), address(fixedFeeSwapHook), _amount);
+    deal(address(vaultShareToken), address(fixedFeeSwap), _amount);
 
     // Get PT contract
-    PrincipalToken _pt = fixedFeeSwapHook.PRINCIPAL_TOKEN();
-    YieldToken _yt = fixedFeeSwapHook.YIELD_TOKEN();
+    PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
+    YieldToken _yt = fixedFeeSwap.YIELD_TOKEN();
 
     // Call onFlashLoan from PT contract
     vm.prank(address(_pt));
@@ -305,20 +304,20 @@ contract OnFlashLoan is ZapperTest {
     _depositVstForUser(address(zapper), _amount);
 
     // Ensure hook has enough VST to transfer back after redeem
-    deal(address(vaultShareToken), address(fixedFeeSwapHook), _amount);
+    deal(address(vaultShareToken), address(fixedFeeSwap), _amount);
 
     // Get contracts
-    PrincipalToken _pt = fixedFeeSwapHook.PRINCIPAL_TOKEN();
-    YieldToken _yt = fixedFeeSwapHook.YIELD_TOKEN();
+    PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
+    YieldToken _yt = fixedFeeSwap.YIELD_TOKEN();
 
     // Check initial approvals
     assertEq(
-      IERC20(address(_pt)).allowance(address(zapper), address(fixedFeeSwapHook)),
+      IERC20(address(_pt)).allowance(address(zapper), address(fixedFeeSwap)),
       0,
       "Initial PT approval should be 0"
     );
     assertEq(
-      IERC20(address(_yt)).allowance(address(zapper), address(fixedFeeSwapHook)),
+      IERC20(address(_yt)).allowance(address(zapper), address(fixedFeeSwap)),
       0,
       "Initial YT approval should be 0"
     );
@@ -329,12 +328,12 @@ contract OnFlashLoan is ZapperTest {
 
     // Check approvals after callback
     assertGe(
-      IERC20(address(_pt)).allowance(address(zapper), address(fixedFeeSwapHook)),
+      IERC20(address(_pt)).allowance(address(zapper), address(fixedFeeSwap)),
       _amount,
       "Hook should be approved to spend PT"
     );
     assertGe(
-      IERC20(address(_yt)).allowance(address(zapper), address(fixedFeeSwapHook)),
+      IERC20(address(_yt)).allowance(address(zapper), address(fixedFeeSwap)),
       _amount,
       "Hook should be approved to spend YT"
     );
@@ -347,10 +346,10 @@ contract OnFlashLoan is ZapperTest {
     _depositVstForUser(address(zapper), _amount);
 
     // Ensure hook has enough VST to transfer back after redeem
-    deal(address(vaultShareToken), address(fixedFeeSwapHook), _amount);
+    deal(address(vaultShareToken), address(fixedFeeSwap), _amount);
 
     // Get PT contract
-    PrincipalToken _pt = fixedFeeSwapHook.PRINCIPAL_TOKEN();
+    PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
 
     // Check initial approval
     assertEq(
@@ -378,7 +377,7 @@ contract OnFlashLoan is ZapperTest {
     deal(address(vaultShareToken), address(zapper), _amount);
 
     // Get PT contract
-    PrincipalToken _pt = fixedFeeSwapHook.PRINCIPAL_TOKEN();
+    PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
 
     // Check initial approval
     assertEq(

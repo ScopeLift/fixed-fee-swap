@@ -8,15 +8,15 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 // Internal imports
-import {FixedFeeSwapHook} from "src/FixedFeeSwapHook.sol";
+import {FixedFeeSwap} from "src/FixedFeeSwap.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
 import {PrincipalToken} from "src/PrincipalToken.sol";
 import {YieldToken} from "src/YieldToken.sol";
 import {ERC20Mock} from "test/mock/ERC20Mock.sol";
 import {NonPayableContractMock} from "test/mock/NonPayableContractMock.sol";
 
-contract FixedFeeSwapHookTest is Test {
-  FixedFeeSwapHook internal fixedFeeSwapHook;
+contract FixedFeeSwapTest is Test {
+  FixedFeeSwap internal fixedFeeSwap;
   VaultShareToken internal vaultShareToken;
   ERC20Mock internal token0;
   ERC20Mock internal token1;
@@ -37,7 +37,7 @@ contract FixedFeeSwapHookTest is Test {
     // Choose a maturity strictly in the future
     maturity = block.timestamp + 30 days;
 
-    fixedFeeSwapHook = new FixedFeeSwapHook(vaultShareToken, maturity);
+    fixedFeeSwap = new FixedFeeSwap(vaultShareToken, maturity);
 
     user = makeAddr("user");
   }
@@ -73,9 +73,9 @@ contract FixedFeeSwapHookTest is Test {
   function _depositVstForUser(address _user, uint256 _depositAmount) internal {
     deal(address(vaultShareToken), _user, _depositAmount);
     vm.prank(_user);
-    vaultShareToken.approve(address(fixedFeeSwapHook), _depositAmount);
+    vaultShareToken.approve(address(fixedFeeSwap), _depositAmount);
     vm.prank(_user);
-    fixedFeeSwapHook.deposit(_depositAmount);
+    fixedFeeSwap.deposit(_depositAmount);
   }
 
   /// @notice Helper function to set up fees on YT.
@@ -83,8 +83,8 @@ contract FixedFeeSwapHookTest is Test {
   /// @param _feeToken1 Amount of token1 fees to add.
   function _updateYieldTokenFees(uint256 _feeToken0, uint256 _feeToken1) internal {
     // Update fees on YT
-    YieldToken _yt = fixedFeeSwapHook.YIELD_TOKEN();
-    vm.prank(address(fixedFeeSwapHook));
+    YieldToken _yt = fixedFeeSwap.YIELD_TOKEN();
+    vm.prank(address(fixedFeeSwap));
     _yt.updateFees(_feeToken0, _feeToken1);
 
     // Fund the YieldToken contract with fee tokens so it can pay out claims
@@ -101,7 +101,7 @@ contract FixedFeeSwapHookTest is Test {
   /// @param _amount The amount to approve.
   function _approvePTForRedeem(address _user, uint256 _amount) internal {
     vm.prank(_user);
-    fixedFeeSwapHook.PRINCIPAL_TOKEN().approve(address(fixedFeeSwapHook), _amount);
+    fixedFeeSwap.PRINCIPAL_TOKEN().approve(address(fixedFeeSwap), _amount);
   }
 
   /// @notice Helper function to approve YT token for redeem.
@@ -109,7 +109,7 @@ contract FixedFeeSwapHookTest is Test {
   /// @param _amount The amount to approve.
   function _approveYTForRedeem(address _user, uint256 _amount) internal {
     vm.prank(_user);
-    fixedFeeSwapHook.YIELD_TOKEN().approve(address(fixedFeeSwapHook), _amount);
+    fixedFeeSwap.YIELD_TOKEN().approve(address(fixedFeeSwap), _amount);
   }
 
   /// @notice Helper function to approve both PT and YT tokens for redeem.
@@ -121,7 +121,7 @@ contract FixedFeeSwapHookTest is Test {
   }
 }
 
-contract Constructor is FixedFeeSwapHookTest {
+contract Constructor is FixedFeeSwapTest {
   function testFuzz_SetsInitialParameters(
     address _vaultShareToken0,
     address _vaultShareToken1,
@@ -134,7 +134,7 @@ contract Constructor is FixedFeeSwapHookTest {
     VaultShareToken _vaultShareToken =
       new VaultShareToken("Vault Share Token", "VST", _vaultShareToken0, _vaultShareToken1);
 
-    FixedFeeSwapHook _hook = new FixedFeeSwapHook(VaultShareToken(_vaultShareToken), _maturity);
+    FixedFeeSwap _hook = new FixedFeeSwap(VaultShareToken(_vaultShareToken), _maturity);
 
     assertEq(address(_hook.VAULT_SHARE_TOKEN()), address(_vaultShareToken));
     assertEq(_hook.MATURITY(), _maturity);
@@ -153,8 +153,8 @@ contract Constructor is FixedFeeSwapHookTest {
     assertEq(_yt.name(), string.concat("Yield ", _underlyingName));
     assertEq(_yt.symbol(), string.concat("YT-", _underlyingSymbol, "-", vm.toString(_maturity)));
 
-    assertEq(_pt.FIXED_FEE_SWAP_HOOK(), address(_hook));
-    assertEq(_yt.FIXED_FEE_SWAP_HOOK(), address(_hook));
+    assertEq(_pt.FIXED_FEE_SWAP(), address(_hook));
+    assertEq(_yt.FIXED_FEE_SWAP(), address(_hook));
   }
 
   function testFuzz_EmitsInitializedEvent(uint256 _maturity) public {
@@ -164,7 +164,7 @@ contract Constructor is FixedFeeSwapHookTest {
     vm.recordLogs();
 
     // Deploy the hook (this will emit the Initialized event)
-    FixedFeeSwapHook _hook = new FixedFeeSwapHook(vaultShareToken, _maturity);
+    FixedFeeSwap _hook = new FixedFeeSwap(vaultShareToken, _maturity);
 
     // Get the actual PT and YT addresses from the deployed hook
     address _ptAddress = address(_hook.PRINCIPAL_TOKEN());
@@ -193,42 +193,42 @@ contract Constructor is FixedFeeSwapHookTest {
   }
 
   function test_RevertIf_VaultShareTokenIsZero() public {
-    vm.expectRevert(FixedFeeSwapHook.FixedFeeSwapHook_InvalidVaultShareToken.selector);
-    new FixedFeeSwapHook(VaultShareToken(address(0)), maturity);
+    vm.expectRevert(FixedFeeSwap.FixedFeeSwap_InvalidVaultShareToken.selector);
+    new FixedFeeSwap(VaultShareToken(address(0)), maturity);
   }
 
   function testFuzz_RevertIf_MaturityInPast(uint256 _maturity) public {
     _maturity = bound(_maturity, 0, block.timestamp);
 
-    vm.expectRevert(FixedFeeSwapHook.FixedFeeSwapHook_InvalidMaturity.selector);
-    new FixedFeeSwapHook(vaultShareToken, _maturity);
+    vm.expectRevert(FixedFeeSwap.FixedFeeSwap_InvalidMaturity.selector);
+    new FixedFeeSwap(vaultShareToken, _maturity);
   }
 }
 
-contract Deposit is FixedFeeSwapHookTest {
+contract Deposit is FixedFeeSwapTest {
   function testFuzz_SplitsVaultShareTokenToPTAndYT(uint256 _amount) public {
     _amount = _boundToRealisticAmount(_amount);
     deal(address(vaultShareToken), user, _amount);
 
     uint256 _initialUserVstBalance = vaultShareToken.balanceOf(user);
-    uint256 _initialHookVstBalance = vaultShareToken.balanceOf(address(fixedFeeSwapHook));
-    uint256 _initialPtSupply = fixedFeeSwapHook.PRINCIPAL_TOKEN().totalSupply();
-    uint256 _initialYtSupply = fixedFeeSwapHook.YIELD_TOKEN().totalSupply();
-    uint256 _initialPtUserBalance = fixedFeeSwapHook.PRINCIPAL_TOKEN().balanceOf(user);
-    uint256 _initialYtUserBalance = fixedFeeSwapHook.YIELD_TOKEN().balanceOf(user);
+    uint256 _initialHookVstBalance = vaultShareToken.balanceOf(address(fixedFeeSwap));
+    uint256 _initialPtSupply = fixedFeeSwap.PRINCIPAL_TOKEN().totalSupply();
+    uint256 _initialYtSupply = fixedFeeSwap.YIELD_TOKEN().totalSupply();
+    uint256 _initialPtUserBalance = fixedFeeSwap.PRINCIPAL_TOKEN().balanceOf(user);
+    uint256 _initialYtUserBalance = fixedFeeSwap.YIELD_TOKEN().balanceOf(user);
 
     vm.prank(user);
-    vaultShareToken.approve(address(fixedFeeSwapHook), _amount);
+    vaultShareToken.approve(address(fixedFeeSwap), _amount);
 
     vm.prank(user);
-    (uint256 _ptAmount, uint256 _ytAmount) = fixedFeeSwapHook.deposit(_amount);
+    (uint256 _ptAmount, uint256 _ytAmount) = fixedFeeSwap.deposit(_amount);
 
     assertEq(vaultShareToken.balanceOf(user), _initialUserVstBalance - _amount);
-    assertEq(vaultShareToken.balanceOf(address(fixedFeeSwapHook)), _initialHookVstBalance + _amount);
-    assertEq(fixedFeeSwapHook.PRINCIPAL_TOKEN().totalSupply(), _initialPtSupply + _amount);
-    assertEq(fixedFeeSwapHook.YIELD_TOKEN().totalSupply(), _initialYtSupply + _amount);
-    assertEq(fixedFeeSwapHook.PRINCIPAL_TOKEN().balanceOf(user), _initialPtUserBalance + _amount);
-    assertEq(fixedFeeSwapHook.YIELD_TOKEN().balanceOf(user), _initialYtUserBalance + _amount);
+    assertEq(vaultShareToken.balanceOf(address(fixedFeeSwap)), _initialHookVstBalance + _amount);
+    assertEq(fixedFeeSwap.PRINCIPAL_TOKEN().totalSupply(), _initialPtSupply + _amount);
+    assertEq(fixedFeeSwap.YIELD_TOKEN().totalSupply(), _initialYtSupply + _amount);
+    assertEq(fixedFeeSwap.PRINCIPAL_TOKEN().balanceOf(user), _initialPtUserBalance + _amount);
+    assertEq(fixedFeeSwap.YIELD_TOKEN().balanceOf(user), _initialYtUserBalance + _amount);
 
     assertEq(_ptAmount, _amount);
     assertEq(_ytAmount, _amount);
@@ -238,26 +238,26 @@ contract Deposit is FixedFeeSwapHookTest {
     _amount = _boundToRealisticAmount(_amount);
     deal(address(vaultShareToken), user, _amount);
     vm.prank(user);
-    vaultShareToken.approve(address(fixedFeeSwapHook), _amount);
+    vaultShareToken.approve(address(fixedFeeSwap), _amount);
 
     uint256 _ptAmount = _amount;
     uint256 _ytAmount = _amount;
 
     vm.expectEmit();
-    emit FixedFeeSwapHook.Deposit(user, _amount, _ptAmount, _ytAmount);
+    emit FixedFeeSwap.Deposit(user, _amount, _ptAmount, _ytAmount);
     vm.prank(user);
-    fixedFeeSwapHook.deposit(_amount);
+    fixedFeeSwap.deposit(_amount);
   }
 
   function testFuzz_RevertIf_DepositAfterMaturity(uint256 _amount) public {
     vm.warp(maturity + 1);
-    vm.expectRevert(FixedFeeSwapHook.FixedFeeSwapHook_SplitAfterMaturity.selector);
-    fixedFeeSwapHook.deposit(_amount);
+    vm.expectRevert(FixedFeeSwap.FixedFeeSwap_SplitAfterMaturity.selector);
+    fixedFeeSwap.deposit(_amount);
   }
 
   function test_RevertIf_AmountIsZero() public {
-    vm.expectRevert(FixedFeeSwapHook.FixedFeeSwapHook_InvalidAmount.selector);
-    fixedFeeSwapHook.deposit(0);
+    vm.expectRevert(FixedFeeSwap.FixedFeeSwap_InvalidAmount.selector);
+    fixedFeeSwap.deposit(0);
   }
 
   function testFuzz_RevertIf_InsufficientAllowance(uint256 _amount, uint256 _approvalAmount)
@@ -270,19 +270,19 @@ contract Deposit is FixedFeeSwapHookTest {
 
     // Approve less than the deposit amount
     vm.prank(user);
-    vaultShareToken.approve(address(fixedFeeSwapHook), _approvalAmount);
+    vaultShareToken.approve(address(fixedFeeSwap), _approvalAmount);
 
     // Attempt to deposit more than approved
     vm.prank(user);
     vm.expectRevert(
       abi.encodeWithSelector(
         IERC20Errors.ERC20InsufficientAllowance.selector,
-        address(fixedFeeSwapHook),
+        address(fixedFeeSwap),
         _approvalAmount,
         _amount
       )
     );
-    fixedFeeSwapHook.deposit(_amount);
+    fixedFeeSwap.deposit(_amount);
   }
 
   function testFuzz_RevertIf_InsufficientBalance(uint256 _amount, uint256 _userBalance) public {
@@ -294,16 +294,16 @@ contract Deposit is FixedFeeSwapHookTest {
 
     // Approve the full amount (even though user doesn't have it)
     vm.prank(user);
-    vaultShareToken.approve(address(fixedFeeSwapHook), _amount);
+    vaultShareToken.approve(address(fixedFeeSwap), _amount);
 
     // Attempt to deposit more than user has
     vm.prank(user);
-    vm.expectRevert(FixedFeeSwapHook.FixedFeeSwapHook_InsufficientBalance.selector);
-    fixedFeeSwapHook.deposit(_amount);
+    vm.expectRevert(FixedFeeSwap.FixedFeeSwap_InsufficientBalance.selector);
+    fixedFeeSwap.deposit(_amount);
   }
 }
 
-contract ClaimYTFeesAfterMaturity is FixedFeeSwapHookTest {
+contract ClaimYTFeesAfterMaturity is FixedFeeSwapTest {
   function testFuzz_SuccessfulClaim_BurnsTokensAndClaimsFees(
     uint256 _depositAmount,
     uint256 _feeToken0,
@@ -321,27 +321,26 @@ contract ClaimYTFeesAfterMaturity is FixedFeeSwapHookTest {
 
     // Sync user fees by doing a 0-value transfer (this updates their accrued fees)
     vm.prank(user);
-    fixedFeeSwapHook.YIELD_TOKEN().transfer(user, 0);
+    fixedFeeSwap.YIELD_TOKEN().transfer(user, 0);
 
     // Get user's accrued fees before claiming
-    (,, uint256 _accruedToken0, uint256 _accruedToken1) =
-      fixedFeeSwapHook.YIELD_TOKEN().userFees(user);
+    (,, uint256 _accruedToken0, uint256 _accruedToken1) = fixedFeeSwap.YIELD_TOKEN().userFees(user);
 
     // Move past maturity
     vm.warp(maturity + 1);
 
-    uint256 _ytBalance = fixedFeeSwapHook.YIELD_TOKEN().balanceOf(user);
-    uint256 _initialYtSupply = fixedFeeSwapHook.YIELD_TOKEN().totalSupply();
+    uint256 _ytBalance = fixedFeeSwap.YIELD_TOKEN().balanceOf(user);
+    uint256 _initialYtSupply = fixedFeeSwap.YIELD_TOKEN().totalSupply();
     uint256 _initialUserToken0Balance = token0.balanceOf(user);
     uint256 _initialUserToken1Balance = token1.balanceOf(user);
 
     // Claim and burn
     vm.prank(user);
-    fixedFeeSwapHook.claimYTFeesAfterMaturity();
+    fixedFeeSwap.claimYTFeesAfterMaturity();
 
     // Check tokens are burnt
-    assertEq(fixedFeeSwapHook.YIELD_TOKEN().balanceOf(user), 0);
-    assertEq(fixedFeeSwapHook.YIELD_TOKEN().totalSupply(), _initialYtSupply - _ytBalance);
+    assertEq(fixedFeeSwap.YIELD_TOKEN().balanceOf(user), 0);
+    assertEq(fixedFeeSwap.YIELD_TOKEN().totalSupply(), _initialYtSupply - _ytBalance);
 
     // Check fees are claimed (should match accrued fees)
     assertEq(token0.balanceOf(user), _initialUserToken0Balance + _accruedToken0);
@@ -351,15 +350,15 @@ contract ClaimYTFeesAfterMaturity is FixedFeeSwapHookTest {
   function testFuzz_RevertIf_BalanceIsZero(address _newUser) public {
     _assumeSafeAddress(_newUser);
     // Ensure the user doesn't have any YT tokens
-    vm.assume(fixedFeeSwapHook.YIELD_TOKEN().balanceOf(_newUser) == 0);
+    vm.assume(fixedFeeSwap.YIELD_TOKEN().balanceOf(_newUser) == 0);
 
     // Move past maturity
     vm.warp(maturity + 1);
 
     // User has no YT tokens (they were already burned or never had any)
     vm.prank(_newUser);
-    vm.expectRevert(FixedFeeSwapHook.FixedFeeSwapHook_InvalidAmount.selector);
-    fixedFeeSwapHook.claimYTFeesAfterMaturity();
+    vm.expectRevert(FixedFeeSwap.FixedFeeSwap_InvalidAmount.selector);
+    fixedFeeSwap.claimYTFeesAfterMaturity();
   }
 
   function testFuzz_RevertIf_MaturityNotHit(uint256 _depositAmount, uint256 _secondsBeforeMaturity)
@@ -375,8 +374,8 @@ contract ClaimYTFeesAfterMaturity is FixedFeeSwapHookTest {
     vm.warp(maturity - _secondsBeforeMaturity);
 
     vm.prank(user);
-    vm.expectRevert(FixedFeeSwapHook.FixedFeeSwapHook_BeforeMaturity.selector);
-    fixedFeeSwapHook.claimYTFeesAfterMaturity();
+    vm.expectRevert(FixedFeeSwap.FixedFeeSwap_BeforeMaturity.selector);
+    fixedFeeSwap.claimYTFeesAfterMaturity();
   }
 
   function testFuzz_SucceedsAtExactlyMaturity(
@@ -396,27 +395,26 @@ contract ClaimYTFeesAfterMaturity is FixedFeeSwapHookTest {
 
     // Sync user fees
     vm.prank(user);
-    fixedFeeSwapHook.YIELD_TOKEN().transfer(user, 0);
+    fixedFeeSwap.YIELD_TOKEN().transfer(user, 0);
 
     // Get user's accrued fees before claiming
-    (,, uint256 _accruedToken0, uint256 _accruedToken1) =
-      fixedFeeSwapHook.YIELD_TOKEN().userFees(user);
+    (,, uint256 _accruedToken0, uint256 _accruedToken1) = fixedFeeSwap.YIELD_TOKEN().userFees(user);
 
     // Try to claim exactly at maturity (should succeed since we check <, not <=)
     vm.warp(maturity);
 
-    uint256 _ytBalance = fixedFeeSwapHook.YIELD_TOKEN().balanceOf(user);
-    uint256 _initialYtSupply = fixedFeeSwapHook.YIELD_TOKEN().totalSupply();
+    uint256 _ytBalance = fixedFeeSwap.YIELD_TOKEN().balanceOf(user);
+    uint256 _initialYtSupply = fixedFeeSwap.YIELD_TOKEN().totalSupply();
     uint256 _initialUserToken0Balance = token0.balanceOf(user);
     uint256 _initialUserToken1Balance = token1.balanceOf(user);
 
     // Should succeed at exactly maturity
     vm.prank(user);
-    fixedFeeSwapHook.claimYTFeesAfterMaturity();
+    fixedFeeSwap.claimYTFeesAfterMaturity();
 
     // Check tokens are burnt
-    assertEq(fixedFeeSwapHook.YIELD_TOKEN().balanceOf(user), 0);
-    assertEq(fixedFeeSwapHook.YIELD_TOKEN().totalSupply(), _initialYtSupply - _ytBalance);
+    assertEq(fixedFeeSwap.YIELD_TOKEN().balanceOf(user), 0);
+    assertEq(fixedFeeSwap.YIELD_TOKEN().totalSupply(), _initialYtSupply - _ytBalance);
 
     // Check fees are claimed (should match accrued fees)
     assertEq(token0.balanceOf(user), _initialUserToken0Balance + _accruedToken0);
@@ -424,7 +422,7 @@ contract ClaimYTFeesAfterMaturity is FixedFeeSwapHookTest {
   }
 }
 
-contract Redeem is FixedFeeSwapHookTest {
+contract Redeem is FixedFeeSwapTest {
   function testFuzz_RedeemsBeforeMaturity(
     uint256 _depositAmount,
     uint256 _redeemAmount,
@@ -441,7 +439,7 @@ contract Redeem is FixedFeeSwapHookTest {
 
     // Ensure redeem amount doesn't exceed user's balance
     // After deposit, PT and YT balances are equal, so we only need to check one
-    uint256 _userBalance = fixedFeeSwapHook.PRINCIPAL_TOKEN().balanceOf(user);
+    uint256 _userBalance = fixedFeeSwap.PRINCIPAL_TOKEN().balanceOf(user);
     _redeemAmount = bound(_redeemAmount, 1, _userBalance);
 
     // Set up fees before maturity
@@ -449,17 +447,16 @@ contract Redeem is FixedFeeSwapHookTest {
 
     // Sync user fees by doing a 0-value transfer (this updates their accrued fees)
     vm.prank(user);
-    fixedFeeSwapHook.YIELD_TOKEN().transfer(user, 0);
+    fixedFeeSwap.YIELD_TOKEN().transfer(user, 0);
 
     // Get user's accrued fees before redeeming
-    (,, uint256 _accruedToken0, uint256 _accruedToken1) =
-      fixedFeeSwapHook.YIELD_TOKEN().userFees(user);
+    (,, uint256 _accruedToken0, uint256 _accruedToken1) = fixedFeeSwap.YIELD_TOKEN().userFees(user);
 
     // Get initial balances
     uint256 _initialUserVstBalance = vaultShareToken.balanceOf(user);
-    uint256 _initialHookVstBalance = vaultShareToken.balanceOf(address(fixedFeeSwapHook));
-    uint256 _initialPtSupply = fixedFeeSwapHook.PRINCIPAL_TOKEN().totalSupply();
-    uint256 _initialYtSupply = fixedFeeSwapHook.YIELD_TOKEN().totalSupply();
+    uint256 _initialHookVstBalance = vaultShareToken.balanceOf(address(fixedFeeSwap));
+    uint256 _initialPtSupply = fixedFeeSwap.PRINCIPAL_TOKEN().totalSupply();
+    uint256 _initialYtSupply = fixedFeeSwap.YIELD_TOKEN().totalSupply();
     uint256 _initialUserToken0Balance = token0.balanceOf(user);
     uint256 _initialUserToken1Balance = token1.balanceOf(user);
 
@@ -468,22 +465,22 @@ contract Redeem is FixedFeeSwapHookTest {
 
     // Redeem
     vm.prank(user);
-    uint256 _vstAmount = fixedFeeSwapHook.redeem(_redeemAmount);
+    uint256 _vstAmount = fixedFeeSwap.redeem(_redeemAmount);
 
     // Check VST is transferred
     assertEq(_vstAmount, _redeemAmount);
     assertEq(vaultShareToken.balanceOf(user), _initialUserVstBalance + _redeemAmount);
     assertEq(
-      vaultShareToken.balanceOf(address(fixedFeeSwapHook)), _initialHookVstBalance - _redeemAmount
+      vaultShareToken.balanceOf(address(fixedFeeSwap)), _initialHookVstBalance - _redeemAmount
     );
 
     // Check PT is burned
-    assertEq(fixedFeeSwapHook.PRINCIPAL_TOKEN().balanceOf(user), _userBalance - _redeemAmount);
-    assertEq(fixedFeeSwapHook.PRINCIPAL_TOKEN().totalSupply(), _initialPtSupply - _redeemAmount);
+    assertEq(fixedFeeSwap.PRINCIPAL_TOKEN().balanceOf(user), _userBalance - _redeemAmount);
+    assertEq(fixedFeeSwap.PRINCIPAL_TOKEN().totalSupply(), _initialPtSupply - _redeemAmount);
 
     // Check YT is burned
-    assertEq(fixedFeeSwapHook.YIELD_TOKEN().balanceOf(user), _userBalance - _redeemAmount);
-    assertEq(fixedFeeSwapHook.YIELD_TOKEN().totalSupply(), _initialYtSupply - _redeemAmount);
+    assertEq(fixedFeeSwap.YIELD_TOKEN().balanceOf(user), _userBalance - _redeemAmount);
+    assertEq(fixedFeeSwap.YIELD_TOKEN().totalSupply(), _initialYtSupply - _redeemAmount);
 
     // Check YT fees are claimed
     assertEq(token0.balanceOf(user), _initialUserToken0Balance + _accruedToken0);
@@ -508,7 +505,7 @@ contract Redeem is FixedFeeSwapHookTest {
       new VaultShareToken("Vault Share Token", "VST", address(0), address(token1));
 
     // Create a new hook with the ETH-enabled VST
-    FixedFeeSwapHook _hookWithEth = new FixedFeeSwapHook(_vstWithEth, maturity);
+    FixedFeeSwap _hookWithEth = new FixedFeeSwap(_vstWithEth, maturity);
 
     // Set up: user deposits VST to get PT and YT before maturity
     deal(address(_vstWithEth), user, _depositAmount);
@@ -583,7 +580,7 @@ contract Redeem is FixedFeeSwapHookTest {
       new VaultShareToken("Vault Share Token", "VST", address(0), address(token1));
 
     // Create a new hook with the ETH-enabled VST
-    FixedFeeSwapHook _hookWithEth = new FixedFeeSwapHook(_vstWithEth, maturity);
+    FixedFeeSwap _hookWithEth = new FixedFeeSwap(_vstWithEth, maturity);
 
     // Set up: user deposits VST to get PT and YT before maturity
     deal(address(_vstWithEth), user, _depositAmount);
@@ -617,9 +614,7 @@ contract Redeem is FixedFeeSwapHookTest {
 
     // Expect FeesClaimed event (with native ETH address(0) and ERC20 token1)
     vm.expectEmit();
-    emit FixedFeeSwapHook.FeesClaimed(
-      user, address(0), address(token1), _expectedFee0, _expectedFee1
-    );
+    emit FixedFeeSwap.FeesClaimed(user, address(0), address(token1), _expectedFee0, _expectedFee1);
 
     // Redeem
     vm.prank(user);
@@ -634,23 +629,23 @@ contract Redeem is FixedFeeSwapHookTest {
 
     // Ensure redeem amount doesn't exceed user's balance
     // After deposit, PT and YT balances are equal, so we only need to check one
-    uint256 _userBalance = fixedFeeSwapHook.PRINCIPAL_TOKEN().balanceOf(user);
+    uint256 _userBalance = fixedFeeSwap.PRINCIPAL_TOKEN().balanceOf(user);
     _redeemAmount = bound(_redeemAmount, 1, _userBalance);
 
     // Approve PT and YT tokens
     _approvePTAndYTForRedeem(user, _redeemAmount);
 
-    bool _maturityReached = block.timestamp >= fixedFeeSwapHook.MATURITY();
+    bool _maturityReached = block.timestamp >= fixedFeeSwap.MATURITY();
 
     vm.expectEmit();
-    emit FixedFeeSwapHook.Redeem(user, _redeemAmount, _maturityReached);
+    emit FixedFeeSwap.Redeem(user, _redeemAmount, _maturityReached);
     vm.prank(user);
-    fixedFeeSwapHook.redeem(_redeemAmount);
+    fixedFeeSwap.redeem(_redeemAmount);
   }
 
   function test_RevertIf_AmountIsZero() public {
-    vm.expectRevert(FixedFeeSwapHook.FixedFeeSwapHook_InvalidAmount.selector);
-    fixedFeeSwapHook.redeem(0);
+    vm.expectRevert(FixedFeeSwap.FixedFeeSwap_InvalidAmount.selector);
+    fixedFeeSwap.redeem(0);
   }
 
   function testFuzz_RevertIf_InsufficientPTBalance(uint256 _depositAmount, uint256 _redeemAmount)
@@ -661,13 +656,13 @@ contract Redeem is FixedFeeSwapHookTest {
 
     // Set up: user deposits VST to get PT and YT before maturity
     _depositVstForUser(user, _depositAmount);
-    uint256 _actualPtBalance = fixedFeeSwapHook.PRINCIPAL_TOKEN().balanceOf(user);
+    uint256 _actualPtBalance = fixedFeeSwap.PRINCIPAL_TOKEN().balanceOf(user);
 
     vm.assume(_redeemAmount > _actualPtBalance);
 
-    vm.expectRevert(FixedFeeSwapHook.FixedFeeSwapHook_InsufficientBalance.selector);
+    vm.expectRevert(FixedFeeSwap.FixedFeeSwap_InsufficientBalance.selector);
     vm.prank(user);
-    fixedFeeSwapHook.redeem(_redeemAmount);
+    fixedFeeSwap.redeem(_redeemAmount);
   }
 
   function testFuzz_RevertIf_InsufficientYieldTokenBalance(uint256 _depositAmount) public {
@@ -676,20 +671,20 @@ contract Redeem is FixedFeeSwapHookTest {
     // User deposits to get PT and YT (equal amounts)
     _depositVstForUser(user, _depositAmount);
 
-    uint256 _ytBalance = fixedFeeSwapHook.YIELD_TOKEN().balanceOf(user);
+    uint256 _ytBalance = fixedFeeSwap.YIELD_TOKEN().balanceOf(user);
 
     // Set PT balance to be YT + 1 to create the scenario where user has enough PT
     // but not enough YT
     uint256 _redeemAmount = _ytBalance + 1;
-    deal(address(fixedFeeSwapHook.PRINCIPAL_TOKEN()), user, _redeemAmount);
+    deal(address(fixedFeeSwap.PRINCIPAL_TOKEN()), user, _redeemAmount);
 
     // Approve PT tokens (only PT needed since YT check happens first)
     vm.prank(user);
-    fixedFeeSwapHook.PRINCIPAL_TOKEN().approve(address(fixedFeeSwapHook), _redeemAmount);
+    fixedFeeSwap.PRINCIPAL_TOKEN().approve(address(fixedFeeSwap), _redeemAmount);
 
-    vm.expectRevert(FixedFeeSwapHook.FixedFeeSwapHook_InsufficientBalance.selector);
+    vm.expectRevert(FixedFeeSwap.FixedFeeSwap_InsufficientBalance.selector);
     vm.prank(user);
-    fixedFeeSwapHook.redeem(_redeemAmount);
+    fixedFeeSwap.redeem(_redeemAmount);
   }
 
   function testFuzz_RevertIf_InsufficientVSTBalanceInHook(
@@ -703,28 +698,28 @@ contract Redeem is FixedFeeSwapHookTest {
     _depositVstForUser(user, _depositAmount);
 
     // Ensure redeem amount doesn't exceed user's PT balance
-    uint256 _userBalance = fixedFeeSwapHook.PRINCIPAL_TOKEN().balanceOf(user);
+    uint256 _userBalance = fixedFeeSwap.PRINCIPAL_TOKEN().balanceOf(user);
     _redeemAmount = bound(_redeemAmount, 1, _userBalance);
 
     // Manually reduce hook's VST balance to create insufficient balance scenario
     // Set hook's balance to be less than the redeem amount
     uint256 _insufficientBalance = _redeemAmount > 0 ? _redeemAmount - 1 : 0;
-    deal(address(vaultShareToken), address(fixedFeeSwapHook), _insufficientBalance);
+    deal(address(vaultShareToken), address(fixedFeeSwap), _insufficientBalance);
 
     // Approve PT tokens
     vm.prank(user);
-    fixedFeeSwapHook.PRINCIPAL_TOKEN().approve(address(fixedFeeSwapHook), _redeemAmount);
+    fixedFeeSwap.PRINCIPAL_TOKEN().approve(address(fixedFeeSwap), _redeemAmount);
 
     // Approve YT tokens if before maturity
-    if (block.timestamp < fixedFeeSwapHook.MATURITY()) {
+    if (block.timestamp < fixedFeeSwap.MATURITY()) {
       vm.prank(user);
-      fixedFeeSwapHook.YIELD_TOKEN().approve(address(fixedFeeSwapHook), _redeemAmount);
+      fixedFeeSwap.YIELD_TOKEN().approve(address(fixedFeeSwap), _redeemAmount);
     }
 
     // Should revert because hook doesn't have enough VST
-    vm.expectRevert(FixedFeeSwapHook.FixedFeeSwapHook_InsufficientBalance.selector);
+    vm.expectRevert(FixedFeeSwap.FixedFeeSwap_InsufficientBalance.selector);
     vm.prank(user);
-    fixedFeeSwapHook.redeem(_redeemAmount);
+    fixedFeeSwap.redeem(_redeemAmount);
   }
 
   /// @notice Tests revert when native ETH transfer fails (non-payable contract).
@@ -745,7 +740,7 @@ contract Redeem is FixedFeeSwapHookTest {
       new VaultShareToken("Vault Share Token", "VST", address(0), address(token1));
 
     // Create a new hook with the ETH-enabled VST
-    FixedFeeSwapHook _hookWithEth = new FixedFeeSwapHook(_vstWithEth, maturity);
+    FixedFeeSwap _hookWithEth = new FixedFeeSwap(_vstWithEth, maturity);
 
     // Deploy a contract that rejects ETH transfers
     NonPayableContractMock _nonPayableContract = new NonPayableContractMock();
@@ -779,7 +774,7 @@ contract Redeem is FixedFeeSwapHookTest {
     _hookWithEth.PRINCIPAL_TOKEN().approve(address(_hookWithEth), _redeemAmount);
 
     // Should revert because non-payable contract cannot receive ETH
-    vm.expectRevert(FixedFeeSwapHook.FixedFeeSwapHook_TransferFailed.selector);
+    vm.expectRevert(FixedFeeSwap.FixedFeeSwap_TransferFailed.selector);
     vm.prank(address(_nonPayableContract));
     _hookWithEth.redeem(_redeemAmount);
   }

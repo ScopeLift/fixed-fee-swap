@@ -29,7 +29,7 @@ contract YieldToken is ERC20, IFeeTrackingToken {
   //////////////////////////////////////////////////////////////*/
 
   /// @notice The fixed fee swap hook address.
-  address public immutable FIXED_FEE_SWAP_HOOK;
+  address public immutable FIXED_FEE_SWAP;
 
   /// @notice The token address in which token0 fees are collected / distributed.
   /// @dev Use address(0) to represent native ETH following Uniswap v4 `Currency` convention.
@@ -52,15 +52,15 @@ contract YieldToken is ERC20, IFeeTrackingToken {
   /// @notice Initializes the yield token metadata.
   /// @param _name ERC20 name value.
   /// @param _symbol ERC20 symbol value.
-  /// @param _fixedFeeSwapHook The fixed fee swap hook address.
+  /// @param _fixedFeeSwap The fixed fee swap hook address.
   constructor(
     string memory _name,
     string memory _symbol,
-    address _fixedFeeSwapHook,
+    address _fixedFeeSwap,
     address _feeToken0,
     address _feeToken1
   ) ERC20(_name, _symbol) {
-    FIXED_FEE_SWAP_HOOK = _fixedFeeSwapHook;
+    FIXED_FEE_SWAP = _fixedFeeSwap;
     FEE_TOKEN0 = _feeToken0;
     FEE_TOKEN1 = _feeToken1;
   }
@@ -128,7 +128,7 @@ contract YieldToken is ERC20, IFeeTrackingToken {
 
   /// @notice Requires the caller to be the fixed fee swap hook.
   function _requireHook() internal view {
-    if (msg.sender != FIXED_FEE_SWAP_HOOK) revert YieldToken_NotAuthorized();
+    if (msg.sender != FIXED_FEE_SWAP) revert YieldToken_NotAuthorized();
   }
 
   /// @inheritdoc ERC20

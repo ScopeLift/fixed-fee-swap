@@ -76,8 +76,8 @@ contract Constructor is YieldTokenTest {
     assertEq(yieldToken.symbol(), "YT");
     assertEq(yieldToken.decimals(), 18);
 
-    // fixedFeeSwapHook and fee tokens are set correctly
-    assertEq(yieldToken.FIXED_FEE_SWAP_HOOK(), hook);
+    // fixedFeeSwap and fee tokens are set correctly
+    assertEq(yieldToken.FIXED_FEE_SWAP(), hook);
     assertEq(yieldToken.FEE_TOKEN0(), address(token0));
     assertEq(yieldToken.FEE_TOKEN1(), address(token1));
   }
