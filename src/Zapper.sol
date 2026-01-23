@@ -4,7 +4,6 @@ pragma solidity 0.8.26;
 // Internal Imports
 import {PrincipalToken} from "src/PrincipalToken.sol";
 import {YieldToken} from "src/YieldToken.sol";
-import {LPVault} from "src/LPVault.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
 import {FixedFeeSwap} from "src/FixedFeeSwap.sol";
 import {FeeTracking} from "src/lib/FeeTracking.sol";
