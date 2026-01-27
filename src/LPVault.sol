@@ -205,8 +205,6 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     (uint128[] memory _liquidityPerPosition, uint128 _liquidity0) =
       _calculateInitialLiquidity(_amount0Max, _amount1Max);
 
-    liquidityInitialized = true;
-
     bytes memory _result = POOL_MANAGER.unlock(
       abi.encode(
         CallbackAction.InitializeLiquidity,
@@ -231,6 +229,8 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     // Mint shares equal to position0's liquidity
     _shares = uint256(_liquidity0);
     _mint(msg.sender, _shares);
+
+    liquidityInitialized = true;
 
     emit Deposited(msg.sender, _shares, _amount0Used, _amount1Used);
   }
@@ -499,22 +499,24 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
 
     uint256 _totalAmount0Ref;
     uint256 _totalAmount1Ref;
+    uint256 _liquidityReference = 1e18;
     for (uint256 _i = 0; _i < positions.length; _i++) {
       LiquidityPosition memory _position = positions[_i];
       (uint256 _amount0Ref, uint256 _amount1Ref) =
-        _getAmountsForLiquidity(_position, _sqrtPriceX96, uint128(_position.weight));
-      _totalAmount0Ref += _amount0Ref;
-      _totalAmount1Ref += _amount1Ref;
+        _getAmountsForLiquidity(_position, _sqrtPriceX96, uint128(_liquidityReference));
+      _totalAmount0Ref += _amount0Ref * _position.weight;
+      _totalAmount1Ref += _amount1Ref * _position.weight;
     }
 
     if (_totalAmount0Ref == 0 && _totalAmount1Ref == 0) revert LPVault__ZeroLiquidity();
 
     uint256 _liquidity0Full = type(uint256).max;
     if (_totalAmount0Ref > 0) {
-      _liquidity0Full = FullMath.mulDiv(_amount0Max, _weight0, _totalAmount0Ref);
+      _liquidity0Full = FullMath.mulDiv(_amount0Max, uint256(_weight0) * _liquidityReference, _totalAmount0Ref);
     }
     if (_totalAmount1Ref > 0) {
-      uint256 _liquidity0ByAmount1 = FullMath.mulDiv(_amount1Max, _weight0, _totalAmount1Ref);
+      uint256 _liquidity0ByAmount1 =
+        FullMath.mulDiv(_amount1Max, uint256(_weight0) * _liquidityReference, _totalAmount1Ref);
       if (_liquidity0ByAmount1 < _liquidity0Full) _liquidity0Full = _liquidity0ByAmount1;
     }
     if (_liquidity0Full == 0) revert LPVault__ZeroLiquidity();
