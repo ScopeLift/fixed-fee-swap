@@ -190,8 +190,8 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     if (_totalWeight != BIPS) revert LPVault__InvalidLiquidityDistribution();
   }
 
-  /// @notice Initializes liquidity for all positions based on configured weights. Can only be called once.
-  /// @param _amount0Max Maximum amount of token0 willing to provide.
+  /// @notice Initializes liquidity for all positions based on configured weights. Can only be
+  /// called once. @param _amount0Max Maximum amount of token0 willing to provide.
   /// @param _amount1Max Maximum amount of token1 willing to provide.
   /// @return _shares The amount of vault shares minted.
   /// @return _amount0Used The actual amount of token0 used.
@@ -238,8 +238,8 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   /// @notice Deposits tokens into the vault by specifying desired position0 liquidity.
   /// @param _amount0Max The maximum amount of token0 to deposit across all positions.
   /// @param _amount1Max The maximum amount of token1 to deposit across all positions.
-  /// @param _liquidity The liquidity to add to position0. Other positions calculated proportionally.
-  /// @dev Requires liquidity to be initialized first via initializeLiquidity().
+  /// @param _liquidity The liquidity to add to position0. Other positions calculated
+  /// proportionally. @dev Requires liquidity to be initialized first via initializeLiquidity().
   /// @return _shares The amount of vault shares minted (equal to _liquidity).
   /// @return _amount0Used The actual amount of token0 used.
   /// @return _amount1Used The actual amount of token1 used.
@@ -323,9 +323,7 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     }
 
     // If all liquidity is withdrawn, reset initialization to allow re-initialization.
-    if (positions[0].liquidity == 0) {
-      liquidityInitialized = false;
-    }
+    if (positions[0].liquidity == 0) liquidityInitialized = false;
 
     // Burn shares before making external calls (reentrancy protection).
     _burn(msg.sender, _shares);
@@ -363,7 +361,9 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
 
     if (_action == CallbackAction.Deposit) return _handleDepositCallback(_actionData);
     if (_action == CallbackAction.Withdraw) return _handleWithdrawCallback(_actionData);
-    if (_action == CallbackAction.InitializeLiquidity) return _handleInitializeLiquidityCallback(_actionData);
+    if (_action == CallbackAction.InitializeLiquidity) {
+      return _handleInitializeLiquidityCallback(_actionData);
+    }
     return _handleCollectFeesCallback();
   }
 
@@ -377,10 +377,9 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   {
     DepositCallbackData memory _callbackData = abi.decode(_actionData, (DepositCallbackData));
 
-    (int256 _totalDelta0, int256 _totalDelta1, int256 _totalFeeDelta0, int256 _totalFeeDelta1) =
-      _addLiquidityToPositions(
-        _callbackData.liquidityPerPosition, _callbackData.amount0Max, _callbackData.amount1Max
-      );
+    (int256 _totalDelta0, int256 _totalDelta1, int256 _totalFeeDelta0, int256 _totalFeeDelta1) = _addLiquidityToPositions(
+      _callbackData.liquidityPerPosition, _callbackData.amount0Max, _callbackData.amount1Max
+    );
 
     (uint256 _amount0Used, uint256 _amount1Used) =
       _settleDeltas(_totalDelta0, _totalDelta1, _callbackData.sender);
@@ -512,7 +511,8 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
 
     uint256 _liquidity0Full = type(uint256).max;
     if (_totalAmount0Ref > 0) {
-      _liquidity0Full = FullMath.mulDiv(_amount0Max, uint256(_weight0) * _liquidityReference, _totalAmount0Ref);
+      _liquidity0Full =
+        FullMath.mulDiv(_amount0Max, uint256(_weight0) * _liquidityReference, _totalAmount0Ref);
     }
     if (_totalAmount1Ref > 0) {
       uint256 _liquidity0ByAmount1 =
@@ -545,7 +545,12 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   )
     internal
     virtual
-    returns (int256 _totalDelta0, int256 _totalDelta1, int256 _totalFeeDelta0, int256 _totalFeeDelta1)
+    returns (
+      int256 _totalDelta0,
+      int256 _totalDelta1,
+      int256 _totalFeeDelta0,
+      int256 _totalFeeDelta1
+    )
   {
     for (uint256 _i = 0; _i < positions.length; _i++) {
       LiquidityPosition memory _position = positions[_i];

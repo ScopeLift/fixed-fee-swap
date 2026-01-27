@@ -125,14 +125,11 @@ contract LPVaultTest is Test, Deployers {
     _approveToken1(_initializer, address(vault), _amount1Max);
 
     vm.prank(_initializer);
-    (_shares, _amount0Used, _amount1Used) =
-      vault.initializeLiquidity(_amount0Max, _amount1Max);
+    (_shares, _amount0Used, _amount1Used) = vault.initializeLiquidity(_amount0Max, _amount1Max);
   }
 
   function _ensureInitialized(address _initializer) internal {
-    if (!vault.liquidityInitialized()) {
-      _initializeLiquidity(_initializer);
-    }
+    if (!vault.liquidityInitialized()) _initializeLiquidity(_initializer);
   }
 
   function _deposit(address _depositor, uint256 _amount0, uint256 _amount1)
@@ -173,8 +170,12 @@ contract LPVaultTest is Test, Deployers {
       (int24 _tickLower, int24 _tickUpper,, uint128 _positionLiquidity) = vault.positions(_i);
 
       uint128 _liquidityToRemove;
-      if (_i == 0) _liquidityToRemove = uint128(_shares);
-      else _liquidityToRemove = uint128(FullMath.mulDiv(_shares, _positionLiquidity, _position0Liquidity));
+      if (_i == 0) {
+        _liquidityToRemove = uint128(_shares);
+      } else {
+        _liquidityToRemove =
+          uint128(FullMath.mulDiv(_shares, _positionLiquidity, _position0Liquidity));
+      }
 
       uint160 _sqrtPriceLowerX96 = TickMath.getSqrtPriceAtTick(_tickLower);
       uint160 _sqrtPriceUpperX96 = TickMath.getSqrtPriceAtTick(_tickUpper);
@@ -253,7 +254,8 @@ contract LPVaultTest is Test, Deployers {
 
     uint256 _liquidity0 = type(uint256).max;
     if (_totalAmount0Ref > 0) {
-      _liquidity0 = FullMath.mulDiv(_amount0, uint256(_weight0) * _liquidityReference, _totalAmount0Ref);
+      _liquidity0 =
+        FullMath.mulDiv(_amount0, uint256(_weight0) * _liquidityReference, _totalAmount0Ref);
     }
 
     uint256 _liquidity0ByAmount1 = type(uint256).max;
@@ -298,10 +300,7 @@ contract LPVaultTest is Test, Deployers {
         : uint128(FullMath.mulDiv(_liquidity, _positionLiquidity, _position0Liquidity));
 
       LPVault.LiquidityPosition memory _position = LPVault.LiquidityPosition({
-        tickLower: _tickLower,
-        tickUpper: _tickUpper,
-        weight: _weight,
-        liquidity: 0
+        tickLower: _tickLower, tickUpper: _tickUpper, weight: _weight, liquidity: 0
       });
 
       (uint256 _amount0delta, uint256 _amount1delta) =
@@ -641,8 +640,10 @@ contract Deposit is LPVaultTest {
     // Calculate expected liquidity for each position based on current ratios
     uint128[] memory _expectedLiquidity = new uint128[](defaultPositions.length);
     _expectedLiquidity[0] = _initLiquidity0 + _liquidity;
-    _expectedLiquidity[1] = _initLiquidity1 + uint128(FullMath.mulDiv(_liquidity, _initLiquidity1, _initLiquidity0));
-    _expectedLiquidity[2] = _initLiquidity2 + uint128(FullMath.mulDiv(_liquidity, _initLiquidity2, _initLiquidity0));
+    _expectedLiquidity[1] =
+      _initLiquidity1 + uint128(FullMath.mulDiv(_liquidity, _initLiquidity1, _initLiquidity0));
+    _expectedLiquidity[2] =
+      _initLiquidity2 + uint128(FullMath.mulDiv(_liquidity, _initLiquidity2, _initLiquidity0));
 
     vm.prank(depositor);
     vault.deposit(_amount0Max, _amount1Max, _liquidity);
@@ -709,7 +710,8 @@ contract Deposit is LPVaultTest {
 
   function test_RevertIf_NotInitialized(address _caller, uint128 _liquidity) public {
     // Deploy a fresh vault without initialization
-    LPVault freshVault = new LPVault(manager, defaultPoolKey, defaultPositions, DEFAULT_NAME, DEFAULT_SYMBOL);
+    LPVault freshVault =
+      new LPVault(manager, defaultPoolKey, defaultPositions, DEFAULT_NAME, DEFAULT_SYMBOL);
 
     _assumeSafeAddress(_caller);
     _liquidity = uint128(bound(_liquidity, 1, type(uint96).max));
