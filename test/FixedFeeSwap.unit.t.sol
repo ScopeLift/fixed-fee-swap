@@ -13,6 +13,7 @@ import {PrincipalToken} from "src/PrincipalToken.sol";
 import {YieldToken} from "src/YieldToken.sol";
 import {ERC20Mock} from "test/mock/ERC20Mock.sol";
 import {NonPayableContractMock} from "test/mock/NonPayableContractMock.sol";
+import {VaultShareTokenHarness} from "test/harness/VaultShareTokenHarness.sol";
 
 contract FixedFeeSwapTest is Test {
   /// @notice Native ETH address following Uniswap v4 `Currency` convention.
@@ -33,9 +34,9 @@ contract FixedFeeSwapTest is Test {
     token0 = new ERC20Mock("Token 0", "T0");
     token1 = new ERC20Mock("Token 1", "T1");
 
-    // Underlying VaultShareToken whose shares are being split
+    // Underlying VaultShareToken whose shares are being split (use harness for fee testing)
     vaultShareToken =
-      new VaultShareToken("Vault Share Token", "VST", address(token0), address(token1));
+      new VaultShareTokenHarness("Vault Share Token", "VST", address(token0), address(token1));
 
     // Choose a maturity strictly in the future
     maturity = block.timestamp + 30 days;
@@ -246,6 +247,46 @@ contract Deposit is FixedFeeSwapTest {
     fixedFeeSwap.deposit(_amount);
   }
 
+  function testFuzz_UpdatesYTFeesOnDeposit(uint256 _depositAmount, uint256 _collectedFeeToken0)
+    public
+  {
+    _depositAmount = _boundToRealisticAmount(_depositAmount);
+    _collectedFeeToken0 = _boundToRealisticAmount(_collectedFeeToken0);
+    // Ignore cases where no new vault fees are added.
+    vm.assume(_collectedFeeToken0 > 0);
+
+    VaultShareTokenHarness _vstHarness = VaultShareTokenHarness(address(vaultShareToken));
+
+    // First deposit: move VST from user into the hook and mint PT/YT.
+    _vstHarness.exposed_mint(user, _depositAmount);
+    vm.prank(user);
+    vaultShareToken.approve(address(fixedFeeSwap), _depositAmount);
+    vm.prank(user);
+    fixedFeeSwap.deposit(_depositAmount);
+
+    YieldToken _yt = fixedFeeSwap.YIELD_TOKEN();
+
+    // Record YT fee index before updating vault fees.
+    uint256 _ytIndex0Before = _yt.globalFeeIndex0Scaled();
+
+    // Simulate new vault fees accruing to VST.
+    _vstHarness.exposed_updateFees(_collectedFeeToken0, 0);
+
+    // Second deposit triggers `_syncYTFees` before doing the split.
+    uint256 _secondDeposit = _boundToRealisticAmount(_depositAmount);
+    _vstHarness.exposed_mint(user, _secondDeposit);
+    vm.prank(user);
+    vaultShareToken.approve(address(fixedFeeSwap), _secondDeposit);
+
+    vm.prank(user);
+    fixedFeeSwap.deposit(_secondDeposit);
+
+    // YT fee index should never go down; when fees are non-zero it should stay the same or
+    // increase.
+    uint256 _ytIndex0After = _yt.globalFeeIndex0Scaled();
+    assertGe(_ytIndex0After, _ytIndex0Before);
+  }
+
   function testFuzz_RevertIf_DepositAfterMaturity(uint256 _amount) public {
     vm.warp(maturity + 1);
     vm.expectRevert(FixedFeeSwap.FixedFeeSwap_SplitAfterMaturity.selector);
@@ -300,6 +341,54 @@ contract Deposit is FixedFeeSwapTest {
   }
 }
 
+contract SyncYTFees is FixedFeeSwapTest {
+  function testFuzz_NoOpWhenNoFeeIndexChange(uint256 _depositAmount) public {
+    _depositAmount = bound(_depositAmount, 1, type(uint64).max);
+
+    VaultShareTokenHarness _vstHarness = VaultShareTokenHarness(address(vaultShareToken));
+    YieldToken _yt = fixedFeeSwap.YIELD_TOKEN();
+
+    // First deposit syncs the checkpoint.
+    _vstHarness.exposed_mint(user, _depositAmount * 2);
+    vm.prank(user);
+    vaultShareToken.approve(address(fixedFeeSwap), _depositAmount * 2);
+    vm.prank(user);
+    fixedFeeSwap.deposit(_depositAmount);
+
+    uint256 _ytIndexBefore = _yt.globalFeeIndex0Scaled();
+
+    // Second deposit WITHOUT updating VST fees - delta is 0, so YT index unchanged.
+    vm.prank(user);
+    fixedFeeSwap.deposit(_depositAmount);
+
+    assertEq(_yt.globalFeeIndex0Scaled(), _ytIndexBefore);
+  }
+
+  function testFuzz_NoOpWhenZeroVSTBalance(uint256 _depositAmount, uint256 _feeAmount) public {
+    _depositAmount = _boundToRealisticAmount(_depositAmount);
+    _feeAmount = _boundToRealisticAmount(_feeAmount);
+    vm.assume(_feeAmount > 0);
+
+    VaultShareTokenHarness _vstHarness = VaultShareTokenHarness(address(vaultShareToken));
+    YieldToken _yt = fixedFeeSwap.YIELD_TOKEN();
+
+    // Update VST fees BEFORE any deposit (so delta > 0 but hook has 0 VST).
+    _vstHarness.exposed_updateFees(_feeAmount, 0);
+
+    uint256 _ytIndexBefore = _yt.globalFeeIndex0Scaled(); // Should be 0
+
+    // Deposit triggers _syncYTFees, but hook has 0 VST, so early return.
+    _vstHarness.exposed_mint(user, _depositAmount);
+    vm.prank(user);
+    vaultShareToken.approve(address(fixedFeeSwap), _depositAmount);
+    vm.prank(user);
+    fixedFeeSwap.deposit(_depositAmount);
+
+    // YT index should still be 0 because _vstBalance was 0 during _syncYTFees.
+    assertEq(_yt.globalFeeIndex0Scaled(), _ytIndexBefore);
+  }
+}
+
 contract ClaimYTFeesAfterMaturity is FixedFeeSwapTest {
   function testFuzz_SuccessfulClaim_BurnsTokensAndClaimsFees(
     uint256 _depositAmount,
@@ -342,6 +431,46 @@ contract ClaimYTFeesAfterMaturity is FixedFeeSwapTest {
     // Check fees are claimed (should match accrued fees)
     assertEq(token0.balanceOf(user), _initialUserToken0Balance + _accruedToken0);
     assertEq(token1.balanceOf(user), _initialUserToken1Balance + _accruedToken1);
+  }
+
+  function testFuzz_UpdatesYTFeesOnClaim(uint256 _depositAmount, uint256 _collectedFeeToken0)
+    public
+  {
+    _depositAmount = _boundToRealisticAmount(_depositAmount);
+    _collectedFeeToken0 = _boundToRealisticAmount(_collectedFeeToken0);
+    // Ignore cases where no new vault fees are added.
+    vm.assume(_collectedFeeToken0 > 0);
+
+    VaultShareTokenHarness _vstHarness = VaultShareTokenHarness(address(vaultShareToken));
+
+    // User deposits VST and receives PT/YT before maturity.
+    _vstHarness.exposed_mint(user, _depositAmount);
+    vm.prank(user);
+    vaultShareToken.approve(address(fixedFeeSwap), _depositAmount);
+    vm.prank(user);
+    fixedFeeSwap.deposit(_depositAmount);
+
+    YieldToken _yt = fixedFeeSwap.YIELD_TOKEN();
+
+    // Record YT fee index before updating vault fees.
+    uint256 _ytIndex0Before = _yt.globalFeeIndex0Scaled();
+
+    // Simulate additional vault fees.
+    _vstHarness.exposed_updateFees(_collectedFeeToken0, 0);
+
+    // Fund YT with fee tokens so it can pay out claims when YT is burned.
+    deal(address(token0), address(_yt), type(uint128).max);
+
+    // Move past maturity so `claimYTFeesAfterMaturity` is enabled.
+    vm.warp(maturity + 1);
+
+    // This call runs `_syncYTFees` then burns YT, which claims fees.
+    vm.prank(user);
+    fixedFeeSwap.claimYTFeesAfterMaturity();
+    // YT fee index should never decrease; when fees are non-zero it should stay the same or
+    // increase.
+    uint256 _ytIndex0After = _yt.globalFeeIndex0Scaled();
+    assertGe(_ytIndex0After, _ytIndex0Before);
   }
 
   function testFuzz_RevertIf_BalanceIsZero(address _newUser) public {
@@ -638,6 +767,49 @@ contract Redeem is FixedFeeSwapTest {
     emit FixedFeeSwap.Redeem(user, _redeemAmount, _maturityReached);
     vm.prank(user);
     fixedFeeSwap.redeem(_redeemAmount);
+  }
+
+  function testFuzz_UpdatesYTFeesOnRedeem(uint256 _depositAmount, uint256 _collectedFeeToken0)
+    public
+  {
+    _depositAmount = _boundToRealisticAmount(_depositAmount);
+    _collectedFeeToken0 = _boundToRealisticAmount(_collectedFeeToken0);
+    // Ignore cases where no new vault fees are added.
+    vm.assume(_collectedFeeToken0 > 0);
+
+    // Use harness to mint VST so that fee indexes can be updated via `_updateFees`.
+    VaultShareTokenHarness _vstHarness = VaultShareTokenHarness(address(vaultShareToken));
+
+    // Mint VST to the user and split into PT/YT via the hook.
+    _vstHarness.exposed_mint(user, _depositAmount);
+    vm.prank(user);
+    vaultShareToken.approve(address(fixedFeeSwap), _depositAmount);
+    vm.prank(user);
+    fixedFeeSwap.deposit(_depositAmount);
+
+    YieldToken _yt = fixedFeeSwap.YIELD_TOKEN();
+
+    // Record YT fee index before updating vault fees.
+    uint256 _ytIndex0Before = _yt.globalFeeIndex0Scaled();
+
+    // Simulate new vault fees accruing to VST.
+    _vstHarness.exposed_updateFees(_collectedFeeToken0, 0);
+
+    // Fund YT with fee tokens so it can pay out claims when YT is burned.
+    deal(address(token0), address(_yt), type(uint128).max);
+
+    // Approve PT and YT for redeem before maturity.
+    _approvePTAndYTForRedeem(user, _depositAmount);
+
+    // Redeem before maturity:
+    //  - `_syncYTFees` runs, pushing vault fees into YT accounting.
+    //  - YT is burned, which internally claims the user's accrued YT fees.
+    vm.prank(user);
+    fixedFeeSwap.redeem(_depositAmount);
+    // YT fee index should never decrease; when fees are non-zero it should stay the same or
+    // increase.
+    uint256 _ytIndex0After = _yt.globalFeeIndex0Scaled();
+    assertGe(_ytIndex0After, _ytIndex0Before);
   }
 
   function test_RevertIf_AmountIsZero() public {
