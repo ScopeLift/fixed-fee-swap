@@ -106,7 +106,7 @@ contract VaultShareToken is ERC20, IFeeTrackingToken {
 
   /// @inheritdoc ERC20
   /// @dev Updates user fee accounting for both the sender and the recipient.
-  function _update(address _from, address _to, uint256 _value) internal override {
+  function _update(address _from, address _to, uint256 _value) internal virtual override {
     if (_from != address(0)) _updateUserFees(_from);
     if (_to != address(0)) _updateUserFees(_to);
     ERC20._update(_from, _to, _value);

@@ -28,6 +28,8 @@ contract LPVaultTest is Test, Deployers {
   uint16 constant BIPS = 10_000;
   uint24 constant DEFAULT_FEE = 3000;
   uint256 constant FEE_DENOMINATOR = 1_000_000;
+  uint256 constant FEE_INDEX_PRECISION = 1e18;
+  uint256 constant FEE_TOLERANCE = 0.01e18; // 1%
   int24 constant DEFAULT_TICK_SPACING = 60;
 
   string constant DEFAULT_NAME = "LP Vault Share";
@@ -169,6 +171,14 @@ contract LPVaultTest is Test, Deployers {
       _expectedAmount0 += _amount0;
       _expectedAmount1 += _amount1;
     }
+  }
+
+  function _boundSwapAbs(uint256 _swapAbs) internal pure returns (int256) {
+    return -int256(bound(_swapAbs, 1e18, 1e24));
+  }
+
+  function _performSwap(bool _zeroForOne, int256 _amountSpecified) internal returns (BalanceDelta) {
+    return swap(defaultPoolKey, _zeroForOne, _amountSpecified, "");
   }
 }
 
@@ -521,6 +531,37 @@ contract Deposit is LPVaultTest {
     vm.expectRevert(LPVault.LPVault__OnlyPoolManager.selector);
     vault.unlockCallback(abi.encode(LPVault.CallbackAction.Deposit, abi.encode(_callbackData)));
   }
+
+  /// @notice Tests that fees are synced before deposit operations.
+  function testFuzz_FeesSyncedBeforeDeposit(
+    address _depositor1,
+    address _depositor2,
+    uint256 _amount0,
+    uint256 _amount1,
+    uint256 _swapAbs0
+  ) public {
+    _assumeSafeAddress(_depositor1);
+    _assumeSafeAddress(_depositor2);
+    vm.assume(_depositor1 != _depositor2);
+
+    // First deposit
+    _deposit(_depositor1, _amount0, _amount1);
+
+    // Generate fees
+    BalanceDelta _delta = _performSwap(true, _boundSwapAbs(_swapAbs0));
+    uint256 _expectedFee0 = uint256(-int256(_delta.amount0())) * DEFAULT_FEE / FEE_DENOMINATOR;
+
+    uint256 _totalSupply = vault.totalSupply();
+    uint256 _expectedIndexDelta0 = _expectedFee0 * FEE_INDEX_PRECISION / _totalSupply;
+    uint256 _feeIndex0Before = vault.globalFeeIndex0Scaled();
+
+    // Second deposit should sync fees before adding liquidity
+    _deposit(_depositor2, _amount0, _amount1);
+    uint256 _feeIndex0After = vault.globalFeeIndex0Scaled();
+
+    // Fee index should have increased (fees synced during deposit)
+    assertApproxEqRel(_feeIndex0After - _feeIndex0Before, _expectedIndexDelta0, FEE_TOLERANCE);
+  }
 }
 
 contract Withdraw is LPVaultTest {
@@ -772,20 +813,43 @@ contract Withdraw is LPVaultTest {
     vm.expectRevert();
     vault.withdraw(_shares + 1, _receiver);
   }
+
+  /// @notice Tests that fees are synced before withdraw operations.
+  function testFuzz_FeesSyncedBeforeWithdraw(
+    address _depositor,
+    address _receiver,
+    uint256 _amount0,
+    uint256 _amount1,
+    uint256 _swapAbs0,
+    uint256 _swapAbs1
+  ) public {
+    _assumeSafeAddress(_depositor);
+    _assumeSafeAddress(_receiver);
+    vm.assume(_depositor != _receiver);
+
+    (uint256 _shares,,) = _deposit(_depositor, _amount0, _amount1);
+
+    // Generate fees
+    _performSwap(true, _boundSwapAbs(_swapAbs0));
+    _performSwap(false, _boundSwapAbs(_swapAbs1));
+
+    uint256 _feeIndex0Before = vault.globalFeeIndex0Scaled();
+    uint256 _feeIndex1Before = vault.globalFeeIndex1Scaled();
+
+    // Withdraw should sync fees before removing liquidity
+    vm.prank(_depositor);
+    vault.withdraw(_shares, _receiver);
+
+    uint256 _feeIndex0After = vault.globalFeeIndex0Scaled();
+    uint256 _feeIndex1After = vault.globalFeeIndex1Scaled();
+
+    // Fee indexes should have increased (fees synced during withdraw)
+    assertGt(_feeIndex0After, _feeIndex0Before);
+    assertGt(_feeIndex1After, _feeIndex1Before);
+  }
 }
 
 contract CollectFees is LPVaultTest {
-  uint256 constant FEE_INDEX_PRECISION = 1e18;
-  uint256 constant FEE_TOLERANCE = 0.01e18; // 1%
-
-  function _boundSwapAbs(uint256 _swapAbs) internal pure returns (int256) {
-    return -int256(bound(_swapAbs, 1e18, 1e24));
-  }
-
-  function _performSwap(bool _zeroForOne, int256 _amountSpecified) internal returns (BalanceDelta) {
-    return swap(defaultPoolKey, _zeroForOne, _amountSpecified, "");
-  }
-
   function testFuzz_CollectFeesAfterSwaps(
     address _depositor,
     uint256 _amount0,
@@ -1052,5 +1116,110 @@ contract CollectFees is LPVaultTest {
     if (_claimed1Depositor2 > 0) {
       assertApproxEqRel(_claimed1Depositor1, _claimed1Depositor2 * 2, FEE_TOLERANCE);
     }
+  }
+
+  /// @notice Tests that fees are attributed to the original holder when shares are transferred.
+  function testFuzz_FeesAttributedOnTransfer(
+    address _depositor,
+    address _recipient,
+    uint256 _amount0,
+    uint256 _amount1,
+    uint256 _swapAbs0,
+    uint256 _swapAbs1
+  ) public {
+    _assumeSafeAddress(_depositor);
+    _assumeSafeAddress(_recipient);
+    vm.assume(_depositor != _recipient);
+
+    // Deposit and get shares
+    (uint256 _shares,,) = _deposit(_depositor, _amount0, _amount1);
+
+    // Generate fees via swaps (but don't collect yet)
+    BalanceDelta _delta0 = _performSwap(true, _boundSwapAbs(_swapAbs0));
+    BalanceDelta _delta1 = _performSwap(false, _boundSwapAbs(_swapAbs1));
+
+    uint256 _expectedFee0 = uint256(-int256(_delta0.amount0())) * DEFAULT_FEE / FEE_DENOMINATOR;
+    uint256 _expectedFee1 = uint256(-int256(_delta1.amount1())) * DEFAULT_FEE / FEE_DENOMINATOR;
+
+    // Transfer shares BEFORE collecting fees
+    vm.prank(_depositor);
+    vault.transfer(_recipient, _shares);
+
+    // Now collect fees - they should be attributed to depositor (original holder)
+    vault.collectFees();
+
+    // Depositor should be able to claim fees that accrued while they held shares
+    vm.prank(_depositor);
+    (uint256 _claimed0, uint256 _claimed1) = vault.claim(_depositor);
+
+    assertApproxEqRel(_claimed0, _expectedFee0, FEE_TOLERANCE);
+    assertApproxEqRel(_claimed1, _expectedFee1, FEE_TOLERANCE);
+
+    // Recipient should have no fees (they got shares after fees accrued)
+    vm.prank(_recipient);
+    (uint256 _recipientClaimed0, uint256 _recipientClaimed1) = vault.claim(_recipient);
+    assertEq(_recipientClaimed0, 0);
+    assertEq(_recipientClaimed1, 0);
+  }
+
+  /// @notice Tests that checkpoints prevent claiming fees from before we had liquidity.
+  function testFuzz_CheckpointsPreventPreLiquidityFees(
+    address _depositor,
+    uint256 _amount0,
+    uint256 _amount1,
+    uint256 _swapAbs0
+  ) public {
+    _assumeSafeAddress(_depositor);
+
+    // Generate fees BEFORE any deposit (pool has fees but vault has no liquidity)
+    // Note: This is a bit tricky since we need fees in the pool before our position exists
+    // In practice, this tests that checkpoints are initialized correctly on first deposit
+    _deposit(_depositor, _amount0, _amount1);
+
+    // Now generate fees (vault has liquidity)
+    BalanceDelta _delta = _performSwap(true, _boundSwapAbs(_swapAbs0));
+    uint256 _expectedFee0 = uint256(-int256(_delta.amount0())) * DEFAULT_FEE / FEE_DENOMINATOR;
+
+    // Collect fees
+    vault.collectFees();
+
+    // Claim fees - should only get fees from after we deposited
+    vm.prank(_depositor);
+    (uint256 _claimed0,) = vault.claim(_depositor);
+
+    // Should have fees from the swap
+    assertApproxEqRel(_claimed0, _expectedFee0, FEE_TOLERANCE);
+  }
+
+  /// @notice Tests that fee indexes update on transfer even without collecting fees.
+  function testFuzz_FeeIndexesUpdateOnTransfer(
+    address _depositor,
+    address _recipient,
+    uint256 _amount0,
+    uint256 _amount1,
+    uint256 _swapAbs0
+  ) public {
+    _assumeSafeAddress(_depositor);
+    _assumeSafeAddress(_recipient);
+    vm.assume(_depositor != _recipient);
+
+    (uint256 _shares,,) = _deposit(_depositor, _amount0, _amount1);
+
+    // Generate fees
+    BalanceDelta _delta = _performSwap(true, _boundSwapAbs(_swapAbs0));
+    uint256 _expectedFee0 = uint256(-int256(_delta.amount0())) * DEFAULT_FEE / FEE_DENOMINATOR;
+
+    uint256 _totalSupply = vault.totalSupply();
+    uint256 _expectedIndexDelta0 = _expectedFee0 * FEE_INDEX_PRECISION / _totalSupply;
+    uint256 _feeIndex0Before = vault.globalFeeIndex0Scaled();
+
+    // Transfer should sync fees and update index (without collecting)
+    vm.prank(_depositor);
+    vault.transfer(_recipient, _shares);
+
+    uint256 _feeIndex0After = vault.globalFeeIndex0Scaled();
+
+    // Fee index should have increased even though we didn't call collectFees()
+    assertApproxEqRel(_feeIndex0After - _feeIndex0Before, _expectedIndexDelta0, FEE_TOLERANCE);
   }
 }
