@@ -15,6 +15,13 @@ import {FeeTracking} from "src/lib/FeeTracking.sol";
 
 contract FixedFeeSwap {
   using SafeERC20 for IERC20;
+
+  /// @notice Checkpoint of the last-seen VaultShareToken fee indexes used for YT fee syncing.
+  struct VstFeeCheckpoint {
+    uint256 feeIndex0LastScaled;
+    uint256 feeIndex1LastScaled;
+  }
+
   /*//////////////////////////////////////////////////////////////
                         ERRORS
   //////////////////////////////////////////////////////////////*/
@@ -100,6 +107,9 @@ contract FixedFeeSwap {
   /// vault share token)
   uint256 public immutable MATURITY;
 
+  /// @notice Tracks the last VaultShareToken fee indexes that have been synced into YT accounting.
+  VstFeeCheckpoint public vstFeeCheckpoint;
+
   /*//////////////////////////////////////////////////////////////
                         CONSTRUCTOR
   //////////////////////////////////////////////////////////////*/
@@ -146,6 +156,9 @@ contract FixedFeeSwap {
   /// @dev The caller must have approved the hook to spend the vault share token.
   /// @dev When we split VST, we split it into equal amounts of YT + PT (1:1 ratio).
   function deposit(uint256 _amount) external {
+    // Sync YT fees first so holders get all yield earned so far.
+    _syncYTFees();
+
     if (block.timestamp >= MATURITY) revert FixedFeeSwap_SplitAfterMaturity();
 
     if (_amount == 0) revert FixedFeeSwap_InvalidAmount();
@@ -188,6 +201,9 @@ contract FixedFeeSwap {
 
     bool _maturityReached = block.timestamp >= MATURITY;
 
+    // Sync YT fees first so holders get all yield earned so far.
+    _syncYTFees();
+
     if (!_maturityReached) {
       // -------- BEFORE MATURITY ( needs both PT and YT) --------
       _claimAndBurnYieldTokens(msg.sender, _amount);
@@ -223,6 +239,10 @@ contract FixedFeeSwap {
   function claimYTFeesAfterMaturity() external {
     if (block.timestamp < MATURITY) revert FixedFeeSwap_BeforeMaturity();
 
+    // Sync YT fee accounting so that all vault yield earned by this hook
+    // (via its VST balance) is pushed into YT fee indexes before burning YT.
+    _syncYTFees();
+
     uint256 _amount = YIELD_TOKEN.balanceOf(msg.sender);
 
     if (_amount == 0) revert FixedFeeSwap_InvalidAmount();
@@ -255,8 +275,6 @@ contract FixedFeeSwap {
   function _claimFeesAccruedAfterMaturity(address _user, uint256 _amount) internal {
     // Get total PT supply to calculate proportional share
     uint256 _totalSupply = PRINCIPAL_TOKEN.totalSupply();
-
-    if (_totalSupply == 0) revert FixedFeeSwap_InsufficientBalance();
 
     // Get contract balances for both fee tokens
     address _feeToken0 = VAULT_SHARE_TOKEN.FEE_TOKEN0();
@@ -306,6 +324,52 @@ contract FixedFeeSwap {
       if (!_success) revert FixedFeeSwap_TransferFailed();
     } else {
       IERC20(_token).safeTransfer(_to, _amount);
+    }
+  }
+
+  /// @notice Syncs YieldToken fee accounting against the latest VaultShareToken fee indexes.
+  /// @dev
+  ///  - View-only with respect to the vault and pool; no tokens move here.
+  ///  - Computes the additional vault yield accumulated on the VST balance held by this hook since
+  ///    the last sync, and feeds that into YT's fee indexes via `updateFees`.
+  function _syncYTFees() internal {
+    // Read the latest VaultShareToken global fee indexes (fee per 1 VST, scaled by PRECISION).
+    uint256 _feeIndex0Now = VAULT_SHARE_TOKEN.globalFeeIndex0Scaled();
+    uint256 _feeIndex1Now = VAULT_SHARE_TOKEN.globalFeeIndex1Scaled();
+
+    VstFeeCheckpoint memory _checkpoint = vstFeeCheckpoint;
+
+    // Compute index deltas since the last sync.
+    uint256 _deltaIndex0 = _feeIndex0Now - _checkpoint.feeIndex0LastScaled;
+    uint256 _deltaIndex1 = _feeIndex1Now - _checkpoint.feeIndex1LastScaled;
+
+    // Advance checkpoints unconditionally to avoid double-counting.
+    vstFeeCheckpoint.feeIndex0LastScaled = _feeIndex0Now;
+    vstFeeCheckpoint.feeIndex1LastScaled = _feeIndex1Now;
+
+    // If nothing changed, there's no new yield to attribute.
+    if (_deltaIndex0 == 0 && _deltaIndex1 == 0) return;
+
+    // Yield attributable to YT is based on the VST held by this hook.
+    uint256 _vstBalance = VAULT_SHARE_TOKEN.balanceOf(address(this));
+    if (_vstBalance == 0) return;
+
+    uint256 _newFees0;
+    uint256 _newFees1;
+
+    if (_deltaIndex0 > 0) {
+      // Each VST has earned `_deltaIndex0 / PRECISION` units of token0 since last sync.
+      _newFees0 = Math.mulDiv(_vstBalance, _deltaIndex0, FeeTracking.PRECISION);
+    }
+
+    if (_deltaIndex1 > 0) {
+      // Each VST has earned `_deltaIndex1 / PRECISION` units of token1 since last sync.
+      _newFees1 = Math.mulDiv(_vstBalance, _deltaIndex1, FeeTracking.PRECISION);
+    }
+
+    if (_newFees0 > 0 || _newFees1 > 0) {
+      // Update YT fee-per-share indexes
+      YIELD_TOKEN.updateFees(_newFees0, _newFees1);
     }
   }
 }
