@@ -21,4 +21,15 @@ contract LPVaultHarness is LPVault {
   {
     (_liquidityPerPosition, _liquidity0) = _calculateInitialLiquidity(_amount0Max, _amount1Max);
   }
+
+  function getAmountsForLiquidity(
+    int24 _tickLower,
+    int24 _tickUpper,
+    uint160 _sqrtPriceX96,
+    uint128 _liquidity
+  ) external pure returns (uint256 _amount0, uint256 _amount1) {
+    LiquidityPosition memory _position =
+      LiquidityPosition({tickLower: _tickLower, tickUpper: _tickUpper, weight: 0, liquidity: 0});
+    return _getAmountsForLiquidity(_position, _sqrtPriceX96, _liquidity);
+  }
 }
