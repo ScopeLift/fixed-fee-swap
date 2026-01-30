@@ -239,7 +239,8 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   /// @param _amount0Max The maximum amount of token0 to deposit across all positions.
   /// @param _amount1Max The maximum amount of token1 to deposit across all positions.
   /// @param _liquidity The liquidity to add to position0. Other positions calculated
-  /// proportionally. @dev Requires liquidity to be initialized first via initializeLiquidity().
+  /// proportionally.
+  /// @dev Requires liquidity to be initialized first via initializeLiquidity().
   /// @return _shares The amount of vault shares minted (equal to _liquidity).
   /// @return _amount0Used The actual amount of token0 used.
   /// @return _amount1Used The actual amount of token1 used.
