@@ -125,10 +125,9 @@ contract LPVaultTest is Test, Deployers {
     uint160 _sqrtPriceX96 = _getSqrtPriceX96();
     for (uint256 _i = 0; _i < _liquidityPerPosition.length; _i++) {
       (int24 _tickLower, int24 _tickUpper,,) = vault.positions(_i);
-      (uint256 _amount0ForPosition, uint256 _amount1ForPosition) =
-        _amountsHarness.getAmountsForLiquidity(
-          _tickLower, _tickUpper, _sqrtPriceX96, _liquidityPerPosition[_i]
-        );
+      (uint256 _amount0ForPosition, uint256 _amount1ForPosition) = _amountsHarness.getAmountsForLiquidity(
+        _tickLower, _tickUpper, _sqrtPriceX96, _liquidityPerPosition[_i]
+      );
       _amount0 += _amount0ForPosition;
       _amount1 += _amount1ForPosition;
     }
@@ -144,10 +143,9 @@ contract LPVaultTest is Test, Deployers {
       (int24 _tickLower, int24 _tickUpper,,) = vault.positions(_i);
       uint160 _sqrtPriceLowerX96 = TickMath.getSqrtPriceAtTick(_tickLower);
       uint160 _sqrtPriceUpperX96 = TickMath.getSqrtPriceAtTick(_tickUpper);
-      (uint256 _amount0ForPosition, uint256 _amount1ForPosition) =
-        LiquidityAmounts.getAmountsForLiquidity(
-          _sqrtPriceX96, _sqrtPriceLowerX96, _sqrtPriceUpperX96, _liquidityPerPosition[_i]
-        );
+      (uint256 _amount0ForPosition, uint256 _amount1ForPosition) = LiquidityAmounts.getAmountsForLiquidity(
+        _sqrtPriceX96, _sqrtPriceLowerX96, _sqrtPriceUpperX96, _liquidityPerPosition[_i]
+      );
       _amount0 += _amount0ForPosition;
       _amount1 += _amount1ForPosition;
     }
@@ -197,6 +195,7 @@ contract LPVaultTest is Test, Deployers {
     vm.prank(_depositor);
     (_shares, _amount0Used, _amount1Used) = vault.deposit(_amount0Max, _amount1Max, _liquidity);
   }
+<<<<<<< HEAD
 
   function _boundSwapAbs(uint256 _swapAbs) internal pure returns (int256) {
     return -int256(bound(_swapAbs, 1e18, 1e24));
@@ -206,6 +205,8 @@ contract LPVaultTest is Test, Deployers {
     return swap(defaultPoolKey, _zeroForOne, _amountSpecified, "");
   }
 
+=======
+>>>>>>> 24391e0 (Run scopelint fmt)
 }
 
 contract Constructor is LPVaultTest {
