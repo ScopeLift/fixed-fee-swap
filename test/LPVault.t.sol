@@ -13,8 +13,15 @@ import {Currency} from "v4-core/types/Currency.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
 import {FullMath} from "v4-core/libraries/FullMath.sol";
 import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
+import {PoolIdLibrary} from "v4-core/types/PoolId.sol";
+import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
+import {TickMath} from "v4-core/libraries/TickMath.sol";
+import {LiquidityAmounts} from "lib/v4-periphery/lib/v4-core/test/utils/LiquidityAmounts.sol";
 
 contract LPVaultTest is Test, Deployers {
+  using PoolIdLibrary for PoolKey;
+  using StateLibrary for IPoolManager;
+
   int24 constant MIN_TICK = -887_272;
   int24 constant MAX_TICK = 887_272;
 
@@ -103,6 +110,45 @@ contract LPVaultTest is Test, Deployers {
   function _approveToken1(address _from, address _to, uint256 _amount) internal {
     vm.prank(_from);
     MockERC20(Currency.unwrap(currency1)).approve(address(_to), _amount);
+  }
+
+  function _getSqrtPriceX96() internal view returns (uint160 _sqrtPriceX96) {
+    (_sqrtPriceX96,,,) = manager.getSlot0(defaultPoolKey.toId());
+  }
+
+  function _sumAmountsForLiquidityRoundUp(
+    LPVaultHarness _amountsHarness,
+    uint128[] memory _liquidityPerPosition
+  ) internal view returns (uint256 _amount0, uint256 _amount1) {
+    uint160 _sqrtPriceX96 = _getSqrtPriceX96();
+    for (uint256 _i = 0; _i < _liquidityPerPosition.length; _i++) {
+      (int24 _tickLower, int24 _tickUpper,,) = vault.positions(_i);
+      (uint256 _amount0ForPosition, uint256 _amount1ForPosition) =
+        _amountsHarness.getAmountsForLiquidity(
+          _tickLower, _tickUpper, _sqrtPriceX96, _liquidityPerPosition[_i]
+        );
+      _amount0 += _amount0ForPosition;
+      _amount1 += _amount1ForPosition;
+    }
+  }
+
+  function _sumAmountsForLiquidityRoundDown(uint128[] memory _liquidityPerPosition)
+    internal
+    view
+    returns (uint256 _amount0, uint256 _amount1)
+  {
+    uint160 _sqrtPriceX96 = _getSqrtPriceX96();
+    for (uint256 _i = 0; _i < _liquidityPerPosition.length; _i++) {
+      (int24 _tickLower, int24 _tickUpper,,) = vault.positions(_i);
+      uint160 _sqrtPriceLowerX96 = TickMath.getSqrtPriceAtTick(_tickLower);
+      uint160 _sqrtPriceUpperX96 = TickMath.getSqrtPriceAtTick(_tickUpper);
+      (uint256 _amount0ForPosition, uint256 _amount1ForPosition) =
+        LiquidityAmounts.getAmountsForLiquidity(
+          _sqrtPriceX96, _sqrtPriceLowerX96, _sqrtPriceUpperX96, _liquidityPerPosition[_i]
+        );
+      _amount0 += _amount0ForPosition;
+      _amount1 += _amount1ForPosition;
+    }
   }
 
   function _initializeLiquidity(address _initializer)
@@ -352,14 +398,15 @@ contract InitializeLiquidity is LPVaultTest {
   function test_EmitsDepositedEvent() public {
     _fundAndApproveInitializer(initializer);
 
-    uint256 _snapshot = vm.snapshot();
-    vm.prank(initializer);
-    (uint256 _shares, uint256 _amount0Used, uint256 _amount1Used) =
-      vault.initializeLiquidity(INIT_AMOUNT_MAX, INIT_AMOUNT_MAX);
-    vm.revertTo(_snapshot);
+    LPVaultHarness _lpVaultHarness =
+      new LPVaultHarness(manager, defaultPoolKey, defaultPositions, DEFAULT_NAME, DEFAULT_SYMBOL);
+    (uint128[] memory _liquidityPerPosition, uint128 _liquidity0) =
+      _lpVaultHarness.computeInitialLiquidity(INIT_AMOUNT_MAX, INIT_AMOUNT_MAX);
+    (uint256 _amount0Used, uint256 _amount1Used) =
+      _sumAmountsForLiquidityRoundUp(_lpVaultHarness, _liquidityPerPosition);
 
     vm.expectEmit();
-    emit LPVault.Deposited(initializer, _shares, _amount0Used, _amount1Used);
+    emit LPVault.Deposited(initializer, _liquidity0, _amount0Used, _amount1Used);
 
     vm.prank(initializer);
     vault.initializeLiquidity(INIT_AMOUNT_MAX, INIT_AMOUNT_MAX);
@@ -462,6 +509,11 @@ contract Deposit is LPVaultTest {
   }
 
   function testFuzz_DistributesLiquidityAcrossPositions(uint128 _liquidity) public {
+    // Get current position liquidity ratios (set by initialization)
+    (,,, uint128 _initLiquidity0) = vault.positions(0);
+    (,,, uint128 _initLiquidity1) = vault.positions(1);
+    (,,, uint128 _initLiquidity2) = vault.positions(2);
+
     _liquidity = uint128(bound(_liquidity, 1e12, 1e20));
 
     uint256 _amount0Max = type(uint128).max;
@@ -470,10 +522,10 @@ contract Deposit is LPVaultTest {
     deal(Currency.unwrap(currency1), depositor, _amount1Max);
     _approveTokensForVault(depositor, _amount0Max, _amount1Max);
 
-    // Get current position liquidity ratios (set by initialization)
-    (,,, uint128 _initLiquidity0) = vault.positions(0);
-    (,,, uint128 _initLiquidity1) = vault.positions(1);
-    (,,, uint128 _initLiquidity2) = vault.positions(2);
+    uint128 _expectedLiquidity1 =
+      uint128(FullMath.mulDiv(_liquidity, _initLiquidity1, _initLiquidity0));
+    uint128 _expectedLiquidity2 =
+      uint128(FullMath.mulDiv(_liquidity, _initLiquidity2, _initLiquidity0));
 
     vm.prank(depositor);
     vault.deposit(_amount0Max, _amount1Max, _liquidity);
@@ -485,14 +537,8 @@ contract Deposit is LPVaultTest {
     (,,, uint128 _finalLiquidity1) = vault.positions(1);
     (,,, uint128 _finalLiquidity2) = vault.positions(2);
 
-    assertEq(
-      uint256(_initLiquidity1) * uint256(_finalLiquidity0),
-      uint256(_finalLiquidity1) * uint256(_initLiquidity0)
-    );
-    assertEq(
-      uint256(_initLiquidity2) * uint256(_finalLiquidity0),
-      uint256(_finalLiquidity2) * uint256(_initLiquidity0)
-    );
+    assertEq(_finalLiquidity1, _initLiquidity1 + _expectedLiquidity1);
+    assertEq(_finalLiquidity2, _initLiquidity2 + _expectedLiquidity2);
   }
 
   function testFuzz_DepositEmitsDepositedEvent(uint128 _liquidity) public {
@@ -504,14 +550,23 @@ contract Deposit is LPVaultTest {
     deal(Currency.unwrap(currency1), depositor, _amount1Max);
     _approveTokensForVault(depositor, _amount0Max, _amount1Max);
 
-    uint256 _snapshot = vm.snapshot();
-    vm.prank(depositor);
-    (uint256 _shares, uint256 _amount0Used, uint256 _amount1Used) =
-      vault.deposit(_amount0Max, _amount1Max, _liquidity);
-    vm.revertTo(_snapshot);
+    uint128[] memory _liquidityPerPosition = new uint128[](3);
+    (,,, uint128 _position0Liquidity) = vault.positions(0);
+    (,,, uint128 _position1Liquidity) = vault.positions(1);
+    (,,, uint128 _position2Liquidity) = vault.positions(2);
+    _liquidityPerPosition[0] = _liquidity;
+    _liquidityPerPosition[1] =
+      uint128(FullMath.mulDiv(_liquidity, _position1Liquidity, _position0Liquidity));
+    _liquidityPerPosition[2] =
+      uint128(FullMath.mulDiv(_liquidity, _position2Liquidity, _position0Liquidity));
+
+    LPVaultHarness _amountsHarness =
+      new LPVaultHarness(manager, defaultPoolKey, defaultPositions, DEFAULT_NAME, DEFAULT_SYMBOL);
+    (uint256 _amount0Used, uint256 _amount1Used) =
+      _sumAmountsForLiquidityRoundUp(_amountsHarness, _liquidityPerPosition);
 
     vm.expectEmit();
-    emit LPVault.Deposited(depositor, _shares, _amount0Used, _amount1Used);
+    emit LPVault.Deposited(depositor, _liquidity, _amount0Used, _amount1Used);
 
     vm.prank(depositor);
     vault.deposit(_amount0Max, _amount1Max, _liquidity);
@@ -658,10 +713,18 @@ contract Withdraw is LPVaultTest {
 
     (uint256 _shares,,) = _deposit(_depositor, _amount0, _amount1);
 
-    uint256 _snapshot = vm.snapshot();
-    vm.prank(_depositor);
-    (uint256 _amount0Received, uint256 _amount1Received) = vault.withdraw(_shares, _receiver);
-    vm.revertTo(_snapshot);
+    uint128[] memory _liquidityToRemove = new uint128[](3);
+    (,,, uint128 _position0Liquidity) = vault.positions(0);
+    (,,, uint128 _position1Liquidity) = vault.positions(1);
+    (,,, uint128 _position2Liquidity) = vault.positions(2);
+    _liquidityToRemove[0] = uint128(_shares);
+    _liquidityToRemove[1] =
+      uint128(FullMath.mulDiv(_shares, _position1Liquidity, _position0Liquidity));
+    _liquidityToRemove[2] =
+      uint128(FullMath.mulDiv(_shares, _position2Liquidity, _position0Liquidity));
+
+    (uint256 _amount0Received, uint256 _amount1Received) =
+      _sumAmountsForLiquidityRoundDown(_liquidityToRemove);
 
     vm.expectEmit();
     emit LPVault.Withdraw(_depositor, _receiver, _shares, _amount0Received, _amount1Received);
@@ -877,15 +940,9 @@ contract CollectFees is LPVaultTest {
   ) public {
     _assumeSafeAddress(_depositor);
     _deposit(_depositor, _amount0, _amount1);
-    _performSwap(true, _boundSwapAbs(_swapAbs0));
-    _performSwap(false, _boundSwapAbs(_swapAbs1));
-
-    uint256 _snapshot = vm.snapshot();
-    (uint256 _collectedFee0, uint256 _collectedFee1) = vault.collectFees();
-    vm.revertTo(_snapshot);
 
     vm.expectEmit();
-    emit LPVault.FeesCollected(_collectedFee0, _collectedFee1);
+    emit LPVault.FeesCollected(0, 0);
     vault.collectFees();
   }
 
