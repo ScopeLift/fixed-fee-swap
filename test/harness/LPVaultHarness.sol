@@ -10,22 +10,22 @@ contract LPVaultHarness is LPVault {
     IPoolManager _poolManager,
     PoolKey memory _targetPoolKey,
     LiquidityPosition[] memory _positions,
-    uint256 _initAmount0Max,
-    uint256 _initAmount1Max,
     string memory _name,
-    string memory _symbol
+    string memory _symbol,
+    uint160 _initSqrtPriceX96,
+    uint256 _initMaxValue
   )
     LPVault(
-      _poolManager, _targetPoolKey, _positions, _initAmount0Max, _initAmount1Max, _name, _symbol
+      _poolManager, _targetPoolKey, _positions, _name, _symbol, _initSqrtPriceX96, _initMaxValue
     )
   {}
 
-  function computeInitialLiquidity(uint256 _amount0Max, uint256 _amount1Max)
+  function computeInitialLiquidity()
     external
     view
     returns (uint128[] memory _liquidityPerPosition, uint128 _liquidity0)
   {
-    (_liquidityPerPosition, _liquidity0) = _calculateInitialLiquidity(_amount0Max, _amount1Max);
+    (_liquidityPerPosition, _liquidity0) = _calculateInitialLiquidity();
   }
 
   function getAmountsForLiquidity(
