@@ -78,6 +78,12 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   /// @notice The token1 in the target pool.
   address public immutable TOKEN1;
 
+  /// @notice The maximum amount of token0 to use for initial liquidity.
+  uint256 public immutable INIT_AMOUNT0_MAX;
+
+  /// @notice The maximum amount of token1 to use for initial liquidity.
+  uint256 public immutable INIT_AMOUNT1_MAX;
+
   /// @notice The target pool that this vault manages liquidity for.
   PoolKey public targetPoolKey;
 
@@ -107,6 +113,9 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
 
   /// @notice Thrown when attempting deposit before initialization.
   error LPVault__NotInitialized();
+
+  /// @notice Thrown when the caller has insufficient token allowance for initialization.
+  error LPVault__InsufficientAllowance();
 
   /// @notice Emitted when the pool manager is set during construction.
   /// @param poolManager The address of the Uniswap v4 pool manager.
@@ -139,15 +148,20 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   event FeesCollected(uint256 collectedFee0, uint256 collectedFee1);
 
   /// @notice Creates a new LP Vault with fixed positions.
+  /// @dev Call initializeLiquidity() immediately after deployment to seed the vault.
   /// @param _poolManager The Uniswap v4 pool manager.
   /// @param _targetPoolKey The pool where liquidity is deposited.
   /// @param _positions Array of positions with tick ranges and weights (must sum to 10,000 BIPs).
+  /// @param _initAmount0Max Maximum amount of token0 for initial liquidity.
+  /// @param _initAmount1Max Maximum amount of token1 for initial liquidity.
   /// @param _name The name of the vault share token.
   /// @param _symbol The symbol of the vault share token.
   constructor(
     IPoolManager _poolManager,
     PoolKey memory _targetPoolKey,
     LiquidityPosition[] memory _positions,
+    uint256 _initAmount0Max,
+    uint256 _initAmount1Max,
     string memory _name,
     string memory _symbol
   )
@@ -165,6 +179,8 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     targetPoolKey = _targetPoolKey;
     TOKEN0 = Currency.unwrap(_targetPoolKey.currency0);
     TOKEN1 = Currency.unwrap(_targetPoolKey.currency1);
+    INIT_AMOUNT0_MAX = _initAmount0Max;
+    INIT_AMOUNT1_MAX = _initAmount1Max;
 
     _initializePositions(_positions);
   }
@@ -191,19 +207,28 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   }
 
   /// @notice Initializes liquidity for all positions based on configured weights. Can only be
-  /// called once. @param _amount0Max Maximum amount of token0 willing to provide.
-  /// @param _amount1Max Maximum amount of token1 willing to provide.
+  /// called once. Uses the immutable INIT_AMOUNT0_MAX and INIT_AMOUNT1_MAX values set in the
+  /// constructor.
   /// @return _shares The amount of vault shares minted.
   /// @return _amount0Used The actual amount of token0 used.
   /// @return _amount1Used The actual amount of token1 used.
-  function initializeLiquidity(uint256 _amount0Max, uint256 _amount1Max)
+  function initializeLiquidity()
     external
     virtual
     returns (uint256 _shares, uint256 _amount0Used, uint256 _amount1Used)
   {
     if (liquidityInitialized) revert LPVault__AlreadyInitialized();
+
+    // Check allowances before proceeding
+    if (IERC20(TOKEN0).allowance(msg.sender, address(this)) < INIT_AMOUNT0_MAX) {
+      revert LPVault__InsufficientAllowance();
+    }
+    if (IERC20(TOKEN1).allowance(msg.sender, address(this)) < INIT_AMOUNT1_MAX) {
+      revert LPVault__InsufficientAllowance();
+    }
+
     (uint128[] memory _liquidityPerPosition, uint128 _liquidity0) =
-      _calculateInitialLiquidity(_amount0Max, _amount1Max);
+      _calculateInitialLiquidity(INIT_AMOUNT0_MAX, INIT_AMOUNT1_MAX);
 
     bytes memory _result = POOL_MANAGER.unlock(
       abi.encode(
@@ -211,8 +236,8 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
         abi.encode(
           DepositCallbackData({
             sender: msg.sender,
-            amount0Max: _amount0Max,
-            amount1Max: _amount1Max,
+            amount0Max: INIT_AMOUNT0_MAX,
+            amount1Max: INIT_AMOUNT1_MAX,
             liquidityPerPosition: _liquidityPerPosition
           })
         )
