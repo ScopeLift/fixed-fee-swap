@@ -12,13 +12,8 @@ contract LPVaultHarness is LPVault {
     LiquidityPosition[] memory _positions,
     string memory _name,
     string memory _symbol,
-    uint160 _initSqrtPriceX96,
     uint256 _initMaxValue
-  )
-    LPVault(
-      _poolManager, _targetPoolKey, _positions, _name, _symbol, _initSqrtPriceX96, _initMaxValue
-    )
-  {}
+  ) LPVault(_poolManager, _targetPoolKey, _positions, _name, _symbol, _initMaxValue) {}
 
   function computeInitialLiquidity()
     external
