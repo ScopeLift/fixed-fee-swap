@@ -201,9 +201,6 @@ contract FixedFeeSwap {
 
     bool _maturityReached = block.timestamp >= MATURITY;
 
-    // Sync YT fees first so holders get all yield earned so far.
-    _syncYTFees();
-
     if (!_maturityReached) {
       // -------- BEFORE MATURITY ( needs both PT and YT) --------
       _claimAndBurnYieldTokens(msg.sender, _amount);
@@ -228,6 +225,24 @@ contract FixedFeeSwap {
     emit Redeem(msg.sender, _vstAmount, _maturityReached);
   }
 
+  /// @notice Collects this hook's accrued fees from the vault and forwards them to the YieldToken.
+  /// @dev Callable by anyone (e.g. keeper, user, or integrator). Only runs before maturity.
+  ///      Syncs YT fee accounting, claims from the vault, transfers to the YT, and updates YT
+  ///      fee indexes. After this, YT holders can claim via the YT's claim/burn.
+  function collectFeesToYT() external {
+    if (block.timestamp >= MATURITY) revert FixedFeeSwap_SplitAfterMaturity();
+
+    _syncYTFees();
+
+    address _feeToken0 = VAULT_SHARE_TOKEN.FEE_TOKEN0();
+    address _feeToken1 = VAULT_SHARE_TOKEN.FEE_TOKEN1();
+    (uint256 _claimed0, uint256 _claimed1) = VAULT_SHARE_TOKEN.claim(address(this));
+
+    if (_claimed0 > 0) _transferFeeToken(_feeToken0, address(YIELD_TOKEN), _claimed0);
+    if (_claimed1 > 0) _transferFeeToken(_feeToken1, address(YIELD_TOKEN), _claimed1);
+    if (_claimed0 > 0 || _claimed1 > 0) YIELD_TOKEN.updateFees(_claimed0, _claimed1);
+  }
+
   /// @notice Claims fees and burns leftover yield tokens after maturity.
   /// @dev
   ///  - Can only be called after maturity.
@@ -238,10 +253,6 @@ contract FixedFeeSwap {
   /// burning. Fees are claimed through the YT token's burn mechanism.
   function claimYTFeesAfterMaturity() external {
     if (block.timestamp < MATURITY) revert FixedFeeSwap_BeforeMaturity();
-
-    // Sync YT fee accounting so that all vault yield earned by this hook
-    // (via its VST balance) is pushed into YT fee indexes before burning YT.
-    _syncYTFees();
 
     uint256 _amount = YIELD_TOKEN.balanceOf(msg.sender);
 
@@ -257,7 +268,8 @@ contract FixedFeeSwap {
   /// @notice Claims fees and burns YT tokens
   /// @param _user The address to claim fees from and burn YT tokens for.
   /// @param _amount The amount of YT tokens to claim fees from and burn.
-  /// @dev Burns the YT tokens, which internally claims fees before burning.
+  /// @dev Burns the YT tokens (which claims fees from the YT's balance before burning).
+  ///      Someone must have called collectFeesToYT() before maturity so the YT holds fee tokens.
   function _claimAndBurnYieldTokens(address _user, uint256 _amount) internal {
     // Caller should have enough YT tokens
     if (YIELD_TOKEN.balanceOf(_user) < _amount) revert FixedFeeSwap_InsufficientBalance();

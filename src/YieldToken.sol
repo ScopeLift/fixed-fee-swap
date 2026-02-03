@@ -182,7 +182,7 @@ contract YieldToken is ERC20, IFeeTrackingToken {
     // Emit event for transparency
     emit FeesClaimed(_user, _claimedToken0, _claimedToken1);
 
-    // Transfer tokens to the user
+    // Transfer tokens to the user (YT must hold fee tokens via collectFeesToYT() on FixedFeeSwap)
     _transferAmount(FEE_TOKEN0, _user, _claimedToken0);
     _transferAmount(FEE_TOKEN1, _user, _claimedToken1);
   }
