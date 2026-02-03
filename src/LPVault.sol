@@ -69,6 +69,9 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   /// @notice Total weight must equal 10,000 BIPs (100%).
   uint16 public constant BIPS = 10_000;
 
+  /// @notice Reference liquidity unit for value calculations.
+  uint256 public constant WAD = 1e18;
+
   /// @notice The Uniswap v4 PoolManager.
   IPoolManager public immutable POOL_MANAGER;
 
