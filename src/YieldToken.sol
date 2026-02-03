@@ -10,6 +10,12 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {FeeTracking} from "src/lib/FeeTracking.sol";
 import {IFeeTrackingToken} from "src/interface/IFeeTrackingToken.sol";
 
+/// @notice Minimal interface for FixedFeeSwap so YT can pull fees on claim (before maturity).
+interface IFixedFeeSwap {
+  function MATURITY() external view returns (uint256);
+  function collectFeesToYT() external;
+}
+
 contract YieldToken is ERC20, IFeeTrackingToken {
   using FeeTracking for FeeTracking.GlobalFees;
   using FeeTracking for FeeTracking.UserFees;
@@ -173,6 +179,11 @@ contract YieldToken is ERC20, IFeeTrackingToken {
   /// @return _claimedToken0 Amount of `FEE_TOKEN_0` that was transferred.
   /// @return _claimedToken1 Amount of `FEE_TOKEN_1` that was transferred.
   function _claim(address _user) internal returns (uint256 _claimedToken0, uint256 _claimedToken1) {
+    // Before maturity, pull latest vault fees into this contract so we can pay the user
+    if (block.timestamp < IFixedFeeSwap(FIXED_FEE_SWAP).MATURITY()) {
+      IFixedFeeSwap(FIXED_FEE_SWAP).collectFeesToYT();
+    }
+
     // Update user fees to ensure we're syncing to the latest global indices
     _updateUserFees(_user);
 
@@ -182,7 +193,7 @@ contract YieldToken is ERC20, IFeeTrackingToken {
     // Emit event for transparency
     emit FeesClaimed(_user, _claimedToken0, _claimedToken1);
 
-    // Transfer tokens to the user (YT must hold fee tokens via collectFeesToYT() on FixedFeeSwap)
+    // Transfer tokens to the user
     _transferAmount(FEE_TOKEN0, _user, _claimedToken0);
     _transferAmount(FEE_TOKEN1, _user, _claimedToken1);
   }
