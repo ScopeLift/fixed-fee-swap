@@ -207,4 +207,7 @@ contract YieldToken is ERC20, IFeeTrackingToken {
       SafeERC20.safeTransfer(IERC20(_token), _to, _amount);
     }
   }
+
+  /// @notice Accepts native ETH sent by the hook when forwarding fee tokens to the YT.
+  receive() external payable {}
 }

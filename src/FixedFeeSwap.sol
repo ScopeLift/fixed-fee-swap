@@ -238,11 +238,11 @@ contract FixedFeeSwap {
   }
 
   /// @notice Collects this hook's accrued fees from the vault and forwards them to the YieldToken.
-  /// @dev Callable by anyone (e.g. keeper, user, or integrator). Reverts when
-  /// `ytFeeCollectionClosed` is true (one post-maturity YT fee collection has already occurred).
-  /// Syncs YT fee accounting,
-  ///      claims from the vault, transfers to the YT, and updates YT fee indexes. After this, YT
-  ///      holders can claim via the YT's claim/burn.
+  /// @dev
+  ///      - Reverts when `ytFeeCollectionClosed` is true.
+  ///      - Syncs YT fee accounting, claims from the vault, transfers to the YT, and
+  ///      - Updates YT fee indexes.
+  ///      - After this, YT holders can claim via the YT's claim/burn.
   function collectFeesToYT() external {
     if (ytFeeCollectionClosed) revert FixedFeeSwap_YTFeeCollectionClosed();
 
@@ -254,7 +254,6 @@ contract FixedFeeSwap {
 
     if (_claimed0 > 0) _transferFeeToken(_feeToken0, address(YIELD_TOKEN), _claimed0);
     if (_claimed1 > 0) _transferFeeToken(_feeToken1, address(YIELD_TOKEN), _claimed1);
-    if (_claimed0 > 0 || _claimed1 > 0) YIELD_TOKEN.updateFees(_claimed0, _claimed1);
   }
 
   /// @notice Claims fees and burns leftover yield tokens after maturity.
