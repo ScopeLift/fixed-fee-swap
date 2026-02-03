@@ -566,9 +566,8 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     if (_value == 0) return 0;
 
     // Calculate value per unit liquidity using a reference liquidity
-    uint256 _liquidityReference = 1e18;
     (uint256 _amount0Ref, uint256 _amount1Ref) =
-      _getAmountsForLiquidity(_position, _sqrtPriceX96, uint128(_liquidityReference));
+      _getAmountsForLiquidity(_position, _sqrtPriceX96, uint128(WAD));
 
     // Convert amount0 to token1 value: value = amount0 * price
     // price = sqrtPriceX96^2 / 2^192
@@ -581,7 +580,7 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     if (_valuePerRefLiquidity == 0) return 0;
 
     // Calculate liquidity: liquidity = value * reference / valuePerRef
-    uint256 _liquidityFull = FullMath.mulDiv(_value, _liquidityReference, _valuePerRefLiquidity);
+    uint256 _liquidityFull = FullMath.mulDiv(_value, WAD, _valuePerRefLiquidity);
 
     _liquidity = _liquidityFull.toUint128();
   }
