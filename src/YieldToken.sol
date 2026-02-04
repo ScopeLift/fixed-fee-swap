@@ -3,12 +3,11 @@ pragma solidity 0.8.26;
 
 // External Imports
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 // Internal imports
 import {FeeTracking} from "src/lib/FeeTracking.sol";
 import {IFeeTrackingToken} from "src/interface/IFeeTrackingToken.sol";
+import {IFixedFeeSwap} from "src/interface/IFixedFeeSwap.sol";
 
 contract YieldToken is ERC20, IFeeTrackingToken {
   using FeeTracking for FeeTracking.GlobalFees;
@@ -20,9 +19,6 @@ contract YieldToken is ERC20, IFeeTrackingToken {
 
   /// @notice Thrown when the caller is not authorized.
   error YieldToken_NotAuthorized();
-
-  /// @notice Thrown when a transfer fails.
-  error YieldToken_TransferFailed();
 
   /*//////////////////////////////////////////////////////////////
                         STATE VARIABLES
@@ -172,7 +168,12 @@ contract YieldToken is ERC20, IFeeTrackingToken {
   /// @param _user The address to claim fees for.
   /// @return _claimedToken0 Amount of `FEE_TOKEN_0` that was transferred.
   /// @return _claimedToken1 Amount of `FEE_TOKEN_1` that was transferred.
+  /// @dev
+  ///      - Syncs fees via FixedFeeSwap.collectFeesToYT, then transfers fees from FixedFeeSwap to
+  /// the user. - Reverts if YT fee collection is already closed.
   function _claim(address _user) internal returns (uint256 _claimedToken0, uint256 _claimedToken1) {
+    IFixedFeeSwap(FIXED_FEE_SWAP).collectFeesToYT();
+
     // Update user fees to ensure we're syncing to the latest global indices
     _updateUserFees(_user);
 
@@ -182,23 +183,7 @@ contract YieldToken is ERC20, IFeeTrackingToken {
     // Emit event for transparency
     emit FeesClaimed(_user, _claimedToken0, _claimedToken1);
 
-    // Transfer tokens to the user
-    _transferAmount(FEE_TOKEN0, _user, _claimedToken0);
-    _transferAmount(FEE_TOKEN1, _user, _claimedToken1);
-  }
-
-  /// @notice Transfers an amount of tokens to a user.
-  /// @param _token The address of the token to transfer.
-  /// @param _to The address to transfer the tokens to.
-  /// @param _amount The amount of tokens to transfer.
-  /// @dev Following Uniswap v4's `Currency` convention: NATIVE represents native ETH.
-  ///      See: https://github.com/Uniswap/v4-core/blob/main/src/types/Currency.sol#L37-L38
-  function _transferAmount(address _token, address _to, uint256 _amount) internal {
-    if (_token == NATIVE) {
-      (bool _success,) = payable(_to).call{value: _amount}("");
-      if (!_success) revert YieldToken_TransferFailed();
-    } else {
-      SafeERC20.safeTransfer(IERC20(_token), _to, _amount);
-    }
+    // Transfer tokens directly from FixedFeeSwap to the user
+    IFixedFeeSwap(FIXED_FEE_SWAP).transferFeesToUser(_user, _claimedToken0, _claimedToken1);
   }
 }

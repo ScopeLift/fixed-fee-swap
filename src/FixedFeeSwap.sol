@@ -47,6 +47,13 @@ contract FixedFeeSwap {
   /// @notice Thrown when a transfer fails.
   error FixedFeeSwap_TransferFailed();
 
+  /// @notice Thrown when fees may no longer be sent to the YieldToken (one post-maturity YT claim
+  /// already used).
+  error FixedFeeSwap_YTFeeCollectionClosed();
+
+  /// @notice Thrown when the caller is not authorized.
+  error FixedFeeSwap_NotAuthorized();
+
   /*//////////////////////////////////////////////////////////////
                         EVENTS
   //////////////////////////////////////////////////////////////*/
@@ -93,6 +100,11 @@ contract FixedFeeSwap {
   /// @notice Native ETH address following Uniswap v4 `Currency` convention.
   /// @dev See: https://github.com/Uniswap/v4-core/blob/main/src/types/Currency.sol#L37-L38
   address private constant NATIVE = address(0);
+
+  /// @notice When true, fees are no longer sent to the YT: `collectFeesToYT` reverts and redeem
+  ///         uses the PT-only fee path (fees distributed to PT redeemers).
+  /// @dev Set after the single allowed YT fee claim at or after maturity (during redeem).
+  bool public ytFeeCollectionClosed;
 
   /// @notice The vault share token.
   VaultShareToken public immutable VAULT_SHARE_TOKEN;
@@ -201,16 +213,16 @@ contract FixedFeeSwap {
 
     bool _maturityReached = block.timestamp >= MATURITY;
 
-    // Sync YT fees first so holders get all yield earned so far.
-    _syncYTFees();
-
-    if (!_maturityReached) {
-      // -------- BEFORE MATURITY ( needs both PT and YT) --------
+    if (!ytFeeCollectionClosed) {
+      // YT fee path: burn YT and pay user their YT fee share (requires PT + YT).
       _claimAndBurnYieldTokens(msg.sender, _amount);
+
+      // This redeem was the single allowed YT fee claim at or after maturity; close YT collection
+      // so future redeems use PT-only.
+      if (_maturityReached) ytFeeCollectionClosed = true;
     } else {
-      // -------- AFTER MATURITY --------
-      // Note: Post maturity, YT tokens are valued at 0, so we could burn them as well,
-      // but it's not required since they have no value. Users can burn YT separately if desired.
+      // PT-only fee path (YT fee collection already closed; no more fees sent to YT).
+      // Post maturity, YT is valued at 0; fees are distributed to the user proportionally to PT.
       _claimFeesAccruedAfterMaturity(msg.sender, _amount);
     }
 
@@ -228,6 +240,32 @@ contract FixedFeeSwap {
     emit Redeem(msg.sender, _vstAmount, _maturityReached);
   }
 
+  /// @notice Collects this hook's accrued fees from the vault for YieldToken holders.
+  /// @dev
+  ///      - Reverts when `ytFeeCollectionClosed` is true.
+  ///      - Syncs YT fee accounting and claims from the vault into this contract.
+  ///      - YT holders receive fees via `transferFeesToUser` when claiming.
+  function collectFeesToYT() external {
+    if (ytFeeCollectionClosed) revert FixedFeeSwap_YTFeeCollectionClosed();
+
+    _syncYTFees();
+
+    // Claim fees from the vault into this contract; YT will call transferFeesToUser to pay users
+    VAULT_SHARE_TOKEN.claim(address(this));
+  }
+
+  /// @notice Transfers fee tokens directly to a user. Called by YieldToken during fee claims.
+  /// @param _user The address to transfer the fees to.
+  /// @param _amount0 The amount of fee token0 to transfer.
+  /// @param _amount1 The amount of fee token1 to transfer.
+  /// @dev Can only be called by the YieldToken contract.
+  function transferFeesToUser(address _user, uint256 _amount0, uint256 _amount1) external {
+    if (msg.sender != address(YIELD_TOKEN)) revert FixedFeeSwap_NotAuthorized();
+
+    if (_amount0 > 0) _transferFeeToken(VAULT_SHARE_TOKEN.FEE_TOKEN0(), _user, _amount0);
+    if (_amount1 > 0) _transferFeeToken(VAULT_SHARE_TOKEN.FEE_TOKEN1(), _user, _amount1);
+  }
+
   /// @notice Claims fees and burns leftover yield tokens after maturity.
   /// @dev
   ///  - Can only be called after maturity.
@@ -238,10 +276,6 @@ contract FixedFeeSwap {
   /// burning. Fees are claimed through the YT token's burn mechanism.
   function claimYTFeesAfterMaturity() external {
     if (block.timestamp < MATURITY) revert FixedFeeSwap_BeforeMaturity();
-
-    // Sync YT fee accounting so that all vault yield earned by this hook
-    // (via its VST balance) is pushed into YT fee indexes before burning YT.
-    _syncYTFees();
 
     uint256 _amount = YIELD_TOKEN.balanceOf(msg.sender);
 
@@ -257,7 +291,8 @@ contract FixedFeeSwap {
   /// @notice Claims fees and burns YT tokens
   /// @param _user The address to claim fees from and burn YT tokens for.
   /// @param _amount The amount of YT tokens to claim fees from and burn.
-  /// @dev Burns the YT tokens, which internally claims fees before burning.
+  /// @dev Burns the YT tokens (which claims fees from the YT's balance before burning).
+  ///      Someone must have called collectFeesToYT() before maturity so the YT holds fee tokens.
   function _claimAndBurnYieldTokens(address _user, uint256 _amount) internal {
     // Caller should have enough YT tokens
     if (YIELD_TOKEN.balanceOf(_user) < _amount) revert FixedFeeSwap_InsufficientBalance();
@@ -296,6 +331,9 @@ contract FixedFeeSwap {
       _totalSupply,
       Math.Rounding.Floor
     ) / FeeTracking.PRECISION;
+
+    // Claim this hook's accrued fees from the vault into the contract so PT redeemers can be paid.
+    VAULT_SHARE_TOKEN.claim(address(this));
 
     // Transfer post-maturity fees to the user
     if (_feeToken0Amount > 0) _transferFeeToken(_feeToken0, _user, _feeToken0Amount);
@@ -372,4 +410,7 @@ contract FixedFeeSwap {
       YIELD_TOKEN.updateFees(_newFees0, _newFees1);
     }
   }
+
+  /// @notice Accepts native ETH sent by the VaultShareToken when claiming fees.
+  receive() external payable {}
 }

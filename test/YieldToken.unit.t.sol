@@ -8,6 +8,7 @@ import {Test} from "forge-std/Test.sol";
 import {YieldToken} from "src/YieldToken.sol";
 import {FeeTracking} from "src/lib/FeeTracking.sol";
 import {ERC20Mock} from "test/mock/ERC20Mock.sol";
+import {FixedFeeSwapMock} from "test/mock/FixedFeeSwapMock.sol";
 import {NonPayableContractMock} from "test/mock/NonPayableContractMock.sol";
 import {IFeeTrackingToken} from "src/interface/IFeeTrackingToken.sol";
 
@@ -22,11 +23,13 @@ contract YieldTokenTest is Test {
   address internal hook;
 
   function setUp() public virtual {
-    hook = makeAddr("hook");
     token0 = new ERC20Mock("Token0", "TK0");
     token1 = new ERC20Mock("Token1", "TK1");
-
-    yieldToken = new YieldToken("Yield Token", "YT", hook, address(token0), address(token1));
+    FixedFeeSwapMock _mock = new FixedFeeSwapMock(address(token0), address(token1));
+    yieldToken =
+      new YieldToken("Yield Token", "YT", address(_mock), address(token0), address(token1));
+    _mock.setYieldToken(address(yieldToken));
+    hook = address(_mock);
   }
 
   function _assumeSafeAddress(address _addr) internal pure virtual {
@@ -224,15 +227,12 @@ contract Burn is YieldTokenTest {
       collectedFeeToken1: _collectedFeeToken1
     });
 
-    // Mint and send fees for token0 and token1 into the yield token contract
-    token0.mint(address(yieldToken), _params.collectedFeeToken0);
-    token1.mint(address(yieldToken), _params.collectedFeeToken1);
+    token0.mint(hook, _params.collectedFeeToken0);
+    token1.mint(hook, _params.collectedFeeToken1);
 
-    // Mint shares for user via the hook
     vm.prank(hook);
     yieldToken.mint(_params.user, _params.mintAmount);
 
-    // Collect fees to change global indices via the hook
     vm.prank(hook);
     yieldToken.updateFees(_params.collectedFeeToken0, _params.collectedFeeToken1);
 
@@ -264,21 +264,29 @@ contract Burn is YieldTokenTest {
     assertEq(_userAccruedToken1, 0);
 
     // Check that fees were transferred to the user
-    // Note: If user is the YieldToken contract itself, transfer to self doesn't change balance
+    uint256 _expectedToken0 =
+      _initialUserToken0Balance + _calculateAccruedFees(_params.mintAmount, _globalFeeIndex0, 0);
+    uint256 _expectedToken1 =
+      _initialUserToken1Balance + _calculateAccruedFees(_params.mintAmount, _globalFeeIndex1, 0);
+    // When user is the YT, mock transfers accrued fees (may round down due to fee index
+    // calculation)
     if (_params.user == address(yieldToken)) {
-      // When transferring to itself, balance should remain at initial (which includes the fees)
-      assertEq(token0.balanceOf(_params.user), _initialUserToken0Balance);
-      assertEq(token1.balanceOf(_params.user), _initialUserToken1Balance);
-    } else {
-      // Normal case: user receives fees (calculate expected fees inline)
-      assertEq(
+      // Allow 1 wei rounding error since fees flow through fee index calculation
+      assertApproxEqAbs(
         token0.balanceOf(_params.user),
-        _initialUserToken0Balance + _calculateAccruedFees(_params.mintAmount, _globalFeeIndex0, 0)
+        _initialUserToken0Balance + _params.collectedFeeToken0,
+        1,
+        "YT as user: token0"
       );
-      assertEq(
+      assertApproxEqAbs(
         token1.balanceOf(_params.user),
-        _initialUserToken1Balance + _calculateAccruedFees(_params.mintAmount, _globalFeeIndex1, 0)
+        _initialUserToken1Balance + _params.collectedFeeToken1,
+        1,
+        "YT as user: token1"
       );
+    } else {
+      assertEq(token0.balanceOf(_params.user), _expectedToken0);
+      assertEq(token1.balanceOf(_params.user), _expectedToken1);
     }
   }
 }
@@ -898,19 +906,16 @@ contract Claim is YieldTokenTest {
     _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
     _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
 
-    // Mint and send fees for token0 and token1 into the yield token contract
-    token0.mint(address(yieldToken), _collectedFeeToken0);
-    token1.mint(address(yieldToken), _collectedFeeToken1);
+    // Fund the mock (hook) so collectFeesToYT can transfer to the YT when claim runs
+    token0.mint(hook, _collectedFeeToken0);
+    token1.mint(hook, _collectedFeeToken1);
 
-    // User mints shares via the hook
     vm.prank(hook);
     yieldToken.mint(_user, _mintAmount);
 
-    // Fees collected (global indices increase)
     vm.prank(hook);
     yieldToken.updateFees(_collectedFeeToken0, _collectedFeeToken1);
 
-    // Sync user fees to latest global indices
     vm.prank(hook);
     yieldToken.claim(_user);
     // After claim, user fees should have been reset; we just ensure no revert and balances updated
@@ -928,15 +933,12 @@ contract Claim is YieldTokenTest {
     _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
     _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
 
-    // Mint and send fees for token0 and token1 into the yield token contract
-    token0.mint(address(yieldToken), _collectedFeeToken0);
-    token1.mint(address(yieldToken), _collectedFeeToken1);
+    token0.mint(hook, _collectedFeeToken0);
+    token1.mint(hook, _collectedFeeToken1);
 
-    // User mints shares via the hook
     vm.prank(hook);
     yieldToken.mint(_user, _mintAmount);
 
-    // Fees collected (global indices increase)
     vm.prank(hook);
     yieldToken.updateFees(_collectedFeeToken0, _collectedFeeToken1);
 
@@ -968,15 +970,12 @@ contract Claim is YieldTokenTest {
     _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
     _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
 
-    // Mint and send fees for token0 and token1 into the yield token contract
-    token0.mint(address(yieldToken), _collectedFeeToken0);
-    token1.mint(address(yieldToken), _collectedFeeToken1);
+    token0.mint(hook, _collectedFeeToken0);
+    token1.mint(hook, _collectedFeeToken1);
 
-    // User mints shares via the hook
     vm.prank(hook);
     yieldToken.mint(_user, _mintAmount);
 
-    // Fees collected (global indices increase)
     vm.prank(hook);
     yieldToken.updateFees(_collectedFeeToken0, _collectedFeeToken1);
 
@@ -1015,58 +1014,59 @@ contract Claim is YieldTokenTest {
     uint256 _collectedEth,
     uint256 _collectedToken1
   ) public {
-    // Use a dedicated EOA-style address as the fee receiver to avoid contracts like console
     address _user = makeAddr("ethReceiver");
 
-    // Deploy a YieldToken instance that treats ETH as token0
-    YieldToken _ethYieldToken = new YieldToken("Yield Token", "YT", hook, NATIVE, address(token1));
+    FixedFeeSwapMock _ethMock = new FixedFeeSwapMock(NATIVE, address(token1));
+    YieldToken _ethYieldToken =
+      new YieldToken("Yield Token", "YT", address(_ethMock), NATIVE, address(token1));
+    _ethMock.setYieldToken(address(_ethYieldToken));
 
-    // Bound inputs and require at least one non-zero fee
     _mintAmount = _boundMintAmount(_mintAmount);
     _collectedEth = _boundFeeAmount(_collectedEth);
     _collectedToken1 = _boundFeeAmount(_collectedToken1);
     vm.assume(_collectedEth > 0 || _collectedToken1 > 0);
 
-    // Fund the YieldToken with ETH and ERC20 fees
-    vm.deal(address(_ethYieldToken), _collectedEth);
-    token1.mint(address(_ethYieldToken), _collectedToken1);
+    vm.deal(address(_ethMock), _collectedEth);
+    token1.mint(address(_ethMock), _collectedToken1);
 
-    // User mints shares via the hook
-    vm.prank(hook);
+    vm.prank(address(_ethMock));
     _ethYieldToken.mint(_user, _mintAmount);
 
-    // Collect fees (global indices increase)
-    vm.prank(hook);
+    vm.prank(address(_ethMock));
     _ethYieldToken.updateFees(_collectedEth, _collectedToken1);
 
-    // Claim via hook – should succeed and exercise ETH + ERC20 transfer paths
-    vm.prank(hook);
+    vm.prank(address(_ethMock));
     _ethYieldToken.claim(_user);
   }
 
   function testFuzz_RevertIf_EthTransferFails(uint256 _mintAmount, uint256 _collectedEth) public {
     _mintAmount = _boundMintAmount(_mintAmount);
     _collectedEth = _boundFeeAmount(_collectedEth);
-    vm.assume(_collectedEth > 0);
+    // Ensure fees are large enough to avoid rounding to 0 after double integer division
+    // (once for fee index, once for accrued fees)
+    vm.assume(_collectedEth >= 1e18);
+    vm.assume(_mintAmount >= 1e18);
+    // Ensure fee index is non-zero: _collectedEth * PRECISION >= _mintAmount
+    vm.assume(_collectedEth * 1e18 >= _mintAmount);
 
-    // Deploy a YieldToken instance that treats ETH as token0
-    YieldToken _ethYieldToken = new YieldToken("Yield Token", "YT", hook, NATIVE, address(token1));
+    FixedFeeSwapMock _ethMock = new FixedFeeSwapMock(NATIVE, address(token1));
+    YieldToken _ethYieldToken =
+      new YieldToken("Yield Token", "YT", address(_ethMock), NATIVE, address(token1));
+    _ethMock.setYieldToken(address(_ethYieldToken));
 
-    // Non‑payable recipient that rejects ETH
     NonPayableContractMock _nonPayable = new NonPayableContractMock();
 
-    // Fund ETH to the token, mint shares to non‑payable, and update fees
-    vm.deal(address(_ethYieldToken), _collectedEth);
+    vm.deal(address(_ethMock), _collectedEth);
 
-    vm.prank(hook);
+    vm.prank(address(_ethMock));
     _ethYieldToken.mint(address(_nonPayable), _mintAmount);
 
-    vm.prank(hook);
+    vm.prank(address(_ethMock));
     _ethYieldToken.updateFees(_collectedEth, 0);
 
-    // Attempt to claim should revert with YieldToken_TransferFailed
-    vm.expectRevert(YieldToken.YieldToken_TransferFailed.selector);
-    vm.prank(hook);
+    // The mock's transferFeesToUser reverts with a string error when ETH transfer fails
+    vm.expectRevert("ETH transfer failed");
+    vm.prank(address(_ethMock));
     _ethYieldToken.claim(address(_nonPayable));
   }
 }
