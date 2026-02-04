@@ -6,4 +6,5 @@ pragma solidity 0.8.26;
 /// @notice Minimal interface for FixedFeeSwap so the YieldToken can pull fees on claim.
 interface IFixedFeeSwap {
   function collectFeesToYT() external;
+  function transferFeesToUser(address _user, uint256 _amount0, uint256 _amount1) external;
 }

@@ -51,6 +51,9 @@ contract FixedFeeSwap {
   /// already used).
   error FixedFeeSwap_YTFeeCollectionClosed();
 
+  /// @notice Thrown when the caller is not authorized.
+  error FixedFeeSwap_NotAuthorized();
+
   /*//////////////////////////////////////////////////////////////
                         EVENTS
   //////////////////////////////////////////////////////////////*/
@@ -237,23 +240,30 @@ contract FixedFeeSwap {
     emit Redeem(msg.sender, _vstAmount, _maturityReached);
   }
 
-  /// @notice Collects this hook's accrued fees from the vault and forwards them to the YieldToken.
+  /// @notice Collects this hook's accrued fees from the vault for YieldToken holders.
   /// @dev
   ///      - Reverts when `ytFeeCollectionClosed` is true.
-  ///      - Syncs YT fee accounting, claims from the vault, transfers to the YT, and
-  ///      - Updates YT fee indexes.
-  ///      - After this, YT holders can claim via the YT's claim/burn.
+  ///      - Syncs YT fee accounting and claims from the vault into this contract.
+  ///      - YT holders receive fees via `transferFeesToUser` when claiming.
   function collectFeesToYT() external {
     if (ytFeeCollectionClosed) revert FixedFeeSwap_YTFeeCollectionClosed();
 
     _syncYTFees();
 
-    address _feeToken0 = VAULT_SHARE_TOKEN.FEE_TOKEN0();
-    address _feeToken1 = VAULT_SHARE_TOKEN.FEE_TOKEN1();
-    (uint256 _claimed0, uint256 _claimed1) = VAULT_SHARE_TOKEN.claim(address(this));
+    // Claim fees from the vault into this contract; YT will call transferFeesToUser to pay users
+    VAULT_SHARE_TOKEN.claim(address(this));
+  }
 
-    if (_claimed0 > 0) _transferFeeToken(_feeToken0, address(YIELD_TOKEN), _claimed0);
-    if (_claimed1 > 0) _transferFeeToken(_feeToken1, address(YIELD_TOKEN), _claimed1);
+  /// @notice Transfers fee tokens directly to a user. Called by YieldToken during fee claims.
+  /// @param _user The address to transfer the fees to.
+  /// @param _amount0 The amount of fee token0 to transfer.
+  /// @param _amount1 The amount of fee token1 to transfer.
+  /// @dev Can only be called by the YieldToken contract.
+  function transferFeesToUser(address _user, uint256 _amount0, uint256 _amount1) external {
+    if (msg.sender != address(YIELD_TOKEN)) revert FixedFeeSwap_NotAuthorized();
+
+    if (_amount0 > 0) _transferFeeToken(VAULT_SHARE_TOKEN.FEE_TOKEN0(), _user, _amount0);
+    if (_amount1 > 0) _transferFeeToken(VAULT_SHARE_TOKEN.FEE_TOKEN1(), _user, _amount1);
   }
 
   /// @notice Claims fees and burns leftover yield tokens after maturity.
@@ -400,4 +410,7 @@ contract FixedFeeSwap {
       YIELD_TOKEN.updateFees(_newFees0, _newFees1);
     }
   }
+
+  /// @notice Accepts native ETH sent by the VaultShareToken when claiming fees.
+  receive() external payable {}
 }
