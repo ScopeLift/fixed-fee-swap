@@ -89,10 +89,10 @@ contract ZapperTest is Test {
 contract Constructor is ZapperTest {
   function test_RevertIf_FixedFeeSwapIsZero() public {
     vm.expectRevert(Zapper.Zapper_InvalidAddress.selector);
-    new Zapper(FixedFeeSwap(address(0)));
+    new Zapper(FixedFeeSwap(payable(address(0))));
   }
 
-  function test_SetsAllParamsCorrectly() public {
+  function test_SetsAllParamsCorrectly() public view {
     assertEq(address(zapper.FIXED_FEE_SWAP()), address(fixedFeeSwap));
     assertEq(address(zapper.YIELD_TOKEN()), address(fixedFeeSwap.YIELD_TOKEN()));
     assertEq(address(zapper.PRINCIPAL_TOKEN()), address(fixedFeeSwap.PRINCIPAL_TOKEN()));

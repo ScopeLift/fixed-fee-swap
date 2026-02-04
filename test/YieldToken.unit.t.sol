@@ -268,17 +268,20 @@ contract Burn is YieldTokenTest {
       _initialUserToken0Balance + _calculateAccruedFees(_params.mintAmount, _globalFeeIndex0, 0);
     uint256 _expectedToken1 =
       _initialUserToken1Balance + _calculateAccruedFees(_params.mintAmount, _globalFeeIndex1, 0);
-    // When user is the YT, mock sent full collected amounts to YT and YT "transferred" accrued to
-    // itself (may round); balance = initial + mock amount
+    // When user is the YT, mock transfers accrued fees (may round down due to fee index
+    // calculation)
     if (_params.user == address(yieldToken)) {
-      assertEq(
+      // Allow 1 wei rounding error since fees flow through fee index calculation
+      assertApproxEqAbs(
         token0.balanceOf(_params.user),
         _initialUserToken0Balance + _params.collectedFeeToken0,
+        1,
         "YT as user: token0"
       );
-      assertEq(
+      assertApproxEqAbs(
         token1.balanceOf(_params.user),
         _initialUserToken1Balance + _params.collectedFeeToken1,
+        1,
         "YT as user: token1"
       );
     } else {
@@ -1039,7 +1042,12 @@ contract Claim is YieldTokenTest {
   function testFuzz_RevertIf_EthTransferFails(uint256 _mintAmount, uint256 _collectedEth) public {
     _mintAmount = _boundMintAmount(_mintAmount);
     _collectedEth = _boundFeeAmount(_collectedEth);
-    vm.assume(_collectedEth > 0);
+    // Ensure fees are large enough to avoid rounding to 0 after double integer division
+    // (once for fee index, once for accrued fees)
+    vm.assume(_collectedEth >= 1e18);
+    vm.assume(_mintAmount >= 1e18);
+    // Ensure fee index is non-zero: _collectedEth * PRECISION >= _mintAmount
+    vm.assume(_collectedEth * 1e18 >= _mintAmount);
 
     FixedFeeSwapMock _ethMock = new FixedFeeSwapMock(NATIVE, address(token1));
     YieldToken _ethYieldToken =
@@ -1056,7 +1064,8 @@ contract Claim is YieldTokenTest {
     vm.prank(address(_ethMock));
     _ethYieldToken.updateFees(_collectedEth, 0);
 
-    vm.expectRevert(YieldToken.YieldToken_TransferFailed.selector);
+    // The mock's transferFeesToUser reverts with a string error when ETH transfer fails
+    vm.expectRevert("ETH transfer failed");
     vm.prank(address(_ethMock));
     _ethYieldToken.claim(address(_nonPayable));
   }
