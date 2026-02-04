@@ -28,15 +28,17 @@ contract YieldToken is ERC20, IFeeTrackingToken {
                         STATE VARIABLES
   //////////////////////////////////////////////////////////////*/
 
+  /// @notice Native ETH address following Uniswap v4 `Currency` convention.
+  /// @dev See: https://github.com/Uniswap/v4-core/blob/main/src/types/Currency.sol#L37-L38
+  address private constant NATIVE = address(0);
+
   /// @notice The fixed fee swap hook address.
   address public immutable FIXED_FEE_SWAP;
 
   /// @notice The token address in which token0 fees are collected / distributed.
-  /// @dev Use address(0) to represent native ETH following Uniswap v4 `Currency` convention.
   address public immutable FEE_TOKEN0;
 
   /// @notice The token address in which token1 fees are collected / distributed.
-  /// @dev Use address(0) to represent native ETH following Uniswap v4 `Currency` convention.
   address public immutable FEE_TOKEN1;
 
   /// @notice Global fee tracking state.
@@ -134,9 +136,9 @@ contract YieldToken is ERC20, IFeeTrackingToken {
   /// @inheritdoc ERC20
   /// @dev Updates user fee accounting for both the sender and the recipient.
   function _update(address _from, address _to, uint256 _value) internal override {
-    if (_from != address(0)) _updateUserFees(_from);
-    if (_to != address(0)) _updateUserFees(_to);
-    super._update(_from, _to, _value);
+    if (_from != NATIVE) _updateUserFees(_from);
+    if (_to != NATIVE) _updateUserFees(_to);
+    ERC20._update(_from, _to, _value);
   }
 
   /// @notice Updates the fee indexes for token0 and token1.
@@ -189,10 +191,10 @@ contract YieldToken is ERC20, IFeeTrackingToken {
   /// @param _token The address of the token to transfer.
   /// @param _to The address to transfer the tokens to.
   /// @param _amount The amount of tokens to transfer.
-  /// @dev Following Uniswap v4's convention: address(0) represents native ETH.
+  /// @dev Following Uniswap v4's `Currency` convention: NATIVE represents native ETH.
   ///      See: https://github.com/Uniswap/v4-core/blob/main/src/types/Currency.sol#L37-L38
   function _transferAmount(address _token, address _to, uint256 _amount) internal {
-    if (_token == address(0)) {
+    if (_token == NATIVE) {
       (bool _success,) = payable(_to).call{value: _amount}("");
       if (!_success) revert YieldToken_TransferFailed();
     } else {

@@ -4,7 +4,6 @@ pragma solidity ^0.8.26;
 // External imports
 import {Test, Vm} from "forge-std/Test.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 // Internal imports
@@ -16,6 +15,10 @@ import {ERC20Mock} from "test/mock/ERC20Mock.sol";
 import {NonPayableContractMock} from "test/mock/NonPayableContractMock.sol";
 
 contract FixedFeeSwapTest is Test {
+  /// @notice Native ETH address following Uniswap v4 `Currency` convention.
+  /// @dev See: https://github.com/Uniswap/v4-core/blob/main/src/types/Currency.sol#L37-L38
+  address internal constant NATIVE = address(0);
+
   FixedFeeSwap internal fixedFeeSwap;
   VaultShareToken internal vaultShareToken;
   ERC20Mock internal token0;
@@ -221,7 +224,7 @@ contract Deposit is FixedFeeSwapTest {
     vaultShareToken.approve(address(fixedFeeSwap), _amount);
 
     vm.prank(user);
-    (uint256 _ptAmount, uint256 _ytAmount) = fixedFeeSwap.deposit(_amount);
+    fixedFeeSwap.deposit(_amount);
 
     assertEq(vaultShareToken.balanceOf(user), _initialUserVstBalance - _amount);
     assertEq(vaultShareToken.balanceOf(address(fixedFeeSwap)), _initialHookVstBalance + _amount);
@@ -229,9 +232,6 @@ contract Deposit is FixedFeeSwapTest {
     assertEq(fixedFeeSwap.YIELD_TOKEN().totalSupply(), _initialYtSupply + _amount);
     assertEq(fixedFeeSwap.PRINCIPAL_TOKEN().balanceOf(user), _initialPtUserBalance + _amount);
     assertEq(fixedFeeSwap.YIELD_TOKEN().balanceOf(user), _initialYtUserBalance + _amount);
-
-    assertEq(_ptAmount, _amount);
-    assertEq(_ytAmount, _amount);
   }
 
   function testFuzz_EmitsDepositEvent(uint256 _amount) public {
@@ -240,11 +240,8 @@ contract Deposit is FixedFeeSwapTest {
     vm.prank(user);
     vaultShareToken.approve(address(fixedFeeSwap), _amount);
 
-    uint256 _ptAmount = _amount;
-    uint256 _ytAmount = _amount;
-
     vm.expectEmit();
-    emit FixedFeeSwap.Deposit(user, _amount, _ptAmount, _ytAmount);
+    emit FixedFeeSwap.Deposit(user, _amount);
     vm.prank(user);
     fixedFeeSwap.deposit(_amount);
   }
@@ -500,9 +497,9 @@ contract Redeem is FixedFeeSwapTest {
     // Assume user is a safe address (allows both EOAs and contracts that can receive ETH)
     _assumeSafeAddressForEth(user);
 
-    // Create a VaultShareToken with native ETH (address(0)) as token0 and ERC20 as token1
+    // Create a VaultShareToken with native ETH (NATIVE) as token0 and ERC20 as token1
     VaultShareToken _vstWithEth =
-      new VaultShareToken("Vault Share Token", "VST", address(0), address(token1));
+      new VaultShareToken("Vault Share Token", "VST", NATIVE, address(token1));
 
     // Create a new hook with the ETH-enabled VST
     FixedFeeSwap _hookWithEth = new FixedFeeSwap(_vstWithEth, maturity);
@@ -575,9 +572,9 @@ contract Redeem is FixedFeeSwapTest {
     // Assume user is a safe address (allows both EOAs and contracts that can receive ETH)
     _assumeSafeAddressForEth(user);
 
-    // Create a VaultShareToken with native ETH (address(0)) as token0 and ERC20 as token1
+    // Create a VaultShareToken with native ETH (NATIVE) as token0 and ERC20 as token1
     VaultShareToken _vstWithEth =
-      new VaultShareToken("Vault Share Token", "VST", address(0), address(token1));
+      new VaultShareToken("Vault Share Token", "VST", NATIVE, address(token1));
 
     // Create a new hook with the ETH-enabled VST
     FixedFeeSwap _hookWithEth = new FixedFeeSwap(_vstWithEth, maturity);
@@ -612,9 +609,9 @@ contract Redeem is FixedFeeSwapTest {
     vm.prank(user);
     _hookWithEth.PRINCIPAL_TOKEN().approve(address(_hookWithEth), _redeemAmount);
 
-    // Expect FeesClaimed event (with native ETH address(0) and ERC20 token1)
+    // Expect FeesClaimed event (with native ETH (NATIVE) and ERC20 token1)
     vm.expectEmit();
-    emit FixedFeeSwap.FeesClaimed(user, address(0), address(token1), _expectedFee0, _expectedFee1);
+    emit FixedFeeSwap.FeesClaimed(user, NATIVE, address(token1), _expectedFee0, _expectedFee1);
 
     // Redeem
     vm.prank(user);
@@ -735,9 +732,9 @@ contract Redeem is FixedFeeSwapTest {
     // Ensure we have fees to claim - need significant fees to avoid rounding to zero
     vm.assume(_feeEth >= _depositAmount && _depositAmount > 0);
 
-    // Create a VaultShareToken with native ETH (address(0)) as token0
+    // Create a VaultShareToken with native ETH (NATIVE) as token0
     VaultShareToken _vstWithEth =
-      new VaultShareToken("Vault Share Token", "VST", address(0), address(token1));
+      new VaultShareToken("Vault Share Token", "VST", NATIVE, address(token1));
 
     // Create a new hook with the ETH-enabled VST
     FixedFeeSwap _hookWithEth = new FixedFeeSwap(_vstWithEth, maturity);

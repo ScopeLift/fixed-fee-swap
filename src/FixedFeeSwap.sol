@@ -55,10 +55,8 @@ contract FixedFeeSwap {
 
   /// @notice Emitted when a user deposits their vault share token into principal and yield tokens.
   /// @param user The address of the user who deposited.
-  /// @param vsAmount The amount of vault share token deposited.
-  /// @param ptAmount The amount of principal token minted to the user.
-  /// @param ytAmount The amount of yield token minted to the user.
-  event Deposit(address indexed user, uint256 vsAmount, uint256 ptAmount, uint256 ytAmount);
+  /// @param amount The amount of vault share token deposited.
+  event Deposit(address indexed user, uint256 amount);
 
   /// @notice Emitted when a user redeems their principal and yield tokens back into the vault share
   /// token.
@@ -84,6 +82,10 @@ contract FixedFeeSwap {
   /*//////////////////////////////////////////////////////////////
                         STATE VARIABLES
   //////////////////////////////////////////////////////////////*/
+
+  /// @notice Native ETH address following Uniswap v4 `Currency` convention.
+  /// @dev See: https://github.com/Uniswap/v4-core/blob/main/src/types/Currency.sol#L37-L38
+  address private constant NATIVE = address(0);
 
   /// @notice The vault share token.
   VaultShareToken public immutable VAULT_SHARE_TOKEN;
@@ -141,10 +143,9 @@ contract FixedFeeSwap {
 
   /// @notice Deposits the vault share token into principal and yield tokens.
   /// @param _amount The amount of vault share token to deposit.
-  /// @return _ptAmount The amount of principal token minted.
-  /// @return _ytAmount The amount of yield token minted.
   /// @dev The caller must have approved the hook to spend the vault share token.
-  function deposit(uint256 _amount) external returns (uint256 _ptAmount, uint256 _ytAmount) {
+  /// @dev When we split VST, we split it into equal amounts of YT + PT (1:1 ratio).
+  function deposit(uint256 _amount) external {
     if (block.timestamp >= MATURITY) revert FixedFeeSwap_SplitAfterMaturity();
 
     if (_amount == 0) revert FixedFeeSwap_InvalidAmount();
@@ -156,16 +157,14 @@ contract FixedFeeSwap {
     // Transfer VaultShareToken from caller to the hook
     VAULT_SHARE_TOKEN.transferFrom(msg.sender, address(this), _amount);
 
-    // Split the vault share token into principal and yield tokens in a 1:1 ratio
-    (_ptAmount, _ytAmount) = (_amount, _amount);
-
+    // When we split VST, we split it into equal amounts of YT + PT (1:1 ratio)
     // Mint PrincipalToken to the caller
-    PRINCIPAL_TOKEN.mint(msg.sender, _ptAmount);
+    PRINCIPAL_TOKEN.mint(msg.sender, _amount);
 
     // Mint YieldToken to the caller
-    YIELD_TOKEN.mint(msg.sender, _ytAmount);
+    YIELD_TOKEN.mint(msg.sender, _amount);
 
-    emit Deposit(msg.sender, _amount, _ptAmount, _ytAmount);
+    emit Deposit(msg.sender, _amount);
   }
 
   /// @notice Redeems the principal and yield tokens back into the vault share token.
@@ -194,6 +193,8 @@ contract FixedFeeSwap {
       _claimAndBurnYieldTokens(msg.sender, _amount);
     } else {
       // -------- AFTER MATURITY --------
+      // Note: Post maturity, YT tokens are valued at 0, so we could burn them as well,
+      // but it's not required since they have no value. Users can burn YT separately if desired.
       _claimFeesAccruedAfterMaturity(msg.sender, _amount);
     }
 
@@ -217,6 +218,8 @@ contract FixedFeeSwap {
   ///  - Claims any fees accrued on the YT tokens before maturity.
   ///  - Burns the YT tokens after claiming fees.
   ///  - Useful for users who have leftover YT tokens after maturity.
+  ///  - Note: This function internally calls `burn()` on the YT token, which claims fees before
+  /// burning. Fees are claimed through the YT token's burn mechanism.
   function claimYTFeesAfterMaturity() external {
     if (block.timestamp < MATURITY) revert FixedFeeSwap_BeforeMaturity();
 
@@ -287,7 +290,7 @@ contract FixedFeeSwap {
   /// @param _token The address of the token to get the balance of.
   /// @return The balance of the token in the contract.
   function _getTokenBalance(address _token) internal view returns (uint256) {
-    if (_token == address(0)) return address(this).balance;
+    if (_token == NATIVE) return address(this).balance;
     else return IERC20(_token).balanceOf(address(this));
   }
 
@@ -295,9 +298,10 @@ contract FixedFeeSwap {
   /// @param _token The address of the token to transfer.
   /// @param _to The address to transfer the tokens to.
   /// @param _amount The amount of tokens to transfer.
-  /// @dev address(0) represents native ETH.
+  /// @dev Following Uniswap v4's `Currency` convention: NATIVE represents native ETH.
+  ///      See: https://github.com/Uniswap/v4-core/blob/main/src/types/Currency.sol#L37-L38
   function _transferFeeToken(address _token, address _to, uint256 _amount) internal {
-    if (_token == address(0)) {
+    if (_token == NATIVE) {
       (bool _success,) = payable(_to).call{value: _amount}("");
       if (!_success) revert FixedFeeSwap_TransferFailed();
     } else {

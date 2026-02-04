@@ -12,6 +12,8 @@ import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {SafeCast} from "v4-core/libraries/SafeCast.sol";
 import {LiquidityAmounts} from "v4-periphery/src/libraries/LiquidityAmounts.sol";
+import {FixedPoint128} from "v4-core/libraries/FixedPoint128.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
@@ -38,6 +40,12 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     uint16 weight;
     /// @notice The current liquidity held in this position.
     uint128 liquidity;
+  }
+
+  /// @notice Stores the last-seen fee growth values from Uniswap v4 for a position.
+  struct PositionCheckpoint {
+    uint256 feeGrowthInside0LastX128;
+    uint256 feeGrowthInside1LastX128;
   }
 
   /// @notice Enum to distinguish callback actions.
@@ -77,6 +85,10 @@ contract LPVault is VaultShareToken, IUnlockCallback {
 
   /// @notice The predefined liquidity positions for this vault.
   LiquidityPosition[] public positions;
+
+  /// @notice Fee growth checkpoints for each configured liquidity position.
+  /// @dev Indexed by position index in `positions`.
+  mapping(uint256 => PositionCheckpoint) internal positionCheckpoints;
 
   /// @notice Thrown when the sum of position weights doesn't equal BIPS (10,000 BIPs).
   error LPVault__InvalidLiquidityDistribution();
@@ -190,6 +202,9 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     virtual
     returns (uint256 _shares, uint256 _amount0Used, uint256 _amount1Used)
   {
+    // Sync fee accounting using the current liquidity configuration before changing it.
+    _syncFees();
+
     bytes memory _result = POOL_MANAGER.unlock(
       abi.encode(
         CallbackAction.Deposit,
@@ -235,6 +250,9 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   {
     if (_shares == 0 || _shares > balanceOf(msg.sender)) revert LPVault__InvalidShares();
 
+    // Sync fee accounting using the current liquidity configuration before changing it.
+    _syncFees();
+
     // Calculate liquidity to remove from each position proportionally and update liquidity.
     uint128[] memory _liquidityToRemove = new uint128[](positions.length);
 
@@ -272,6 +290,9 @@ contract LPVault is VaultShareToken, IUnlockCallback {
   /// @return _collectedFee0 The amount of token0 fees collected.
   /// @return _collectedFee1 The amount of token1 fees collected.
   function collectFees() external virtual returns (uint256 _collectedFee0, uint256 _collectedFee1) {
+    // Sync fee accounting before physically collecting tokens from the pool.
+    _syncFees();
+
     bytes memory _result =
       POOL_MANAGER.unlock(abi.encode(CallbackAction.CollectFees, abi.encode("")));
 
@@ -289,6 +310,14 @@ contract LPVault is VaultShareToken, IUnlockCallback {
     if (_action == CallbackAction.Deposit) return _handleDepositCallback(_actionData);
     if (_action == CallbackAction.Withdraw) return _handleWithdrawCallback(_actionData);
     return _handleCollectFeesCallback();
+  }
+
+  /// @inheritdoc VaultShareToken
+  /// @dev Ensures fee accounting is synced before any vault share mint/burn/transfer by
+  /// checkpointing fees against the underlying Uniswap v4 positions.
+  function _update(address _from, address _to, uint256 _value) internal override {
+    _syncFees();
+    super._update(_from, _to, _value);
   }
 
   /// @notice Handles the deposit callback logic.
@@ -356,8 +385,6 @@ contract LPVault is VaultShareToken, IUnlockCallback {
       _collectedFee1 = uint256(_totalFeeDelta1);
       POOL_MANAGER.take(targetPoolKey.currency1, address(this), _collectedFee1);
     }
-
-    if (_collectedFee0 > 0 || _collectedFee1 > 0) _updateFees(_collectedFee0, _collectedFee1);
 
     return abi.encode(_collectedFee0, _collectedFee1);
   }
@@ -577,8 +604,51 @@ contract LPVault is VaultShareToken, IUnlockCallback {
       _collectedFee1 = uint256(_feeDelta1);
       POOL_MANAGER.take(targetPoolKey.currency1, address(this), _collectedFee1);
     }
+  }
 
-    // Update the global fee-per-share indexes if any fees were collected.
-    if (_collectedFee0 > 0 || _collectedFee1 > 0) _updateFees(_collectedFee0, _collectedFee1);
+  /// @notice View-only fee checkpointing based on Uniswap v4 fee growth inside each position range.
+  /// @dev
+  ///  - Reads fee growth via `getFeeGrowthInside` without calling `unlock` or modifying pool state.
+  ///  - Converts fee growth deltas into token amounts using position liquidity and Q128 math.
+  ///  - Updates `VaultShareToken` fee indexes via `_updateFees`.
+  function _syncFees() internal {
+    PoolId _poolId = targetPoolKey.toId();
+
+    uint256 _newFees0;
+    uint256 _newFees1;
+
+    for (uint256 _i = 0; _i < positions.length; _i++) {
+      LiquidityPosition memory _position = positions[_i];
+      uint128 _liquidity = _position.liquidity;
+
+      (uint256 _feeGrowthInside0NowX128, uint256 _feeGrowthInside1NowX128) =
+        POOL_MANAGER.getFeeGrowthInside(_poolId, _position.tickLower, _position.tickUpper);
+
+      PositionCheckpoint storage _checkpoint = positionCheckpoints[_i];
+
+      // Only compute fees if position has liquidity.
+      if (_liquidity > 0) {
+        uint256 _feeGrowthInside0LastX128 = _checkpoint.feeGrowthInside0LastX128;
+        uint256 _feeGrowthInside1LastX128 = _checkpoint.feeGrowthInside1LastX128;
+
+        // Compute growth deltas since last checkpoint.
+        uint256 _deltaFeeGrowth0X128 = _feeGrowthInside0NowX128 - _feeGrowthInside0LastX128;
+        uint256 _deltaFeeGrowth1X128 = _feeGrowthInside1NowX128 - _feeGrowthInside1LastX128;
+
+        if (_deltaFeeGrowth0X128 > 0) {
+          _newFees0 += Math.mulDiv(_deltaFeeGrowth0X128, _liquidity, FixedPoint128.Q128);
+        }
+        if (_deltaFeeGrowth1X128 > 0) {
+          _newFees1 += Math.mulDiv(_deltaFeeGrowth1X128, _liquidity, FixedPoint128.Q128);
+        }
+      }
+
+      // Always advance checkpoints to prevent claiming fees from before we had liquidity.
+      _checkpoint.feeGrowthInside0LastX128 = _feeGrowthInside0NowX128;
+      _checkpoint.feeGrowthInside1LastX128 = _feeGrowthInside1NowX128;
+    }
+
+    // Update fee indexes if any fees accrued.
+    if (_newFees0 > 0 || _newFees1 > 0) _updateFees(_newFees0, _newFees1);
   }
 }

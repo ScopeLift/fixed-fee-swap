@@ -12,6 +12,10 @@ import {NonPayableContractMock} from "test/mock/NonPayableContractMock.sol";
 import {IFeeTrackingToken} from "src/interface/IFeeTrackingToken.sol";
 
 contract YieldTokenTest is Test {
+  /// @notice Native ETH address following Uniswap v4 `Currency` convention.
+  /// @dev See: https://github.com/Uniswap/v4-core/blob/main/src/types/Currency.sol#L37-L38
+  address internal constant NATIVE = address(0);
+
   YieldToken internal yieldToken;
   ERC20Mock internal token0;
   ERC20Mock internal token1;
@@ -1015,8 +1019,7 @@ contract Claim is YieldTokenTest {
     address _user = makeAddr("ethReceiver");
 
     // Deploy a YieldToken instance that treats ETH as token0
-    YieldToken _ethYieldToken =
-      new YieldToken("Yield Token", "YT", hook, address(0), address(token1));
+    YieldToken _ethYieldToken = new YieldToken("Yield Token", "YT", hook, NATIVE, address(token1));
 
     // Bound inputs and require at least one non-zero fee
     _mintAmount = _boundMintAmount(_mintAmount);
@@ -1047,8 +1050,7 @@ contract Claim is YieldTokenTest {
     vm.assume(_collectedEth > 0);
 
     // Deploy a YieldToken instance that treats ETH as token0
-    YieldToken _ethYieldToken =
-      new YieldToken("Yield Token", "YT", hook, address(0), address(token1));
+    YieldToken _ethYieldToken = new YieldToken("Yield Token", "YT", hook, NATIVE, address(token1));
 
     // Non‑payable recipient that rejects ETH
     NonPayableContractMock _nonPayable = new NonPayableContractMock();

@@ -13,6 +13,10 @@ import {FeeTracking} from "src/lib/FeeTracking.sol";
 import {IFeeTrackingToken} from "src/interface/IFeeTrackingToken.sol";
 
 contract VaultShareTokenTest is Test {
+  /// @notice Native ETH address following Uniswap v4 `Currency` convention.
+  /// @dev See: https://github.com/Uniswap/v4-core/blob/main/src/types/Currency.sol#L37-L38
+  address internal constant NATIVE = address(0);
+
   VaultShareTokenHarness public vaultShareToken;
   ERC20Mock public token0;
   ERC20Mock public token1;
@@ -1172,7 +1176,7 @@ contract Claim is VaultShareTokenTest {
 
     // Deploy a contract that accepts native ETH and ERC20 tokens
     VaultShareTokenHarness _vaultShareToken =
-      new VaultShareTokenHarness("Vault Share Token", "VST", address(0), address(token1));
+      new VaultShareTokenHarness("Vault Share Token", "VST", NATIVE, address(token1));
 
     // Mint and send fees for token0 and token1 into the vault
     vm.deal(address(_vaultShareToken), _collectedFeeToken0); // Native token
@@ -1317,7 +1321,7 @@ contract Claim is VaultShareTokenTest {
 
     // Deploy a contract that accepts native ETH and ERC20 tokens
     VaultShareTokenHarness _vaultShareToken =
-      new VaultShareTokenHarness("Vault Share Token", "VST", address(0), address(token1));
+      new VaultShareTokenHarness("Vault Share Token", "VST", NATIVE, address(token1));
 
     // Deploy a contract that rejects ETH transfers
     NonPayableContractMock _nonPayableContract = new NonPayableContractMock();
