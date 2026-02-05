@@ -474,25 +474,25 @@ contract FixedFeeSwapMarket is BaseHook {
     internal
     returns (uint256 amountInUsed, uint256 amountOutCalculated)
   {
-    uint256 amountInRemainingGross = amountInGross;
+    uint256 amountInNet = _netOfFee(amountInGross);
+    uint256 amountInFee = amountInGross - amountInNet;
+    uint256 amountInRemainingNet = amountInNet;
     SwapContext memory ctx = SwapContext({
       principalForCash: principalForCash,
       tickMovingLeft: !principalForCash,
       priceLimitWad: priceLimitWad
     });
 
-    while (amountInRemainingGross != 0) {
-      // Check price limit
+    while (amountInRemainingNet != 0) {
+      // Slippage protection: stop the swap if the price has moved past the caller's limit.
+      // For principal→cash swaps, price decreases so we stop when price falls to the limit.
+      // For cash→principal swaps, price increases so we stop when price rises to the limit.
       if (ctx.priceLimitWad != 0) {
-        uint256 priceAbs = currentPrice.abs();
-        if (ctx.principalForCash ? priceAbs <= ctx.priceLimitWad : priceAbs >= ctx.priceLimitWad) {
+        uint256 price = uint256(currentPrice);
+        if (ctx.principalForCash ? price <= ctx.priceLimitWad : price >= ctx.priceLimitWad) {
           break;
         }
       }
-
-      // Compute net-of-fee input
-      uint256 amountInRemainingNet = _netOfFee(amountInRemainingGross);
-      if (amountInRemainingNet == 0) break;
 
       // Find next initialized tick
       int24 nextTick;
@@ -507,48 +507,45 @@ contract FixedFeeSwapMarket is BaseHook {
       }
 
       // Compute swap step and update state
-      (uint256 stepGross, uint256 stepOut, int24 newTick) =
-        _executeSwapStep(amountInRemainingNet, amountInRemainingGross, nextTick, initialized, ctx);
+      (uint256 stepNet, uint256 stepOut, int24 newTick) =
+        _executeSwapStep(amountInRemainingNet, nextTick, initialized, ctx);
 
-      amountInRemainingGross -= stepGross;
+      amountInRemainingNet -= stepNet;
       amountOutCalculated += stepOut;
       currentTick = newTick;
     }
 
-    amountInUsed = amountInGross - amountInRemainingGross;
+    uint256 totalNetUsed = amountInNet - amountInRemainingNet;
+    amountInUsed = totalNetUsed + amountInFee;
+    if (amountInUsed > amountInGross) amountInUsed = amountInGross;
   }
 
   /// @notice Executes a single swap step: calculates amounts, updates fees, crosses tick if needed
   /// @param amountInNet Net input amount (after fees) available for this step
-  /// @param amountInGrossRemaining Gross input remaining to clamp step size
   /// @param nextTick The next initialized tick boundary
   /// @param initialized Whether nextTick is an initialized tick with liquidity changes
   /// @param ctx Swap context containing direction flags
-  /// @return stepGross Gross input consumed in this step
+  /// @return stepNet Net input consumed in this step
   /// @return stepOut Output tokens produced in this step
   /// @return newTick The tick position after this step
   function _executeSwapStep(
     uint256 amountInNet,
-    uint256 amountInGrossRemaining,
     int24 nextTick,
     bool initialized,
     SwapContext memory ctx
-  ) internal returns (uint256 stepGross, uint256 stepOut, int24 newTick) {
-    // Compute swap using NET input
-    (uint256 stepNet, uint256 amountOut, int256 stepPrice, int24 stepTick) = _calculateSwap(
+  ) internal returns (uint256 stepNet, uint256 stepOut, int24 newTick) {
+    (uint256 netConsumed, uint256 amountOut, int256 stepPrice, int24 stepTick) = _calculateSwap(
       amountInNet.toInt256(), currentPrice, nextTick, ctx.principalForCash, ctx.priceLimitWad
     );
-    if (stepNet == 0) revert FixedFeeSwap__SwapStepProducedZeroIn();
+    if (netConsumed == 0) revert FixedFeeSwap__SwapStepProducedZeroIn();
     if (amountOut == 0) revert FixedFeeSwap__SwapStepProducedZeroOut();
 
-    // Convert NET to GROSS. Clamp to remaining gross to handle rounding edge cases
-    // where _grossFromNet slightly overshoots due to rounding up.
-    stepGross = _grossFromNet(stepNet);
-    if (stepGross > amountInGrossRemaining) stepGross = amountInGrossRemaining;
-    if (stepGross < stepNet) revert FixedFeeSwap__InvalidHookParams();
+    stepNet = netConsumed;
 
-    // Update fee growth
-    uint256 stepFee = stepGross - stepNet;
+    // Compute fee for this step directly from net consumed and attribute to LPs.
+    // Per-step tracking is needed because activeLiquidity changes at tick crossings.
+    uint256 stepFee =
+      FixedPointMathLib.mulDivUp(netConsumed, FEE_RATE, FEE_DENOMINATOR - FEE_RATE);
     if (stepFee > 0 && activeLiquidity > 0) {
       if (ctx.principalForCash) {
         feeGrowthGlobal0X128 += FixedPointMathLib.mulDiv(stepFee, Q128, activeLiquidity);
@@ -1184,12 +1181,6 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @notice Returns the amount available to swap after fees, given a gross exact-in amount.
   function _netOfFee(uint256 amountInGross) internal view returns (uint256) {
     return FixedPointMathLib.mulDiv(amountInGross, FEE_DENOMINATOR - FEE_RATE, FEE_DENOMINATOR);
-  }
-
-  /// @notice Returns the gross amount required to obtain a desired net-of-fee amount.
-  /// @dev Rounds up so the protocol is not underpaid on fees.
-  function _grossFromNet(uint256 amountInNet) internal view returns (uint256) {
-    return FixedPointMathLib.mulDivUp(amountInNet, FEE_DENOMINATOR, FEE_DENOMINATOR - FEE_RATE);
   }
 
   // ============ Internal Functions - Price/Yield Conversions ============
