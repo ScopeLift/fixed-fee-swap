@@ -72,6 +72,9 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   /// @notice Reference liquidity unit for value calculations.
   uint256 public constant WAD = 1e18;
 
+  /// @notice Q96 fixed-point scale factor.
+  uint256 internal constant Q96 = 1 << 96;
+
   /// @notice The Uniswap v4 PoolManager.
   IPoolManager public immutable POOL_MANAGER;
 
@@ -235,16 +238,16 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
       revert LPVault__InsufficientAllowance();
     }
 
-    // Fetch current pool price for value constraint check
+    // Fetch current pool price for value constraint check and liquidity calculation.
     (uint160 _sqrtPriceX96,,,) = POOL_MANAGER.getSlot0(targetPoolKey.toId());
 
-    // Check value constraint: convert amount0 to token1 value and verify total <= INIT_MAX_VALUE
-    uint256 _amount0AsValue1 =
-      FullMath.mulDiv(_amount0Max, uint256(_sqrtPriceX96) * uint256(_sqrtPriceX96), 1 << 192);
+    // Check value constraint: convert amount0 to token1 value and verify total <= INIT_MAX_VALUE.
+    uint256 _amount0AsValue1 = _amount0ToValue1(_amount0Max, _sqrtPriceX96);
     uint256 _totalValue = _amount0AsValue1 + _amount1Max;
     if (_totalValue > INIT_MAX_VALUE) revert LPVault__ExceedsMaxValue();
 
-    (uint128[] memory _liquidityPerPosition, uint128 _liquidity0) = _calculateInitialLiquidity();
+    (uint128[] memory _liquidityPerPosition, uint128 _liquidity0) =
+      _calculateInitialLiquidity(_sqrtPriceX96);
 
     bytes memory _result = POOL_MANAGER.unlock(
       abi.encode(
@@ -528,14 +531,11 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   /// position's value using the pool's current price.
   /// @return _liquidityPerPosition Array of liquidity amounts for each position.
   /// @return _liquidity0 The liquidity assigned to position0.
-  function _calculateInitialLiquidity()
+  function _calculateInitialLiquidity(uint160 _sqrtPriceX96)
     internal
     view
     returns (uint128[] memory _liquidityPerPosition, uint128 _liquidity0)
   {
-    // Use current pool price for liquidity calculations
-    (uint160 _sqrtPriceX96,,,) = POOL_MANAGER.getSlot0(targetPoolKey.toId());
-
     _liquidityPerPosition = new uint128[](positions.length);
 
     for (uint256 _i = 0; _i < positions.length; _i++) {
@@ -572,10 +572,8 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     (uint256 _amount0Ref, uint256 _amount1Ref) =
       _getAmountsForLiquidity(_position, _sqrtPriceX96, uint128(WAD));
 
-    // Convert amount0 to token1 value: value = amount0 * price
-    // price = sqrtPriceX96^2 / 2^192
-    uint256 _amount0RefAsValue1 =
-      FullMath.mulDiv(_amount0Ref, uint256(_sqrtPriceX96) * uint256(_sqrtPriceX96), 1 << 192);
+    // Convert amount0 to token1 value at current price.
+    uint256 _amount0RefAsValue1 = _amount0ToValue1(_amount0Ref, _sqrtPriceX96);
 
     // Total value per unit reference liquidity
     uint256 _valuePerRefLiquidity = _amount0RefAsValue1 + _amount1Ref;
@@ -596,11 +594,36 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     (uint160 _sqrtPriceX96,,,) = POOL_MANAGER.getSlot0(targetPoolKey.toId());
 
     _maxAmount1 = INIT_MAX_VALUE;
-    // Convert max value from token1 to token0: amount0 = value / price
-    // price = sqrtPriceX96^2 / 2^192
-    // amount0 = value * 2^192 / sqrtPriceX96^2
-    _maxAmount0 =
-      FullMath.mulDiv(INIT_MAX_VALUE, 1 << 192, uint256(_sqrtPriceX96) * uint256(_sqrtPriceX96));
+    // Convert max value from token1 to token0 at current price.
+    _maxAmount0 = _value1ToAmount0(INIT_MAX_VALUE, _sqrtPriceX96);
+  }
+
+  /// @notice Converts token0 amount to token1-equivalent value using current sqrt price.
+  /// @dev Uses two mulDiv steps to avoid overflow from squaring sqrt price in uint256.
+  function _amount0ToValue1(uint256 _amount0, uint160 _sqrtPriceX96)
+    internal
+    pure
+    returns (uint256 _value1)
+  {
+    if (_amount0 == 0) return 0;
+
+    uint256 _sqrtPriceX96Uint = uint256(_sqrtPriceX96);
+    uint256 _value1X96 = FullMath.mulDiv(_amount0, _sqrtPriceX96Uint, Q96);
+    _value1 = FullMath.mulDiv(_value1X96, _sqrtPriceX96Uint, Q96);
+  }
+
+  /// @notice Converts token1-equivalent value to token0 amount using current sqrt price.
+  /// @dev Uses two mulDiv steps to avoid overflow from squaring sqrt price in uint256.
+  function _value1ToAmount0(uint256 _value1, uint160 _sqrtPriceX96)
+    internal
+    pure
+    returns (uint256 _amount0)
+  {
+    if (_value1 == 0) return 0;
+
+    uint256 _sqrtPriceX96Uint = uint256(_sqrtPriceX96);
+    uint256 _amount0X96 = FullMath.mulDiv(_value1, Q96, _sqrtPriceX96Uint);
+    _amount0 = FullMath.mulDiv(_amount0X96, Q96, _sqrtPriceX96Uint);
   }
 
   /// @notice Adds liquidity to all positions using pre-calculated amounts.

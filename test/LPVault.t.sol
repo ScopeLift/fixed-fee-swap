@@ -151,6 +151,23 @@ contract LPVaultTest is Test, Deployers {
     }
   }
 
+  function _getProportionalLiquidityPerPosition(uint128 _position0Amount)
+    internal
+    view
+    returns (uint128[] memory _liquidityPerPosition)
+  {
+    uint256 _positionsLength = defaultPositions.length;
+    _liquidityPerPosition = new uint128[](_positionsLength);
+    _liquidityPerPosition[0] = _position0Amount;
+
+    (,,, uint128 _position0Liquidity) = vault.positions(0);
+    for (uint256 _i = 1; _i < _positionsLength; _i++) {
+      (,,, uint128 _positionLiquidity) = vault.positions(_i);
+      _liquidityPerPosition[_i] =
+        uint128(FullMath.mulDiv(_position0Amount, _positionLiquidity, _position0Liquidity));
+    }
+  }
+
   function _initializeLiquidity(address _initializer)
     internal
     returns (uint256 _shares, uint256 _amount0Used, uint256 _amount1Used)
@@ -598,15 +615,7 @@ contract Deposit is LPVaultTest {
     deal(Currency.unwrap(currency1), depositor, _amount1Max);
     _approveTokensForVault(depositor, _amount0Max, _amount1Max);
 
-    uint128[] memory _liquidityPerPosition = new uint128[](3);
-    (,,, uint128 _position0Liquidity) = vault.positions(0);
-    (,,, uint128 _position1Liquidity) = vault.positions(1);
-    (,,, uint128 _position2Liquidity) = vault.positions(2);
-    _liquidityPerPosition[0] = _liquidity;
-    _liquidityPerPosition[1] =
-      uint128(FullMath.mulDiv(_liquidity, _position1Liquidity, _position0Liquidity));
-    _liquidityPerPosition[2] =
-      uint128(FullMath.mulDiv(_liquidity, _position2Liquidity, _position0Liquidity));
+    uint128[] memory _liquidityPerPosition = _getProportionalLiquidityPerPosition(_liquidity);
 
     LPVaultHarness _amountsHarness = new LPVaultHarness(
       manager, defaultPoolKey, defaultPositions, DEFAULT_NAME, DEFAULT_SYMBOL, INIT_MAX_VALUE
@@ -682,7 +691,7 @@ contract Deposit is LPVaultTest {
   ) public {
     vm.assume(_caller != address(manager));
 
-    uint128[] memory _liquidityPerPosition = new uint128[](3);
+    uint128[] memory _liquidityPerPosition = new uint128[](defaultPositions.length);
     _liquidityPerPosition[0] = 1e18;
     _liquidityPerPosition[1] = 5e17;
     _liquidityPerPosition[2] = 5e17;
@@ -763,15 +772,7 @@ contract Withdraw is LPVaultTest {
 
     (uint256 _shares,,) = _deposit(_depositor, _amount0, _amount1);
 
-    uint128[] memory _liquidityToRemove = new uint128[](3);
-    (,,, uint128 _position0Liquidity) = vault.positions(0);
-    (,,, uint128 _position1Liquidity) = vault.positions(1);
-    (,,, uint128 _position2Liquidity) = vault.positions(2);
-    _liquidityToRemove[0] = uint128(_shares);
-    _liquidityToRemove[1] =
-      uint128(FullMath.mulDiv(_shares, _position1Liquidity, _position0Liquidity));
-    _liquidityToRemove[2] =
-      uint128(FullMath.mulDiv(_shares, _position2Liquidity, _position0Liquidity));
+    uint128[] memory _liquidityToRemove = _getProportionalLiquidityPerPosition(uint128(_shares));
 
     (uint256 _amount0Received, uint256 _amount1Received) =
       _sumAmountsForLiquidityRoundDown(_liquidityToRemove);
