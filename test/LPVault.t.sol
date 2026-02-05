@@ -854,16 +854,6 @@ contract Withdraw is LPVaultTest {
 }
 
 contract CollectFees is LPVaultTest {
-  uint256 constant FEE_INDEX_PRECISION = 1e18;
-
-  function _boundSwapAbs(uint256 _swapAbs) internal pure returns (int256) {
-    return -int256(bound(_swapAbs, 1e6, 1e36));
-  }
-
-  function _performSwap(bool _zeroForOne, int256 _amountSpecified) internal returns (BalanceDelta) {
-    return swap(defaultPoolKey, _zeroForOne, _amountSpecified, "");
-  }
-
   function _collectFeesAndAssertVaultDelta()
     internal
     returns (uint256 _collectedFee0, uint256 _collectedFee1)
@@ -1045,6 +1035,7 @@ contract CollectFees is LPVaultTest {
 
     uint256 _feeIndex0Before = vault.globalFeeIndex0Scaled();
     uint256 _feeIndex1Before = vault.globalFeeIndex1Scaled();
+    uint256 _totalSupplyBefore = vault.totalSupply();
 
     uint256 _vaultToken0Before = MockERC20(Currency.unwrap(currency0)).balanceOf(address(vault));
     uint256 _vaultToken1Before = MockERC20(Currency.unwrap(currency1)).balanceOf(address(vault));
@@ -1058,9 +1049,8 @@ contract CollectFees is LPVaultTest {
     uint256 _collectedFee0 = _vaultToken0After - _vaultToken0Before;
     uint256 _collectedFee1 = _vaultToken1After - _vaultToken1Before;
 
-    uint256 _totalSupplyAfter = vault.totalSupply();
-    uint256 _expectedIndexDelta0 = _expectedIndexDelta(_collectedFee0, _totalSupplyAfter);
-    uint256 _expectedIndexDelta1 = _expectedIndexDelta(_collectedFee1, _totalSupplyAfter);
+    uint256 _expectedIndexDelta0 = _expectedIndexDelta(_collectedFee0, _totalSupplyBefore);
+    uint256 _expectedIndexDelta1 = _expectedIndexDelta(_collectedFee1, _totalSupplyBefore);
 
     uint256 _feeIndex0After = vault.globalFeeIndex0Scaled();
     uint256 _feeIndex1After = vault.globalFeeIndex1Scaled();
