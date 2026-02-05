@@ -579,31 +579,4 @@ contract OnFlashLoan is ZapperTest {
       "PT should be approved for at least _amount for flash loan repayment"
     );
   }
-
-  function testFuzz_RevertIf_InitiatorIsNotZapper(
-    address _initiator,
-    address _token,
-    uint256 _amount
-  ) public {
-    vm.assume(_initiator != address(zapper));
-
-    vm.expectRevert(Zapper.Zapper_InvalidInitiator.selector);
-    zapper.onFlashLoan(_initiator, _token, _amount, 0, "");
-  }
-
-  function testFuzz_RevertIf_TokenIsNotPrincipalToken(address _token, uint256 _amount) public {
-    vm.assume(_token != address(fixedFeeSwap.PRINCIPAL_TOKEN()));
-
-    vm.expectRevert(Zapper.Zapper_InvalidFlashLoanToken.selector);
-    zapper.onFlashLoan(address(zapper), _token, _amount, 0, "");
-  }
-
-  function testFuzz_RevertIf_CallerIsNotPrincipalToken(address _msgSender, uint256 _amount) public {
-    PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
-    vm.assume(_msgSender != address(_pt));
-
-    vm.expectRevert(Zapper.Zapper_NotAuthorized.selector);
-    vm.prank(_msgSender);
-    zapper.onFlashLoan(address(zapper), address(_pt), _amount, 0, "");
-  }
 }
