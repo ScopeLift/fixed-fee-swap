@@ -405,7 +405,6 @@ contract BuyYieldToken is ZapperTest {
 }
 
 contract OnFlashLoan is ZapperTest {
-<<<<<<< HEAD
   function testFuzz_RevertIf_InitiatorIsNotZapper(
     address _initiator,
     address _token,
