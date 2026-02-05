@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Deployers} from "lib/v4-periphery/lib/v4-core/test/utils/Deployers.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {LPVault} from "src/LPVault.sol";
@@ -853,6 +854,52 @@ contract Withdraw is LPVaultTest {
 }
 
 contract CollectFees is LPVaultTest {
+  function _collectFeesAndAssertVaultDelta()
+    internal
+    returns (uint256 _collectedFee0, uint256 _collectedFee1)
+  {
+    uint256 _vaultToken0Before = MockERC20(Currency.unwrap(currency0)).balanceOf(address(vault));
+    uint256 _vaultToken1Before = MockERC20(Currency.unwrap(currency1)).balanceOf(address(vault));
+
+    (_collectedFee0, _collectedFee1) = vault.collectFees();
+
+    uint256 _vaultToken0After = MockERC20(Currency.unwrap(currency0)).balanceOf(address(vault));
+    uint256 _vaultToken1After = MockERC20(Currency.unwrap(currency1)).balanceOf(address(vault));
+
+    assertEq(_vaultToken0After, _vaultToken0Before + _collectedFee0);
+    assertEq(_vaultToken1After, _vaultToken1Before + _collectedFee1);
+  }
+
+  function _expectedIndexDelta(uint256 _collectedFee, uint256 _totalSupply)
+    internal
+    pure
+    returns (uint256)
+  {
+    if (_collectedFee == 0 || _totalSupply == 0) return 0;
+    return Math.mulDiv(_collectedFee, FEE_INDEX_PRECISION, _totalSupply, Math.Rounding.Floor);
+  }
+
+  function _expectedAccrued(uint256 _balance, uint256 _globalIndex)
+    internal
+    pure
+    returns (uint256)
+  {
+    if (_balance == 0 || _globalIndex == 0) return 0;
+    return Math.mulDiv(_balance, _globalIndex, FEE_INDEX_PRECISION, Math.Rounding.Floor);
+  }
+
+  function _claimAndAssert(address _user, uint256 _globalIndex0, uint256 _globalIndex1) internal {
+    uint256 _balance = vault.balanceOf(_user);
+    uint256 _expected0 = _expectedAccrued(_balance, _globalIndex0);
+    uint256 _expected1 = _expectedAccrued(_balance, _globalIndex1);
+
+    vm.prank(_user);
+    (uint256 _claimed0, uint256 _claimed1) = vault.claim(_user);
+
+    assertEq(_claimed0, _expected0);
+    assertEq(_claimed1, _expected1);
+  }
+
   function testFuzz_CollectFeesAfterSwaps(
     address _depositor,
     uint256 _amount0,
@@ -862,26 +909,10 @@ contract CollectFees is LPVaultTest {
   ) public {
     _assumeSafeAddress(_depositor);
     _deposit(_depositor, _amount0, _amount1);
-    BalanceDelta _delta0 = _performSwap(true, _boundSwapAbs(_swapAbs0));
-    BalanceDelta _delta1 = _performSwap(false, _boundSwapAbs(_swapAbs1));
+    _performSwap(true, _boundSwapAbs(_swapAbs0));
+    _performSwap(false, _boundSwapAbs(_swapAbs1));
 
-    uint256 _swapInput0 = uint256(-int256(_delta0.amount0()));
-    uint256 _swapInput1 = uint256(-int256(_delta1.amount1()));
-    uint256 _expectedFee0 = _swapInput0 * DEFAULT_FEE / FEE_DENOMINATOR;
-    uint256 _expectedFee1 = _swapInput1 * DEFAULT_FEE / FEE_DENOMINATOR;
-
-    uint256 _vaultToken0Before = MockERC20(Currency.unwrap(currency0)).balanceOf(address(vault));
-    uint256 _vaultToken1Before = MockERC20(Currency.unwrap(currency1)).balanceOf(address(vault));
-
-    (uint256 _collectedFee0, uint256 _collectedFee1) = vault.collectFees();
-
-    uint256 _vaultToken0After = MockERC20(Currency.unwrap(currency0)).balanceOf(address(vault));
-    uint256 _vaultToken1After = MockERC20(Currency.unwrap(currency1)).balanceOf(address(vault));
-
-    assertApproxEqRel(_collectedFee0, _expectedFee0, FEE_TOLERANCE);
-    assertApproxEqRel(_collectedFee1, _expectedFee1, FEE_TOLERANCE);
-    assertEq(_vaultToken0After, _vaultToken0Before + _collectedFee0);
-    assertEq(_vaultToken1After, _vaultToken1Before + _collectedFee1);
+    _collectFeesAndAssertVaultDelta();
   }
 
   function testFuzz_CollectFeesEmitsFeesCollectedEvent(
@@ -896,9 +927,25 @@ contract CollectFees is LPVaultTest {
     _performSwap(true, _boundSwapAbs(_swapAbs0));
     _performSwap(false, _boundSwapAbs(_swapAbs1));
 
-    vm.expectEmit(false, false, false, false);
-    emit LPVault.FeesCollected(0, 0);
-    vault.collectFees();
+    vm.recordLogs();
+    (uint256 _collectedFee0, uint256 _collectedFee1) = _collectFeesAndAssertVaultDelta();
+
+    Vm.Log[] memory _logs = vm.getRecordedLogs();
+    bytes32 _eventSignature = keccak256("FeesCollected(uint256,uint256)");
+    bool _found;
+
+    for (uint256 _i = 0; _i < _logs.length; _i++) {
+      if (_logs[_i].emitter != address(vault)) continue;
+      if (_logs[_i].topics.length == 0 || _logs[_i].topics[0] != _eventSignature) continue;
+
+      (uint256 _fee0, uint256 _fee1) = abi.decode(_logs[_i].data, (uint256, uint256));
+      assertEq(_fee0, _collectedFee0);
+      assertEq(_fee1, _collectedFee1);
+      _found = true;
+      break;
+    }
+
+    assertTrue(_found);
   }
 
   function testFuzz_CollectFeesUpdatesFeeIndexes(
@@ -910,28 +957,24 @@ contract CollectFees is LPVaultTest {
   ) public {
     _assumeSafeAddress(_depositor);
     _deposit(_depositor, _amount0, _amount1);
-    BalanceDelta _delta0 = _performSwap(true, _boundSwapAbs(_swapAbs0));
-    BalanceDelta _delta1 = _performSwap(false, _boundSwapAbs(_swapAbs1));
-
-    uint256 _swapInput0 = uint256(-int256(_delta0.amount0()));
-    uint256 _swapInput1 = uint256(-int256(_delta1.amount1()));
-    uint256 _expectedFee0 = _swapInput0 * DEFAULT_FEE / FEE_DENOMINATOR;
-    uint256 _expectedFee1 = _swapInput1 * DEFAULT_FEE / FEE_DENOMINATOR;
+    _performSwap(true, _boundSwapAbs(_swapAbs0));
+    _performSwap(false, _boundSwapAbs(_swapAbs1));
 
     uint256 _totalSupply = vault.totalSupply();
-    uint256 _expectedIndexDelta0 = _expectedFee0 * FEE_INDEX_PRECISION / _totalSupply;
-    uint256 _expectedIndexDelta1 = _expectedFee1 * FEE_INDEX_PRECISION / _totalSupply;
 
     uint256 _feeIndex0Before = vault.globalFeeIndex0Scaled();
     uint256 _feeIndex1Before = vault.globalFeeIndex1Scaled();
 
-    vault.collectFees();
+    (uint256 _collectedFee0, uint256 _collectedFee1) = _collectFeesAndAssertVaultDelta();
+
+    uint256 _expectedIndexDelta0 = _expectedIndexDelta(_collectedFee0, _totalSupply);
+    uint256 _expectedIndexDelta1 = _expectedIndexDelta(_collectedFee1, _totalSupply);
 
     uint256 _feeIndex0After = vault.globalFeeIndex0Scaled();
     uint256 _feeIndex1After = vault.globalFeeIndex1Scaled();
 
-    assertApproxEqRel(_feeIndex0After - _feeIndex0Before, _expectedIndexDelta0, FEE_TOLERANCE);
-    assertApproxEqRel(_feeIndex1After - _feeIndex1Before, _expectedIndexDelta1, FEE_TOLERANCE);
+    assertEq(_feeIndex0After - _feeIndex0Before, _expectedIndexDelta0);
+    assertEq(_feeIndex1After - _feeIndex1Before, _expectedIndexDelta1);
   }
 
   function testFuzz_FeesCollectedDuringDeposit(
@@ -947,17 +990,30 @@ contract CollectFees is LPVaultTest {
 
     _deposit(_depositor1, _amount0, _amount1);
 
-    BalanceDelta _delta = _performSwap(true, _boundSwapAbs(_swapAbs0));
-    uint256 _swapInput0 = uint256(-int256(_delta.amount0()));
-    uint256 _expectedFee0 = _swapInput0 * DEFAULT_FEE / FEE_DENOMINATOR;
+    _performSwap(true, _boundSwapAbs(_swapAbs0));
 
     uint256 _totalSupply = vault.totalSupply();
-    uint256 _expectedIndexDelta0 = _expectedFee0 * FEE_INDEX_PRECISION / _totalSupply;
     uint256 _feeIndex0Before = vault.globalFeeIndex0Scaled();
+    uint256 _feeIndex1Before = vault.globalFeeIndex1Scaled();
+
+    uint256 _vaultToken0Before = MockERC20(Currency.unwrap(currency0)).balanceOf(address(vault));
+    uint256 _vaultToken1Before = MockERC20(Currency.unwrap(currency1)).balanceOf(address(vault));
 
     _deposit(_depositor2, _amount0, _amount1);
+
+    uint256 _vaultToken0After = MockERC20(Currency.unwrap(currency0)).balanceOf(address(vault));
+    uint256 _vaultToken1After = MockERC20(Currency.unwrap(currency1)).balanceOf(address(vault));
+
+    uint256 _collectedFee0 = _vaultToken0After - _vaultToken0Before;
+    uint256 _collectedFee1 = _vaultToken1After - _vaultToken1Before;
+
+    uint256 _expectedIndexDelta0 = _expectedIndexDelta(_collectedFee0, _totalSupply);
+    uint256 _expectedIndexDelta1 = _expectedIndexDelta(_collectedFee1, _totalSupply);
+
     uint256 _feeIndex0After = vault.globalFeeIndex0Scaled();
-    assertApproxEqRel(_feeIndex0After - _feeIndex0Before, _expectedIndexDelta0, FEE_TOLERANCE);
+    uint256 _feeIndex1After = vault.globalFeeIndex1Scaled();
+    assertEq(_feeIndex0After - _feeIndex0Before, _expectedIndexDelta0);
+    assertEq(_feeIndex1After - _feeIndex1Before, _expectedIndexDelta1);
   }
 
   function testFuzz_FeesCollectedDuringWithdraw(
@@ -979,12 +1035,27 @@ contract CollectFees is LPVaultTest {
 
     uint256 _feeIndex0Before = vault.globalFeeIndex0Scaled();
     uint256 _feeIndex1Before = vault.globalFeeIndex1Scaled();
+    uint256 _totalSupplyBefore = vault.totalSupply();
+
+    uint256 _vaultToken0Before = MockERC20(Currency.unwrap(currency0)).balanceOf(address(vault));
+    uint256 _vaultToken1Before = MockERC20(Currency.unwrap(currency1)).balanceOf(address(vault));
 
     vm.prank(_depositor);
     vault.withdraw(_withdrawShares, _receiver);
 
-    assertGe(vault.globalFeeIndex0Scaled(), _feeIndex0Before);
-    assertGe(vault.globalFeeIndex1Scaled(), _feeIndex1Before);
+    uint256 _vaultToken0After = MockERC20(Currency.unwrap(currency0)).balanceOf(address(vault));
+    uint256 _vaultToken1After = MockERC20(Currency.unwrap(currency1)).balanceOf(address(vault));
+
+    uint256 _collectedFee0 = _vaultToken0After - _vaultToken0Before;
+    uint256 _collectedFee1 = _vaultToken1After - _vaultToken1Before;
+
+    uint256 _expectedIndexDelta0 = _expectedIndexDelta(_collectedFee0, _totalSupplyBefore);
+    uint256 _expectedIndexDelta1 = _expectedIndexDelta(_collectedFee1, _totalSupplyBefore);
+
+    uint256 _feeIndex0After = vault.globalFeeIndex0Scaled();
+    uint256 _feeIndex1After = vault.globalFeeIndex1Scaled();
+    assertEq(_feeIndex0After - _feeIndex0Before, _expectedIndexDelta0);
+    assertEq(_feeIndex1After - _feeIndex1Before, _expectedIndexDelta1);
   }
 
   function testFuzz_MultipleCollectFeesCalls(
@@ -997,21 +1068,14 @@ contract CollectFees is LPVaultTest {
     _assumeSafeAddress(_depositor);
     _deposit(_depositor, _amount0, _amount1);
 
-    BalanceDelta _delta0 = _performSwap(true, _boundSwapAbs(_swapAbs0));
-    (uint256 _fees0Round1, uint256 _fees1Round1) = vault.collectFees();
+    _performSwap(true, _boundSwapAbs(_swapAbs0));
+    (, uint256 _fees1Round1) = _collectFeesAndAssertVaultDelta();
 
-    BalanceDelta _delta1 = _performSwap(false, _boundSwapAbs(_swapAbs1));
-    (uint256 _fees0Round2, uint256 _fees1Round2) = vault.collectFees();
-
-    uint256 _expectedFee0Round1 =
-      uint256(-int256(_delta0.amount0())) * DEFAULT_FEE / FEE_DENOMINATOR;
-    uint256 _expectedFee1Round2 =
-      uint256(-int256(_delta1.amount1())) * DEFAULT_FEE / FEE_DENOMINATOR;
+    _performSwap(false, _boundSwapAbs(_swapAbs1));
+    (uint256 _fees0Round2,) = _collectFeesAndAssertVaultDelta();
 
     assertEq(_fees1Round1, 0);
     assertEq(_fees0Round2, 0);
-    assertApproxEqRel(_fees0Round1, _expectedFee0Round1, FEE_TOLERANCE);
-    assertApproxEqRel(_fees1Round2, _expectedFee1Round2, FEE_TOLERANCE);
   }
 
   function testFuzz_CollectFeesCallableByAnyone(
@@ -1025,13 +1089,19 @@ contract CollectFees is LPVaultTest {
     _assumeSafeAddress(_caller);
     _deposit(_depositor, _amount0, _amount1);
 
-    BalanceDelta _delta = _performSwap(true, _boundSwapAbs(_swapAbs0));
-    uint256 _expectedFee0 = uint256(-int256(_delta.amount0())) * DEFAULT_FEE / FEE_DENOMINATOR;
+    _performSwap(true, _boundSwapAbs(_swapAbs0));
+
+    uint256 _vaultToken0Before = MockERC20(Currency.unwrap(currency0)).balanceOf(address(vault));
+    uint256 _vaultToken1Before = MockERC20(Currency.unwrap(currency1)).balanceOf(address(vault));
 
     vm.prank(_caller);
     (uint256 _collectedFee0, uint256 _collectedFee1) = vault.collectFees();
 
-    assertApproxEqRel(_collectedFee0, _expectedFee0, FEE_TOLERANCE);
+    uint256 _vaultToken0After = MockERC20(Currency.unwrap(currency0)).balanceOf(address(vault));
+    uint256 _vaultToken1After = MockERC20(Currency.unwrap(currency1)).balanceOf(address(vault));
+
+    assertEq(_vaultToken0After, _vaultToken0Before + _collectedFee0);
+    assertEq(_vaultToken1After, _vaultToken1Before + _collectedFee1);
     assertEq(_collectedFee1, 0);
   }
 
@@ -1045,22 +1115,18 @@ contract CollectFees is LPVaultTest {
     _assumeSafeAddress(_depositor);
     _deposit(_depositor, _amount0, _amount1);
 
-    BalanceDelta _delta0 = _performSwap(true, _boundSwapAbs(_swapAbs0));
-    BalanceDelta _delta1 = _performSwap(false, _boundSwapAbs(_swapAbs1));
-
-    uint256 _expectedFee0 = uint256(-int256(_delta0.amount0())) * DEFAULT_FEE / FEE_DENOMINATOR;
-    uint256 _expectedFee1 = uint256(-int256(_delta1.amount1())) * DEFAULT_FEE / FEE_DENOMINATOR;
+    _performSwap(true, _boundSwapAbs(_swapAbs0));
+    _performSwap(false, _boundSwapAbs(_swapAbs1));
 
     uint256 _totalSupply = vault.totalSupply();
-    uint256 _expectedIndex0 = _expectedFee0 * FEE_INDEX_PRECISION / _totalSupply;
-    uint256 _expectedIndex1 = _expectedFee1 * FEE_INDEX_PRECISION / _totalSupply;
-
-    vault.collectFees();
+    (uint256 _collectedFee0, uint256 _collectedFee1) = _collectFeesAndAssertVaultDelta();
+    uint256 _expectedIndex0 = _expectedIndexDelta(_collectedFee0, _totalSupply);
+    uint256 _expectedIndex1 = _expectedIndexDelta(_collectedFee1, _totalSupply);
     uint256 _globalIndex0 = vault.globalFeeIndex0Scaled();
     uint256 _globalIndex1 = vault.globalFeeIndex1Scaled();
 
-    assertApproxEqRel(_globalIndex0, _expectedIndex0, FEE_TOLERANCE);
-    assertApproxEqRel(_globalIndex1, _expectedIndex1, FEE_TOLERANCE);
+    assertEq(_globalIndex0, _expectedIndex0);
+    assertEq(_globalIndex1, _expectedIndex1);
   }
 
   function testFuzz_ClaimFeesAfterCollect(
@@ -1073,28 +1139,30 @@ contract CollectFees is LPVaultTest {
     _assumeSafeAddress(_depositor);
     _deposit(_depositor, _amount0, _amount1);
 
-    BalanceDelta _delta0 = _performSwap(true, _boundSwapAbs(_swapAbs0));
-    BalanceDelta _delta1 = _performSwap(false, _boundSwapAbs(_swapAbs1));
-    uint256 _expectedFee0 = uint256(-int256(_delta0.amount0())) * DEFAULT_FEE / FEE_DENOMINATOR;
-    uint256 _expectedFee1 = uint256(-int256(_delta1.amount1())) * DEFAULT_FEE / FEE_DENOMINATOR;
+    _performSwap(true, _boundSwapAbs(_swapAbs0));
+    _performSwap(false, _boundSwapAbs(_swapAbs1));
 
-    vault.collectFees();
+    _collectFeesAndAssertVaultDelta();
+    uint256 _globalIndex0 = vault.globalFeeIndex0Scaled();
+    uint256 _globalIndex1 = vault.globalFeeIndex1Scaled();
+    uint256 _balance = vault.balanceOf(_depositor);
+    uint256 _expectedFee0 = _expectedAccrued(_balance, _globalIndex0);
+    uint256 _expectedFee1 = _expectedAccrued(_balance, _globalIndex1);
+
     vm.prank(_depositor);
     (uint256 _claimed0, uint256 _claimed1) = vault.claim(_depositor);
 
-    assertApproxEqRel(_claimed0, _expectedFee0, FEE_TOLERANCE);
-    assertApproxEqRel(_claimed1, _expectedFee1, FEE_TOLERANCE);
+    assertEq(_claimed0, _expectedFee0);
+    assertEq(_claimed1, _expectedFee1);
   }
 
-  function testFuzz_FeesDistributedProportionally(
+  function testFuzz_FeesDistributedProportionallyToken0(
     address _depositor1,
     address _depositor2,
     uint256 _amount0,
     uint256 _amount1,
-    uint256 _swapAbs0,
-    uint256 _swapAbs1
+    uint256 _swapAbs0
   ) public {
-    vm.skip(true);
     _assumeSafeAddress(_depositor1);
     _assumeSafeAddress(_depositor2);
     vm.assume(_depositor1 != _depositor2);
@@ -1104,21 +1172,42 @@ contract CollectFees is LPVaultTest {
     _deposit(_depositor2, _amount0, _amount1);
 
     _performSwap(true, _boundSwapAbs(_swapAbs0));
+    (, uint256 _collectedFee1) = _collectFeesAndAssertVaultDelta();
+    assertEq(_collectedFee1, 0);
+
+    uint256 _globalIndex0 = vault.globalFeeIndex0Scaled();
+    uint256 _globalIndex1 = vault.globalFeeIndex1Scaled();
+    assertEq(_globalIndex1, 0);
+
+    _claimAndAssert(_depositor1, _globalIndex0, _globalIndex1);
+    _claimAndAssert(_depositor2, _globalIndex0, _globalIndex1);
+  }
+
+  function testFuzz_FeesDistributedProportionallyToken1(
+    address _depositor1,
+    address _depositor2,
+    uint256 _amount0,
+    uint256 _amount1,
+    uint256 _swapAbs1
+  ) public {
+    _assumeSafeAddress(_depositor1);
+    _assumeSafeAddress(_depositor2);
+    vm.assume(_depositor1 != _depositor2);
+
+    _deposit(_depositor1, _amount0, _amount1);
+    _deposit(_depositor1, _amount0, _amount1);
+    _deposit(_depositor2, _amount0, _amount1);
+
     _performSwap(false, _boundSwapAbs(_swapAbs1));
+    (uint256 _collectedFee0,) = _collectFeesAndAssertVaultDelta();
+    assertEq(_collectedFee0, 0);
 
-    vault.collectFees();
+    uint256 _globalIndex0 = vault.globalFeeIndex0Scaled();
+    uint256 _globalIndex1 = vault.globalFeeIndex1Scaled();
+    assertEq(_globalIndex0, 0);
 
-    vm.prank(_depositor1);
-    (uint256 _claimed0Depositor1, uint256 _claimed1Depositor1) = vault.claim(_depositor1);
-    vm.prank(_depositor2);
-    (uint256 _claimed0Depositor2, uint256 _claimed1Depositor2) = vault.claim(_depositor2);
-
-    if (_claimed0Depositor2 > 0) {
-      assertApproxEqRel(_claimed0Depositor1, _claimed0Depositor2 * 2, FEE_TOLERANCE);
-    }
-    if (_claimed1Depositor2 > 0) {
-      assertApproxEqRel(_claimed1Depositor1, _claimed1Depositor2 * 2, FEE_TOLERANCE);
-    }
+    _claimAndAssert(_depositor1, _globalIndex0, _globalIndex1);
+    _claimAndAssert(_depositor2, _globalIndex0, _globalIndex1);
   }
 
   /// @notice Tests that fees are attributed to the original holder when shares are transferred.
