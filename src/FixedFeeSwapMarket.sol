@@ -193,9 +193,9 @@ contract FixedFeeSwapMarket is BaseHook {
     return Hooks.Permissions({
       beforeInitialize: false,
       afterInitialize: false,
-      beforeAddLiquidity: false,
+      beforeAddLiquidity: true,
       afterAddLiquidity: false,
-      beforeRemoveLiquidity: false,
+      beforeRemoveLiquidity: true,
       afterRemoveLiquidity: false,
       beforeSwap: true,
       afterSwap: false,
@@ -1201,7 +1201,9 @@ contract FixedFeeSwapMarket is BaseHook {
   function _scaledTimeElapsedWad() internal view returns (uint256) {
     uint256 elapsed = block.timestamp - START_TIME;
     if (elapsed == 0) revert FixedFeeSwap__TimeElapsedIsZero();
-    return (elapsed * WAD) / (MATURITY - START_TIME);
+    uint256 duration = MATURITY - START_TIME;
+    if (elapsed > duration) elapsed = duration;
+    return (elapsed * WAD) / duration;
   }
 
   /// @notice Converts a WAD-scaled yield value to an int24 tick using floor division
