@@ -909,6 +909,7 @@ contract CollectFees is LPVaultTest {
     assertEq(_claimed0, _expected0);
     assertEq(_claimed1, _expected1);
   }
+
   function testFuzz_CollectFeesAfterSwaps(
     address _depositor,
     uint256 _amount0,
