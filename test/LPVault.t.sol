@@ -89,7 +89,10 @@ contract LPVaultTest is Test, Deployers {
 
   /// @dev Assumes address is safe for use as depositor or receiver in tests.
   function _assumeSafeAddress(address _addr) internal view {
-    vm.assume(_addr != address(0) && _addr != address(manager) && _addr != address(vault));
+    vm.assume(
+      _addr != address(0) && _addr != address(manager) && _addr != address(vault)
+        && _addr != address(this)
+    );
   }
 
   function _mintToken0(address _depositor, uint256 _amount) internal {
@@ -114,8 +117,8 @@ contract LPVaultTest is Test, Deployers {
     internal
     returns (uint256 _shares, uint256 _amount0Used, uint256 _amount1Used)
   {
-    uint256 _amount0Max = bound(_amount0, 1e6, type(uint96).max);
-    uint256 _amount1Max = bound(_amount1, 1e6, type(uint96).max);
+    uint256 _amount0Max = bound(_amount0, 1e18, type(uint96).max);
+    uint256 _amount1Max = bound(_amount1, 1e18, type(uint96).max);
 
     _mintToken0(_depositor, _amount0Max);
     _mintToken1(_depositor, _amount1Max);
