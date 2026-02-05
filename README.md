@@ -12,6 +12,7 @@
       - [YieldToken](#yieldtoken)
       - [FeeTracking Library](#feetracking-library)
       - [Zapper](#zapper)
+      - [FixedFeeSwapMarket](#fixedfeeswapmarket)
     - [Diagram](#diagram)
   - [Development](#development)
     - [Getting Started](#getting-started)
@@ -40,6 +41,7 @@ The system consists of smart contracts that manage Uniswap v4 LP positions and e
 2. **FixedFeeSwap**: Enables splitting VST into Principal Tokens and Yield Tokens before a maturity date
 3. **Token System**: PT and YT tokens with built-in fee tracking and distribution mechanisms
 4. **Zapper**: Helper contract for easily buying/selling YT tokens using flash loans
+5. **FixedFeeSwapMarket**: A trading market for swapping between Principal Tokens and cash, with yield-based pricing
 
 ### Component Summary
 
@@ -105,6 +107,37 @@ A helper contract for buying and selling YT tokens using flash loans.
 - **Sell YT**: Flash loan PT, combine with YT to redeem VST, swap portion back to PT to repay loan
 - **Buy YT**: Flash loan PT, swap for VST, deposit to get PT+YT, repay loan with PT, keep YT
 
+#### FixedFeeSwapMarket
+
+A trading market that enables users to swap between Principal Tokens and cash tokens. It operates as a Uniswap v4 hook with custom pricing logic tailored for fixed-income assets.
+
+**What it does:**
+
+- Provides a marketplace where users can trade Principal Tokens for cash (and vice versa)
+- Uses a yield-based pricing model where prices naturally converge toward 1:1 as maturity approaches
+- Allows liquidity providers to earn trading fees by providing liquidity across yield ranges
+
+**How pricing works:**
+
+The market uses "ticks" that represent yield rates (similar to interest rates). Each tick equals 1 basis point (0.01%) of yield. As time passes and the maturity date gets closer, the price of Principal Tokens gradually increases toward their face value.
+
+**For traders:**
+
+- **Sell PT for cash**: Trade your Principal Tokens now for immediate cash at a discount
+- **Buy PT with cash**: Purchase discounted Principal Tokens that can be redeemed at full value after maturity
+
+**For liquidity providers:**
+
+- Provide liquidity across specific yield ranges (similar to concentrated liquidity in Uniswap v3)
+- Earn a share of trading fees proportional to your liquidity
+- Choose your yield range based on where you expect trading activity
+
+**Key features:**
+
+- **Time-based maturity**: The market has a defined start time and maturity date
+- **Configurable fee rate**: Trading fees are collected on each swap
+- **Concentrated liquidity**: LPs can focus their capital in specific yield ranges for higher capital efficiency
+
 ### Diagram
 
 ```
@@ -151,7 +184,18 @@ A helper contract for buying and selling YT tokens using flash loans.
 │                             │            │    index                        │
 └─────────────────────────────┘            └─────────────────────────────────┘
               │                                              │
-              └────────────────────┬─────────────────────────┘
+              ├────────────────────┬─────────────────────────┘
+              │                    │
+              ▼                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            FixedFeeSwapMarket                               │
+│                           (Uniswap v4 Hook)                                 │
+│                                                                             │
+│  • Trade PT ←→ Cash with yield-based pricing                               │
+│  • Price converges to 1:1 as maturity approaches                           │
+│  • LPs provide liquidity across yield ranges and earn fees                 │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
                                    │
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
