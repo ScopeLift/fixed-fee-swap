@@ -7,6 +7,7 @@ import {Deployers} from "lib/v4-periphery/lib/v4-core/test/utils/Deployers.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {LPVault} from "src/LPVault.sol";
 import {LPVaultHarness} from "test/harness/LPVaultHarness.sol";
+import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {ImmutableState} from "v4-periphery/src/base/ImmutableState.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {Currency} from "v4-core/types/Currency.sol";
@@ -1370,16 +1371,16 @@ contract CollectFees is LPVaultTest {
     // Deposit and get shares
     (uint256 _shares,,) = _deposit(_depositor, _amount0, _amount1);
 
-    // Generate fees via swaps (but don't collect yet)
-    BalanceDelta _delta0 = _performSwap(true, _boundSwapAbs(_swapAbs0));
-    BalanceDelta _delta1 = _performSwap(false, _boundSwapAbs(_swapAbs1));
+    // Generate fees via swaps (but don't collect yet).
+    _performSwap(true, _boundSwapAbs(_swapAbs0));
+    _performSwap(false, _boundSwapAbs(_swapAbs1));
 
-    uint256 _expectedFee0 = uint256(-int256(_delta0.amount0())) * DEFAULT_FEE / FEE_DENOMINATOR;
-    uint256 _expectedFee1 = uint256(-int256(_delta1.amount1())) * DEFAULT_FEE / FEE_DENOMINATOR;
-
-    // Transfer shares BEFORE collecting fees
+    // Transfer shares BEFORE collecting fees. This syncs fees and attributes accrued fees
+    // to the sender before balances move.
     vm.prank(_depositor);
     vault.transfer(_recipient, _shares);
+
+    (,, uint256 _expectedClaim0, uint256 _expectedClaim1) = vault.userFees(_depositor);
 
     // Now collect fees - they should be attributed to depositor (original holder)
     vault.collectFees();
@@ -1388,8 +1389,8 @@ contract CollectFees is LPVaultTest {
     vm.prank(_depositor);
     (uint256 _claimed0, uint256 _claimed1) = vault.claim(_depositor);
 
-    assertApproxEqRel(_claimed0, _expectedFee0, FEE_TOLERANCE);
-    assertApproxEqRel(_claimed1, _expectedFee1, FEE_TOLERANCE);
+    assertEq(_claimed0, _expectedClaim0);
+    assertEq(_claimed1, _expectedClaim1);
 
     // Recipient should have no fees (they got shares after fees accrued)
     vm.prank(_recipient);
@@ -1411,20 +1412,23 @@ contract CollectFees is LPVaultTest {
     // Note: This is a bit tricky since we need fees in the pool before our position exists
     // In practice, this tests that checkpoints are initialized correctly on first deposit
     _deposit(_depositor, _amount0, _amount1);
+    uint256 _balance = vault.balanceOf(_depositor);
+    uint256 _globalIndex0Before = vault.globalFeeIndex0Scaled();
 
     // Now generate fees (vault has liquidity)
-    BalanceDelta _delta = _performSwap(true, _boundSwapAbs(_swapAbs0));
-    uint256 _expectedFee0 = uint256(-int256(_delta.amount0())) * DEFAULT_FEE / FEE_DENOMINATOR;
+    _performSwap(true, _boundSwapAbs(_swapAbs0));
 
     // Collect fees
     vault.collectFees();
+    uint256 _globalIndex0After = vault.globalFeeIndex0Scaled();
+    uint256 _expectedClaim0 = _expectedAccrued(_balance, _globalIndex0After - _globalIndex0Before);
 
     // Claim fees - should only get fees from after we deposited
     vm.prank(_depositor);
     (uint256 _claimed0,) = vault.claim(_depositor);
 
-    // Should have fees from the swap
-    assertApproxEqRel(_claimed0, _expectedFee0, FEE_TOLERANCE);
+    // Should only include fees accrued after the depositor held shares.
+    assertEq(_claimed0, _expectedClaim0);
   }
 
   /// @notice Tests that fee indexes update on transfer even without collecting fees.

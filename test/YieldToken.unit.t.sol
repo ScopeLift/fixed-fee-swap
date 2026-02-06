@@ -270,26 +270,8 @@ contract Burn is YieldTokenTest {
       _initialUserToken0Balance + _calculateAccruedFees(_params.mintAmount, _globalFeeIndex0, 0);
     uint256 _expectedToken1 =
       _initialUserToken1Balance + _calculateAccruedFees(_params.mintAmount, _globalFeeIndex1, 0);
-    // When user is the YT, mock transfers accrued fees (may round down due to fee index
-    // calculation)
-    if (_params.user == address(yieldToken)) {
-      // Allow 1 wei rounding error since fees flow through fee index calculation
-      assertApproxEqAbs(
-        token0.balanceOf(_params.user),
-        _initialUserToken0Balance + _params.collectedFeeToken0,
-        1,
-        "YT as user: token0"
-      );
-      assertApproxEqAbs(
-        token1.balanceOf(_params.user),
-        _initialUserToken1Balance + _params.collectedFeeToken1,
-        1,
-        "YT as user: token1"
-      );
-    } else {
-      assertEq(token0.balanceOf(_params.user), _expectedToken0);
-      assertEq(token1.balanceOf(_params.user), _expectedToken1);
-    }
+    assertEq(token0.balanceOf(_params.user), _expectedToken0);
+    assertEq(token1.balanceOf(_params.user), _expectedToken1);
   }
 }
 
