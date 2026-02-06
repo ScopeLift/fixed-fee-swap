@@ -134,7 +134,7 @@ abstract contract FixedFeeSwapMarketTest is Test {
   }
 
   function _boundSwapAmount(uint256 amount) internal pure returns (uint256) {
-    return bound(amount, 1e15, 100e18);
+    return bound(amount, 1e16, 1e20);
   }
 
   function _mintDefaultLiquidity(address user) internal returns (bytes32) {
@@ -1037,6 +1037,64 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     hook.mintLiquidity(tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max);
     vm.stopPrank();
   }
+
+  // ============ Mint To Existing Position Tests ============
+
+  /// @dev Minting to same (tickLower, tickUpper, user) returns same positionId and accumulates
+  function testFuzz_MintToExistingPosition(uint128 _liq1, uint128 _liq2) public {
+    _liq1 = _boundLiquidity(_liq1);
+    _liq2 = _boundLiquidity(_liq2);
+
+    _warpToMintTime();
+    int24 _currentTick = hook.getCurrentTick();
+    int24 _tickLower = _currentTick - 100;
+    int24 _tickUpper = _currentTick + 100;
+
+    bytes32 _positionId1 = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, _liq1);
+
+    // Mint again to same ticks from same user
+    vm.prank(alice);
+    hook.mintLiquidity(_tickLower, _tickUpper, _liq2, type(uint256).max, type(uint256).max);
+    bytes32 _positionId2 = _getPositionId(_tickUpper, _tickLower, alice);
+
+    assertEq(_positionId1, _positionId2, "Same position ID for same ticks and user");
+
+    (address _owner,,, int128 _totalLiq) = hook.getPositionInfo(_positionId1);
+    assertEq(_owner, alice, "Owner should be alice");
+    assertEq(uint128(_totalLiq), _liq1 + _liq2, "Liquidity should accumulate");
+
+    (uint128 _lowerGross,) = hook.getTickInfo(_tickLower);
+    (uint128 _upperGross,) = hook.getTickInfo(_tickUpper);
+    assertEq(_lowerGross, _liq1 + _liq2, "Lower tick gross should equal total");
+    assertEq(_upperGross, _liq1 + _liq2, "Upper tick gross should equal total");
+  }
+
+  // ============ Fuzzed Time Tests ============
+
+  /// @dev Minting at different times produces valid positions with conservation
+  function testFuzz_MintAtDifferentTimes(uint128 _liquidity, uint256 _timeElapsed) public {
+    _liquidity = _boundLiquidity(_liquidity);
+    _timeElapsed = bound(_timeElapsed, 1, MARKET_LENGTH - 1);
+    _warpFromStart(_timeElapsed);
+
+    int24 _currentTick = hook.getCurrentTick();
+    int24 _tickLower = _currentTick - 100;
+    int24 _tickUpper = _currentTick + 100;
+
+    uint256 _total0Before = token0.balanceOf(alice) + token0.balanceOf(address(hook));
+    uint256 _total1Before = token1.balanceOf(alice) + token1.balanceOf(address(hook));
+
+    bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, _liquidity);
+
+    (address _owner,,, int128 _liq) = hook.getPositionInfo(_positionId);
+    assertEq(_owner, alice, "Position should be created");
+    assertEq(uint128(_liq), _liquidity, "Liquidity should match");
+
+    uint256 _total0After = token0.balanceOf(alice) + token0.balanceOf(address(hook));
+    uint256 _total1After = token1.balanceOf(alice) + token1.balanceOf(address(hook));
+    assertEq(_total0After, _total0Before, "Token0 conserved");
+    assertEq(_total1After, _total1Before, "Token1 conserved");
+  }
 }
 
 contract IncreaseLiquidity is FixedFeeSwapMarketTest {
@@ -1812,6 +1870,42 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
     vm.expectRevert(stdError.arithmeticError);
     hook.increaseLiquidity(positionId, additionalLiquidity, type(uint256).max, type(uint256).max);
     vm.stopPrank();
+  }
+
+  // ============ Fuzzed Time Tests ============
+
+  /// @dev Increasing liquidity at different times produces valid results with conservation
+  function testFuzz_IncreaseAtDifferentTimes(
+    uint128 _initialLiquidity,
+    uint128 _additionalLiquidity,
+    uint256 _timeElapsed
+  ) public {
+    _initialLiquidity = _boundLiquidity(_initialLiquidity);
+    _additionalLiquidity = _boundLiquidity(_additionalLiquidity);
+    _timeElapsed = bound(_timeElapsed, 1, MARKET_LENGTH - 1);
+    _warpFromStart(_timeElapsed);
+
+    int24 _currentTick = hook.getCurrentTick();
+    int24 _tickLower = _currentTick - 100;
+    int24 _tickUpper = _currentTick + 100;
+
+    bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, _initialLiquidity);
+
+    uint256 _total0Before = token0.balanceOf(alice) + token0.balanceOf(address(hook));
+    uint256 _total1Before = token1.balanceOf(alice) + token1.balanceOf(address(hook));
+
+    vm.prank(alice);
+    hook.increaseLiquidity(_positionId, _additionalLiquidity, type(uint256).max, type(uint256).max);
+
+    (,,, int128 _totalLiq) = hook.getPositionInfo(_positionId);
+    assertEq(
+      uint128(_totalLiq), _initialLiquidity + _additionalLiquidity, "Liquidity should accumulate"
+    );
+
+    uint256 _total0After = token0.balanceOf(alice) + token0.balanceOf(address(hook));
+    uint256 _total1After = token1.balanceOf(alice) + token1.balanceOf(address(hook));
+    assertEq(_total0After, _total0Before, "Token0 conserved");
+    assertEq(_total1After, _total1Before, "Token1 conserved");
   }
 }
 
@@ -2668,6 +2762,42 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__InvalidLiquidityAmount.selector);
     hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, uint256(expected1) + 1);
   }
+
+  // ============ Fuzzed Time Tests ============
+
+  /// @dev Decreasing liquidity at different times produces valid results with conservation
+  function testFuzz_DecreaseAtDifferentTimes(
+    uint128 _initialLiquidity,
+    uint128 _removeAmount,
+    uint256 _timeElapsed
+  ) public {
+    _initialLiquidity = _boundLiquidity(_initialLiquidity);
+    _removeAmount = uint128(bound(_removeAmount, 1e17, _initialLiquidity));
+    _timeElapsed = bound(_timeElapsed, 1, MARKET_LENGTH - 1);
+    _warpFromStart(_timeElapsed);
+
+    int24 _currentTick = hook.getCurrentTick();
+    int24 _tickLower = _currentTick - 100;
+    int24 _tickUpper = _currentTick + 100;
+
+    bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, _initialLiquidity);
+
+    uint256 _total0Before = token0.balanceOf(alice) + token0.balanceOf(address(hook));
+    uint256 _total1Before = token1.balanceOf(alice) + token1.balanceOf(address(hook));
+
+    vm.prank(alice);
+    hook.decreaseLiquidity(_positionId, -int128(_removeAmount), 0, 0);
+
+    (,,, int128 _remainingLiq) = hook.getPositionInfo(_positionId);
+    assertEq(
+      uint128(_remainingLiq), _initialLiquidity - _removeAmount, "Liquidity should decrease"
+    );
+
+    uint256 _total0After = token0.balanceOf(alice) + token0.balanceOf(address(hook));
+    uint256 _total1After = token1.balanceOf(alice) + token1.balanceOf(address(hook));
+    assertEq(_total0After, _total0Before, "Token0 conserved");
+    assertEq(_total1After, _total1Before, "Token1 conserved");
+  }
 }
 
 // ============================================================================
@@ -2857,11 +2987,16 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
   function testFuzz_UpdatesCurrentTick_PrincipalForCash(uint256 amountIn) public {
     amountIn = _boundSwapAmount(amountIn);
     int24 tickBefore = hook.getCurrentTick();
+    uint128 activeLiq = hook.getActiveLiquidity();
 
     _swap(bob, int256(amountIn), true, 0);
 
     int24 tickAfter = hook.getCurrentTick();
     assertGe(tickAfter, tickBefore, "Tick should increase for principal->cash");
+
+    // Magnitude bound: tick should not move more than amountIn * BIPS / activeLiquidity + 2
+    int24 maxTickMove = int24(int256(amountIn * BIPS / uint256(activeLiq))) + 2;
+    assertLe(tickAfter - tickBefore, maxTickMove, "Tick should not move more than expected");
   }
 
   /// @dev Swap updates currentTick in correct direction for cash->principal
@@ -2869,11 +3004,16 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     amountIn = _boundSwapAmount(amountIn);
 
     int24 tickBefore = hook.getCurrentTick();
+    uint128 activeLiq = hook.getActiveLiquidity();
 
     _swap(bob, int256(amountIn), false, 0);
 
     int24 tickAfter = hook.getCurrentTick();
     assertLe(tickAfter, tickBefore, "Tick should decrease for cash->principal");
+
+    // Magnitude bound: tick should not move more than amountIn * BIPS / activeLiquidity + 2
+    int24 maxTickMove = int24(int256(amountIn * BIPS / uint256(activeLiq))) + 2;
+    assertLe(tickBefore - tickAfter, maxTickMove, "Tick should not move more than expected");
   }
 
   /// @dev Swap updates currentPrice for principal->cash
@@ -4078,10 +4218,10 @@ contract Solvency is FixedFeeSwapMarketTest {
     uint256 _swapAmount,
     uint256 _timeElapsed
   ) public {
-    _tickLower = int24(bound(int256(_tickLower), 0, 499));
-    _tickUpper = int24(bound(int256(_tickUpper), int256(_tickLower) + 1, 500));
+    _tickLower = int24(bound(int256(_tickLower), 0, 1999));
+    _tickUpper = int24(bound(int256(_tickUpper), int256(_tickLower) + 1, 2000));
     _liquidity = uint128(bound(_liquidity, 1e18, 1e24));
-    _swapAmount = bound(_swapAmount, uint256(_liquidity) / BIPS, uint256(_liquidity) * 200 / BIPS);
+    _swapAmount = bound(_swapAmount, uint256(_liquidity) / BIPS, uint256(_liquidity) * 500 / BIPS);
     _timeElapsed = bound(_timeElapsed, 1 days, MARKET_LENGTH - 1);
 
     _warpFromStart(1);
@@ -4112,11 +4252,11 @@ contract Solvency is FixedFeeSwapMarketTest {
     uint256 _swapAmount2,
     uint256 _timeElapsed
   ) public {
-    _tickLower = int24(bound(int256(_tickLower), 0, 499));
-    _tickUpper = int24(bound(int256(_tickUpper), int256(_tickLower) + 1, 500));
+    _tickLower = int24(bound(int256(_tickLower), 0, 1999));
+    _tickUpper = int24(bound(int256(_tickUpper), int256(_tickLower) + 1, 2000));
     _liquidity = uint128(bound(_liquidity, 1e18, 1e24));
-    _swapAmount1 = bound(_swapAmount1, uint256(_liquidity) / BIPS, uint256(_liquidity) * 200 / BIPS);
-    _swapAmount2 = bound(_swapAmount2, uint256(_liquidity) / BIPS, uint256(_liquidity) * 200 / BIPS);
+    _swapAmount1 = bound(_swapAmount1, uint256(_liquidity) / BIPS, uint256(_liquidity) * 500 / BIPS);
+    _swapAmount2 = bound(_swapAmount2, uint256(_liquidity) / BIPS, uint256(_liquidity) * 500 / BIPS);
     _timeElapsed = bound(_timeElapsed, 1 days, MARKET_LENGTH - 1);
 
     _warpFromStart(1);
@@ -4150,13 +4290,13 @@ contract Solvency is FixedFeeSwapMarketTest {
     uint256 _swapAmount,
     uint256 _timeElapsed
   ) public {
-    _tickLower1 = int24(bound(int256(_tickLower1), 0, 499));
-    _tickUpper1 = int24(bound(int256(_tickUpper1), int256(_tickLower1) + 1, 500));
-    _tickLower2 = int24(bound(int256(_tickLower2), 0, 499));
-    _tickUpper2 = int24(bound(int256(_tickUpper2), int256(_tickLower2) + 1, 500));
+    _tickLower1 = int24(bound(int256(_tickLower1), 0, 1999));
+    _tickUpper1 = int24(bound(int256(_tickUpper1), int256(_tickLower1) + 1, 2000));
+    _tickLower2 = int24(bound(int256(_tickLower2), 0, 1999));
+    _tickUpper2 = int24(bound(int256(_tickUpper2), int256(_tickLower2) + 1, 2000));
     _liquidity1 = uint128(bound(_liquidity1, 1e18, 1e24));
     _liquidity2 = uint128(bound(_liquidity2, 1e18, 1e24));
-    _swapAmount = bound(_swapAmount, uint256(_liquidity1) / BIPS, uint256(_liquidity1) * 200 / BIPS);
+    _swapAmount = bound(_swapAmount, uint256(_liquidity1) / BIPS, uint256(_liquidity1) * 500 / BIPS);
     _timeElapsed = bound(_timeElapsed, 1 days, MARKET_LENGTH - 1);
 
     _warpFromStart(1);
@@ -4185,12 +4325,12 @@ contract Solvency is FixedFeeSwapMarketTest {
     uint256 _swapAmount2,
     uint256 _timeElapsed
   ) public {
-    _tickLower = int24(bound(int256(_tickLower), 0, 499));
-    _tickUpper = int24(bound(int256(_tickUpper), int256(_tickLower) + 1, 500));
+    _tickLower = int24(bound(int256(_tickLower), 0, 1999));
+    _tickUpper = int24(bound(int256(_tickUpper), int256(_tickLower) + 1, 2000));
     _liquidity = uint128(bound(_liquidity, 1e18, 1e24));
     _partialRemove = uint128(bound(_partialRemove, 1e17, uint256(_liquidity) / 2));
-    _swapAmount1 = bound(_swapAmount1, uint256(_liquidity) / BIPS, uint256(_liquidity) * 200 / BIPS);
-    _swapAmount2 = bound(_swapAmount2, uint256(_liquidity) / BIPS, uint256(_liquidity) * 200 / BIPS);
+    _swapAmount1 = bound(_swapAmount1, uint256(_liquidity) / BIPS, uint256(_liquidity) * 500 / BIPS);
+    _swapAmount2 = bound(_swapAmount2, uint256(_liquidity) / BIPS, uint256(_liquidity) * 500 / BIPS);
     _timeElapsed = bound(_timeElapsed, 1 days, MARKET_LENGTH - 1);
 
     _warpFromStart(1);
@@ -4225,14 +4365,14 @@ contract Solvency is FixedFeeSwapMarketTest {
     uint256 _swapAmountCash,
     uint256 _timeElapsed
   ) public {
-    _tickLower = int24(bound(int256(_tickLower), 0, 499));
-    _tickUpper = int24(bound(int256(_tickUpper), int256(_tickLower) + 1, 500));
+    _tickLower = int24(bound(int256(_tickLower), 0, 1999));
+    _tickUpper = int24(bound(int256(_tickUpper), int256(_tickLower) + 1, 2000));
     _liquidity = uint128(bound(_liquidity, 1e18, 1e24));
     // First move tick positive with PT->Cash so there's room for Cash->PT
     _swapAmountPT =
-      bound(_swapAmountPT, uint256(_liquidity) / BIPS, uint256(_liquidity) * 200 / BIPS);
+      bound(_swapAmountPT, uint256(_liquidity) / BIPS, uint256(_liquidity) * 500 / BIPS);
     _swapAmountCash =
-      bound(_swapAmountCash, uint256(_liquidity) / BIPS, uint256(_liquidity) * 200 / BIPS);
+      bound(_swapAmountCash, uint256(_liquidity) / BIPS, uint256(_liquidity) * 500 / BIPS);
     _timeElapsed = bound(_timeElapsed, 1 days, MARKET_LENGTH - 1);
 
     _warpFromStart(1);
@@ -4268,13 +4408,13 @@ contract Solvency is FixedFeeSwapMarketTest {
     uint256 _swapAmount2,
     uint256 _timeElapsed
   ) public {
-    _tickLower = int24(bound(int256(_tickLower), 0, 499));
-    _tickUpper = int24(bound(int256(_tickUpper), int256(_tickLower) + 1, 500));
+    _tickLower = int24(bound(int256(_tickLower), 0, 1999));
+    _tickUpper = int24(bound(int256(_tickUpper), int256(_tickLower) + 1, 2000));
     _liquidity = uint128(bound(_liquidity, 1e18, 1e24));
     _setupAmount =
-      bound(_setupAmount, uint256(_liquidity) * 100 / BIPS, uint256(_liquidity) * 200 / BIPS);
-    _swapAmount1 = bound(_swapAmount1, uint256(_liquidity) / BIPS, uint256(_liquidity) * 100 / BIPS);
-    _swapAmount2 = bound(_swapAmount2, uint256(_liquidity) / BIPS, uint256(_liquidity) * 100 / BIPS);
+      bound(_setupAmount, uint256(_liquidity) * 100 / BIPS, uint256(_liquidity) * 500 / BIPS);
+    _swapAmount1 = bound(_swapAmount1, uint256(_liquidity) / BIPS, uint256(_liquidity) * 250 / BIPS);
+    _swapAmount2 = bound(_swapAmount2, uint256(_liquidity) / BIPS, uint256(_liquidity) * 250 / BIPS);
     _timeElapsed = bound(_timeElapsed, 1 days, MARKET_LENGTH - 1);
 
     _warpFromStart(1);
@@ -4291,6 +4431,43 @@ contract Solvency is FixedFeeSwapMarketTest {
     _trySwap(bob, int256(_swapAmount2), true, 0);
 
     // LP full withdrawal must succeed
+    uint256 _balance0Before = token0.balanceOf(alice);
+    uint256 _balance1Before = token1.balanceOf(alice);
+    vm.prank(alice);
+    hook.decreaseLiquidity(_positionId, -int128(uint128(_liquidity)), 0, 0);
+
+    assertGe(token0.balanceOf(alice), _balance0Before, "LP should receive token0");
+    assertGe(token1.balanceOf(alice), _balance1Before, "LP should receive token1");
+  }
+
+  /// @dev Mint at t1, swap at t2, time passes to t3, then withdraw.
+  function testFuzz_MintSwapWaitWithdraw(
+    int24 _tickLower,
+    int24 _tickUpper,
+    uint128 _liquidity,
+    uint256 _swapAmount,
+    uint256 _swapTime,
+    uint256 _withdrawTime
+  ) public {
+    _tickLower = int24(bound(int256(_tickLower), 0, 1999));
+    _tickUpper = int24(bound(int256(_tickUpper), int256(_tickLower) + 1, 2000));
+    _liquidity = uint128(bound(_liquidity, 1e18, 1e24));
+    _swapAmount = bound(_swapAmount, uint256(_liquidity) / BIPS, uint256(_liquidity) * 500 / BIPS);
+    _swapTime = bound(_swapTime, 1 days, MARKET_LENGTH / 2);
+    _withdrawTime = bound(_withdrawTime, _swapTime + 1, MARKET_LENGTH - 1);
+
+    // Mint at t=1
+    _warpFromStart(1);
+    bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, _liquidity);
+
+    // Swap at _swapTime
+    _warpFromStart(_swapTime);
+    bool _swapped = _trySwap(bob, int256(_swapAmount), true, 0);
+    vm.assume(_swapped);
+
+    // Warp to _withdrawTime (> _swapTime), then withdraw
+    _warpFromStart(_withdrawTime);
+
     uint256 _balance0Before = token0.balanceOf(alice);
     uint256 _balance1Before = token1.balanceOf(alice);
     vm.prank(alice);
@@ -4391,10 +4568,10 @@ contract SolvencyWithFees is FixedFeeSwapMarketTest {
     uint256 _swapAmount,
     uint256 _timeElapsed
   ) public {
-    _tickLower = int24(bound(int256(_tickLower), 0, 499));
-    _tickUpper = int24(bound(int256(_tickUpper), int256(_tickLower) + 1, 500));
+    _tickLower = int24(bound(int256(_tickLower), 0, 1999));
+    _tickUpper = int24(bound(int256(_tickUpper), int256(_tickLower) + 1, 2000));
     _liquidity = uint128(bound(_liquidity, 1e18, 1e24));
-    _swapAmount = bound(_swapAmount, uint256(_liquidity) / BIPS, uint256(_liquidity) * 200 / BIPS);
+    _swapAmount = bound(_swapAmount, uint256(_liquidity) / BIPS, uint256(_liquidity) * 500 / BIPS);
     _timeElapsed = bound(_timeElapsed, 1 days, MARKET_LENGTH - 1);
 
     _feeWarpFromStart(1);
@@ -4424,13 +4601,13 @@ contract SolvencyWithFees is FixedFeeSwapMarketTest {
     uint256 _swapAmountCash,
     uint256 _timeElapsed
   ) public {
-    _tickLower = int24(bound(int256(_tickLower), 0, 499));
-    _tickUpper = int24(bound(int256(_tickUpper), int256(_tickLower) + 1, 500));
+    _tickLower = int24(bound(int256(_tickLower), 0, 1999));
+    _tickUpper = int24(bound(int256(_tickUpper), int256(_tickLower) + 1, 2000));
     _liquidity = uint128(bound(_liquidity, 1e18, 1e24));
     _swapAmountPT =
-      bound(_swapAmountPT, uint256(_liquidity) / BIPS, uint256(_liquidity) * 200 / BIPS);
+      bound(_swapAmountPT, uint256(_liquidity) / BIPS, uint256(_liquidity) * 500 / BIPS);
     _swapAmountCash =
-      bound(_swapAmountCash, uint256(_liquidity) / BIPS, uint256(_liquidity) * 200 / BIPS);
+      bound(_swapAmountCash, uint256(_liquidity) / BIPS, uint256(_liquidity) * 500 / BIPS);
     _timeElapsed = bound(_timeElapsed, 1 days, MARKET_LENGTH - 1);
 
     _feeWarpFromStart(1);
@@ -4466,13 +4643,13 @@ contract SolvencyWithFees is FixedFeeSwapMarketTest {
     uint256 _swapAmount,
     uint256 _timeElapsed
   ) public {
-    _tickLower1 = int24(bound(int256(_tickLower1), 0, 499));
-    _tickUpper1 = int24(bound(int256(_tickUpper1), int256(_tickLower1) + 1, 500));
-    _tickLower2 = int24(bound(int256(_tickLower2), 0, 499));
-    _tickUpper2 = int24(bound(int256(_tickUpper2), int256(_tickLower2) + 1, 500));
+    _tickLower1 = int24(bound(int256(_tickLower1), 0, 1999));
+    _tickUpper1 = int24(bound(int256(_tickUpper1), int256(_tickLower1) + 1, 2000));
+    _tickLower2 = int24(bound(int256(_tickLower2), 0, 1999));
+    _tickUpper2 = int24(bound(int256(_tickUpper2), int256(_tickLower2) + 1, 2000));
     _liquidity1 = uint128(bound(_liquidity1, 1e18, 1e24));
     _liquidity2 = uint128(bound(_liquidity2, 1e18, 1e24));
-    _swapAmount = bound(_swapAmount, uint256(_liquidity1) / BIPS, uint256(_liquidity1) * 200 / BIPS);
+    _swapAmount = bound(_swapAmount, uint256(_liquidity1) / BIPS, uint256(_liquidity1) * 500 / BIPS);
     _timeElapsed = bound(_timeElapsed, 1 days, MARKET_LENGTH - 1);
 
     _feeWarpFromStart(1);
@@ -4489,5 +4666,277 @@ contract SolvencyWithFees is FixedFeeSwapMarketTest {
     feeHook.decreaseLiquidity(_pos1, -int128(uint128(_liquidity1)), 0, 0);
     vm.prank(charlie);
     feeHook.decreaseLiquidity(_pos2, -int128(uint128(_liquidity2)), 0, 0);
+  }
+
+  /// @dev LP collects fees then withdraws — proves fee collection doesn't break solvency
+  function testFuzz_WithdrawAfterCollect_WithFees(
+    int24 _tickLower,
+    int24 _tickUpper,
+    uint128 _liquidity,
+    uint256 _swapAmount,
+    uint256 _timeElapsed
+  ) public {
+    _tickLower = int24(bound(int256(_tickLower), 0, 1999));
+    _tickUpper = int24(bound(int256(_tickUpper), int256(_tickLower) + 1, 2000));
+    _liquidity = uint128(bound(_liquidity, 1e18, 1e24));
+    _swapAmount = bound(_swapAmount, uint256(_liquidity) / BIPS, uint256(_liquidity) * 500 / BIPS);
+    _timeElapsed = bound(_timeElapsed, 1 days, MARKET_LENGTH - 1);
+
+    _feeWarpFromStart(1);
+    bytes32 _positionId = _feeMintLiquidityAtTicks(alice, _tickLower, _tickUpper, _liquidity);
+
+    _feeWarpFromStart(_timeElapsed);
+
+    bool _swapped = _tryFeeSwap(bob, int256(_swapAmount), true, 0);
+    vm.assume(_swapped);
+
+    // Collect fees first
+    vm.prank(alice);
+    feeHook.collectFees(_positionId, alice, 0, 0);
+
+    // LP full withdrawal must still succeed
+    uint256 _balance0Before = token0.balanceOf(alice);
+    uint256 _balance1Before = token1.balanceOf(alice);
+    vm.prank(alice);
+    feeHook.decreaseLiquidity(_positionId, -int128(uint128(_liquidity)), 0, 0);
+
+    assertGe(token0.balanceOf(alice), _balance0Before, "LP should receive token0");
+    assertGe(token1.balanceOf(alice), _balance1Before, "LP should receive token1");
+  }
+}
+
+// ============================================================================
+// Maturity Tests - Swap, mint, and withdraw at/past maturity
+// ============================================================================
+
+contract MaturityTests is FixedFeeSwapMarketTest {
+  using FixedPointMathLib for int256;
+
+  PoolKey internal poolKey;
+  SwapParams internal defaultSwapParams;
+
+  function setUp() public override {
+    super.setUp();
+    poolKey = PoolKey({
+      currency0: Currency.wrap(address(token0)),
+      currency1: Currency.wrap(address(token1)),
+      fee: 0,
+      tickSpacing: 1,
+      hooks: IHooks(address(hook))
+    });
+    defaultSwapParams = SwapParams({zeroForOne: true, amountSpecified: -1e18, sqrtPriceLimitX96: 0});
+  }
+
+  function _swap(address _sender, int256 _amountIn, bool _principalForCash, uint256 _priceLimitWad)
+    internal
+  {
+    bytes memory _hookParams = abi.encode(_amountIn, _principalForCash, _priceLimitWad);
+    hook.exposed_beforeSwap(_sender, poolKey, defaultSwapParams, _hookParams);
+  }
+
+  /// @dev Swap PT->Cash at exactly maturity should work
+  function test_SwapAtMaturity() public {
+    _warpFromStart(1);
+    _mintLiquidityAtTicks(alice, 0, 500, 1e22);
+
+    vm.warp(hook.getMaturity());
+
+    uint256 _balance0Before = token0.balanceOf(bob);
+    uint256 _balance1Before = token1.balanceOf(bob);
+
+    _swap(bob, int256(1e18), true, 0);
+
+    assertLt(token0.balanceOf(bob), _balance0Before, "Should consume PT");
+    assertGt(token1.balanceOf(bob), _balance1Before, "Should receive cash");
+  }
+
+  /// @dev Swap PT->Cash past maturity should work (time capped at duration)
+  function test_SwapPastMaturity() public {
+    _warpFromStart(1);
+    _mintLiquidityAtTicks(alice, 0, 500, 1e22);
+
+    vm.warp(hook.getMaturity() + 30 days);
+
+    uint256 _balance0Before = token0.balanceOf(bob);
+    uint256 _balance1Before = token1.balanceOf(bob);
+
+    _swap(bob, int256(1e18), true, 0);
+
+    assertLt(token0.balanceOf(bob), _balance0Before, "Should consume PT");
+    assertGt(token1.balanceOf(bob), _balance1Before, "Should receive cash");
+  }
+
+  /// @dev Mint liquidity at maturity should work
+  function test_MintLiquidityAtMaturity() public {
+    vm.warp(hook.getMaturity());
+
+    bytes32 _positionId = _mintLiquidityAtTicks(alice, 0, 500, 1e22);
+
+    (address _owner,,, int128 _liq) = hook.getPositionInfo(_positionId);
+    assertEq(_owner, alice, "Position should be created");
+    assertEq(uint128(_liq), 1e22, "Liquidity should match");
+  }
+
+  /// @dev Mint, swap, warp to maturity, withdraw should succeed
+  function test_WithdrawAtMaturity() public {
+    _warpFromStart(1);
+    bytes32 _positionId = _mintLiquidityAtTicks(alice, 0, 500, 1e22);
+
+    // Swap to move tick
+    _warpFromStart(MARKET_LENGTH / 2);
+    _swap(bob, int256(1e18), true, 0);
+
+    // Warp to maturity and withdraw
+    vm.warp(hook.getMaturity());
+
+    uint256 _balance0Before = token0.balanceOf(alice);
+    uint256 _balance1Before = token1.balanceOf(alice);
+
+    vm.prank(alice);
+    hook.decreaseLiquidity(_positionId, -int128(uint128(1e22)), 0, 0);
+
+    assertGe(token0.balanceOf(alice), _balance0Before, "LP should receive token0");
+    assertGe(token1.balanceOf(alice), _balance1Before, "LP should receive token1");
+  }
+
+  /// @dev At maturity, tickToPrice matches exp(-tick/BIPS) and swap math uses it correctly
+  function test_PriceAtMaturityMatchesExpected() public {
+    vm.warp(hook.getMaturity());
+
+    // Verify several tick prices
+    for (int24 _tick = 0; _tick <= 500; _tick += 100) {
+      int256 _actual = hook.tickToPrice(_tick);
+      int256 _exponent = (-int256(_tick) * 1e18) / int256(BIPS);
+      int256 _expected = _exponent.expWad();
+      assertApproxEqRel(_actual, _expected, 1e12, "Price should match exp(-tick/BIPS) at maturity");
+    }
+
+    // Verify swap uses maturity pricing: mint, swap, check output is consistent
+    _mintLiquidityAtTicks(alice, 0, 500, 1e22);
+
+    uint256 _balance1Before = token1.balanceOf(bob);
+    _swap(bob, int256(1e18), true, 0);
+    uint256 _cashReceived = token1.balanceOf(bob) - _balance1Before;
+    assertGt(_cashReceived, 0, "Should receive non-zero cash at maturity");
+  }
+}
+
+// ============================================================================
+// Liquidity Gap Tests - Swaps across ranges with zero liquidity gaps
+// ============================================================================
+
+contract LiquidityGap is FixedFeeSwapMarketTest {
+  PoolKey internal poolKey;
+  SwapParams internal defaultSwapParams;
+
+  function setUp() public override {
+    super.setUp();
+    poolKey = PoolKey({
+      currency0: Currency.wrap(address(token0)),
+      currency1: Currency.wrap(address(token1)),
+      fee: 0,
+      tickSpacing: 1,
+      hooks: IHooks(address(hook))
+    });
+    defaultSwapParams = SwapParams({zeroForOne: true, amountSpecified: -1e18, sqrtPriceLimitX96: 0});
+  }
+
+  function _swap(address _sender, int256 _amountIn, bool _principalForCash, uint256 _priceLimitWad)
+    internal
+  {
+    bytes memory _hookParams = abi.encode(_amountIn, _principalForCash, _priceLimitWad);
+    hook.exposed_beforeSwap(_sender, poolKey, defaultSwapParams, _hookParams);
+  }
+
+  /// @dev Swap PT->Cash across contiguous positions: A at [0, 100], B at [100, 300]
+  function test_SwapAcrossContiguousPositions_PrincipalForCash() public {
+    _warpFromStart(1);
+
+    uint128 _liqA = 1e22;
+    uint128 _liqB = 1e22;
+
+    // Position A: [0, 100], Position B: [100, 300] (contiguous, B is wider)
+    _mintLiquidityAtTicks(alice, 0, 100, _liqA);
+    _mintLiquidityAtTicks(bob, 100, 300, _liqB);
+
+    // Swap enough to cross from A into B but not exhaust B (use price limit)
+    // 100 bips exhausts A, add 10 bips into B
+    uint256 _swapAmount = uint256(_liqA) * 110 / BIPS;
+    uint256 _priceLimit = uint256(hook.tickToPrice(150));
+
+    _swap(alice, int256(_swapAmount), true, _priceLimit);
+
+    int24 _currentTick = hook.getCurrentTick();
+    assertGe(_currentTick, 100, "Tick should cross into Position B's range");
+    assertLt(_currentTick, 300, "Tick should be within Position B's range");
+    // Active liquidity should now include only B (A ends at 100)
+    assertEq(hook.getActiveLiquidity(), _liqB, "Active liquidity should match Position B");
+  }
+
+  /// @dev Swap Cash->PT across contiguous positions (reverse direction)
+  function test_SwapAcrossContiguousPositions_CashForPrincipal() public {
+    _warpFromStart(1);
+
+    uint128 _liqA = 1e22;
+    uint128 _liqB = 1e22;
+
+    // Position A: [0, 100], Position B: [100, 300]
+    _mintLiquidityAtTicks(alice, 0, 100, _liqA);
+    _mintLiquidityAtTicks(bob, 100, 300, _liqB);
+
+    // First, move tick into middle of Position B's range (use price limit at tick 150)
+    uint256 _pushAmount = uint256(_liqA) * 200 / BIPS;
+    uint256 _pushLimit = uint256(hook.tickToPrice(150));
+    _swap(alice, int256(_pushAmount), true, _pushLimit);
+    assertGe(hook.getCurrentTick(), 100, "Should be in B's range after push");
+
+    // Now swap cash->principal to go back into A (use price limit at tick 50)
+    uint256 _priceLimit = uint256(hook.tickToPrice(50));
+    uint256 _swapAmount = uint256(_liqB) * 200 / BIPS;
+    _swap(alice, int256(_swapAmount), false, _priceLimit);
+
+    int24 _currentTick = hook.getCurrentTick();
+    assertLe(_currentTick, 100, "Tick should be back in Position A's range");
+    assertGe(_currentTick, 0, "Tick should be within Position A's range");
+  }
+
+  /// @dev Swap reverts when trying to continue past the only position's range (gap beyond)
+  function test_SwapRevertsAtGapBoundary_PrincipalForCash() public {
+    _warpFromStart(1);
+
+    // Only Position A exists at [0, 100], gap beyond tick 100
+    uint128 _liqA = 1e22;
+    _mintLiquidityAtTicks(alice, 0, 100, _liqA);
+
+    // Compute exact amount to exhaust A's range
+    int256 _priceAtStart = hook.tickToPrice(hook.getCurrentTick());
+    (uint256 _principalToBoundary,,,) =
+      hook.exposed_getCashSwapAmount(int256(1e36), _priceAtStart, 100);
+
+    // Try to swap past the boundary — should revert because there's no liquidity beyond
+    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__InvalidTickTraversal.selector);
+    _swap(bob, int256(_principalToBoundary + 1), true, 0);
+  }
+
+  /// @dev Swap reverts when liquidity is exhausted going cash->principal past lower tick
+  function test_SwapRevertsAtGapBoundary_CashForPrincipal() public {
+    _warpFromStart(1);
+
+    // Position at [0, 100] — starts in range at tick 0
+    uint128 _liq = 1e22;
+    _mintLiquidityAtTicks(alice, 0, 100, _liq);
+
+    // Push tick positive into the range so cash->principal has room to move left
+    uint256 _pushAmount = uint256(_liq) * 50 / BIPS;
+    _swap(bob, int256(_pushAmount), true, 0);
+    assertGt(hook.getCurrentTick(), 0, "Should be above lower tick after push");
+
+    // Try to exhaust all liquidity going cash->principal past lower tick (tick 0)
+    int256 _price = hook.tickToPrice(hook.getCurrentTick());
+    (uint256 _cashInToBoundary,,,) = hook.exposed_getPrincipalSwapAmount(int256(1e36), _price, 0);
+
+    // Going past the lower boundary with extra should revert
+    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__InvalidTickTraversal.selector);
+    _swap(bob, int256(_cashInToBoundary + 1), false, 0);
   }
 }
