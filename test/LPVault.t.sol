@@ -218,6 +218,7 @@ contract LPVaultTest is Test, Deployers {
     vm.prank(_depositor);
     (_shares, _amount0Used, _amount1Used) = vault.deposit(_amount0Max, _amount1Max, _liquidity);
   }
+
   function _boundSwapAbs(uint256 _swapAbs) internal pure returns (int256) {
     return -int256(bound(_swapAbs, 1e18, 1e24));
   }
