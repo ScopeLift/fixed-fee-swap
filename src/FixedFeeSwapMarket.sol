@@ -511,6 +511,9 @@ contract FixedFeeSwapMarket is BaseHook {
       (uint256 _stepNet, uint256 _stepOut, int24 _newTick) =
         _executeSwapStep(_amountInRemainingNet, _nextTick, _initialized, _ctx);
 
+      // If the step couldn't produce output (swap too small to move a full tick), stop.
+      if (_stepNet == 0) break;
+
       _amountInRemainingNet -= _stepNet;
       _amountOutCalculated += _stepOut;
       currentTick = _newTick;
@@ -536,8 +539,8 @@ contract FixedFeeSwapMarket is BaseHook {
     (uint256 _netConsumed, uint256 _amountOut, int256 _stepPrice, int24 _stepTick) = _calculateSwap(
       _amountInNet.toInt256(), currentPrice, _nextTick, _ctx.principalForCash, _ctx.priceLimitWad
     );
-    if (_netConsumed == 0) revert FixedFeeSwap__SwapStepProducedZeroIn();
-    if (_amountOut == 0) revert FixedFeeSwap__SwapStepProducedZeroOut();
+    // If the swap step couldn't move a full tick (sub-tick snap to zero), stop gracefully.
+    if (_netConsumed == 0 || _amountOut == 0) return (0, 0, currentTick);
 
     // Compute fee for this step directly from net consumed and attribute to LPs.
     // Per-step tracking is needed because activeLiquidity changes at tick crossings.
@@ -560,11 +563,12 @@ contract FixedFeeSwapMarket is BaseHook {
       activeLiquidity = LiquidityMath.addDelta(activeLiquidity, _liquidityNet);
     }
 
-    // Update price and calculate new tick
+    // Update price and calculate new tick.
+    // The search offset (currentTick - YIELD_PER_TICK) is already applied in _executeSwapLoop,
+    // so we do NOT subtract here — that would double-adjust, pushing currentTick below the
+    // actually-traded price and inflating LP cash claims on withdrawal.
     currentPrice = _stepPrice;
-    int24 _resultTick =
-      (_ctx.tickMovingLeft && _hitBoundary) ? _stepTick - YIELD_PER_TICK : _stepTick;
-    return (_netConsumed, _amountOut, _resultTick);
+    return (_netConsumed, _amountOut, _stepTick);
   }
 
   /// @notice Routes swap calculation to the appropriate direction-specific function
@@ -665,11 +669,20 @@ contract FixedFeeSwapMarket is BaseHook {
 
     if (uint256(_amountIn) >= _principalToTarget) {
       _amountInConsumed = _principalToTarget;
-      _newPrice = _targetPrice;
+      if (_targetPrice == _nextTickPrice) {
+        // Exact tick boundary — no snapping needed
+        _newTick = _nextTick;
+        _newPrice = _targetPrice;
+      } else {
+        // Price limit mid-tick — snap to floored tick for consistent accounting
+        _newTick = _wadToTick(_targetYieldWad);
+        _newPrice = _priceFromYieldWad(int256(_newTick) * int256(WAD), _scaledTime);
+        // If snapping pushed the price back to or past the start, the limit is unreachable
+        if (_newPrice >= _currentPrice) return (0, 0, 0, 0);
+      }
       _cashOut = FixedPointMathLib.mulDiv(
         uint256(activeLiquidity), uint256(_currentPrice - _newPrice), _scaledTime
       );
-      _newTick = _targetPrice == _nextTickPrice ? _nextTick : _wadToTick(_targetYieldWad);
       return (_amountInConsumed, _cashOut, _newPrice, _newTick);
     }
 
@@ -700,15 +713,18 @@ contract FixedFeeSwapMarket is BaseHook {
     // Yield movement is linear in PT: Δyield = PT_in * BIPS / L
     int256 _endYieldWad = _startYieldWad
       + int256(FixedPointMathLib.mulDiv(_amountIn, BIPS * WAD, uint256(activeLiquidity)));
-    _newPrice = _priceFromYieldWad(_endYieldWad, _scaledTime);
+
+    // Snap to floored integer tick so swap output matches LP composition accounting.
+    // Returns zero consumed/output if the tick didn't move (swap too small).
+    _newTick = _wadToTick(_endYieldWad);
+    _newPrice = _priceFromYieldWad(int256(_newTick) * int256(WAD), _scaledTime);
+
+    if (_newPrice >= _startPrice) return (0, 0, _startPrice, _wadToTick(_startYieldWad));
 
     // Cash_out = (L / scaledTime) * (startPrice - newPrice)
-    if (_newPrice > _startPrice) revert FixedFeeSwap__InvalidPriceDirection();
     _cashOut = FixedPointMathLib.mulDiv(
       uint256(activeLiquidity), uint256(_startPrice - _newPrice), _scaledTime
     );
-
-    _newTick = _wadToTick(_endYieldWad);
   }
 
   // ============ Internal Functions - Cash→PT Swap Math ============
@@ -781,11 +797,22 @@ contract FixedFeeSwapMarket is BaseHook {
 
     if (uint256(_amountIn) >= _cashInToTarget) {
       _amountInConsumed = _cashInToTarget;
-      _newPrice = _targetPrice;
-
-      uint256 _yieldDeltaWad = uint256(_startYieldWad - _targetYieldWad);
-      _principalOut = FixedPointMathLib.mulDiv(uint256(activeLiquidity), _yieldDeltaWad, BIPS * WAD);
-      _newTick = _targetPrice == _nextTickPrice ? _nextTick : _wadToTick(_targetYieldWad);
+      uint256 _yieldDeltaWad;
+      if (_targetPrice == _nextTickPrice) {
+        // Exact tick boundary — no snapping needed
+        _newTick = _nextTick;
+        _newPrice = _targetPrice;
+        _yieldDeltaWad = uint256(_startYieldWad - _targetYieldWad);
+      } else {
+        // Price limit mid-tick — snap to ceiled tick (Cash→PT: yield decreasing, ceil rounds in pool's favor)
+        _newTick = _wadToTickCeil(_targetYieldWad);
+        _newPrice = _priceFromYieldWad(int256(_newTick) * int256(WAD), _scaledTime);
+        // If snapping pushed the price back to or past the start, the limit is unreachable
+        if (_newPrice <= _currentPrice) return (0, 0, 0, 0);
+        _yieldDeltaWad = uint256(_startYieldWad - int256(_newTick) * int256(WAD));
+      }
+      _principalOut =
+        FixedPointMathLib.mulDiv(uint256(activeLiquidity), _yieldDeltaWad, BIPS * WAD);
       return (_amountInConsumed, _principalOut, _newPrice, _newTick);
     }
 
@@ -814,17 +841,23 @@ contract FixedFeeSwapMarket is BaseHook {
     uint256 _scaledTime = _scaledTimeElapsedWad();
 
     // newPrice = startPrice + (scaledTime / L) * cashIn
-    _newPrice = _startPrice
+    int256 _exactNewPrice = _startPrice
       + int256(FixedPointMathLib.mulDiv(_scaledTime, _amountIn, uint256(activeLiquidity)));
-    if (_newPrice < _startPrice) revert FixedFeeSwap__InvalidPriceDirection();
+    if (_exactNewPrice < _startPrice) revert FixedFeeSwap__InvalidPriceDirection();
 
     // endYieldWad = -ln(newPrice) / scaledTime * BIPS * WAD
-    int256 _endYieldWad = _yieldWadFromPrice(_newPrice, _scaledTime);
-    _newTick = _wadToTick(_endYieldWad);
+    int256 _endYieldWad = _yieldWadFromPrice(_exactNewPrice, _scaledTime);
 
-    // PT_out = L * (startYield - endYield) / BIPS using WAD precision
-    int256 _yieldMovedWad = _startYieldWad - _endYieldWad;
-    if (_yieldMovedWad <= 0) return (_amountInConsumed, 0, _newPrice, _newTick);
+    // Snap to ceiled integer tick so swap output matches LP composition accounting.
+    // Cash→PT decreases yield, so ceiling rounds in favor of the pool (less PT output, higher price).
+    // Returns zero consumed/output if the tick didn't move (swap too small).
+    _newTick = _wadToTickCeil(_endYieldWad);
+    int256 _snappedYieldWad = int256(_newTick) * int256(WAD);
+    _newPrice = _priceFromYieldWad(_snappedYieldWad, _scaledTime);
+
+    // PT_out = L * (startYield - snappedYield) / BIPS using WAD precision
+    int256 _yieldMovedWad = _startYieldWad - _snappedYieldWad;
+    if (_yieldMovedWad <= 0) return (0, 0, _startPrice, _wadToTickCeil(_startYieldWad));
     _principalOut =
       FixedPointMathLib.mulDiv(uint256(activeLiquidity), uint256(_yieldMovedWad), BIPS * WAD);
   }
@@ -865,21 +898,29 @@ contract FixedFeeSwapMarket is BaseHook {
     }
 
     // Get token amounts owed for the liquidity
+    // TOKEN0 = PT, TOKEN1 = Cash
+    // Below current tick (unvisited yields) → LP holds cash (TOKEN1)
+    // Above current tick (visited yields) → LP holds principal (TOKEN0)
     TokenDelta memory _delta;
     if (currentTick < _tickLower) {
+      // All liquidity at higher yields (unvisited) — LP holds only cash
       _delta = TokenDelta({
-        amount0: _getAmountPrincipalDelta(_tickLower, _tickUpper, _liquidity).toInt128(), amount1: 0
+        amount0: 0, amount1: _getAmountCashDelta(_tickLower, _tickUpper, _liquidity).toInt128()
       });
     } else if (currentTick < _tickUpper) {
       activeLiquidity = LiquidityMath.addDelta(activeLiquidity, _liquidity);
 
+      // Split at current position:
+      // [tickLower, currentTick] visited → principal (TOKEN0)
+      // [currentTick, tickUpper] unvisited → cash (TOKEN1)
       _delta = TokenDelta({
-        amount0: _getAmountPrincipalDelta(currentTick, _tickUpper, _liquidity).toInt128(),
-        amount1: _getAmountCashDelta(_tickLower, currentTick, _liquidity).toInt128()
+        amount0: _getAmountPrincipalDelta(_tickLower, currentTick, _liquidity).toInt128(),
+        amount1: _getAmountCashDelta(currentTick, _tickUpper, _liquidity).toInt128()
       });
     } else {
+      // All liquidity at lower yields (visited) — LP holds only principal
       _delta = TokenDelta({
-        amount0: 0, amount1: _getAmountCashDelta(_tickLower, _tickUpper, _liquidity).toInt128()
+        amount0: _getAmountPrincipalDelta(_tickLower, _tickUpper, _liquidity).toInt128(), amount1: 0
       });
     }
 
@@ -1097,6 +1138,16 @@ contract FixedFeeSwapMarket is BaseHook {
     int256 _oneWad = int256(WAD);
     if (_yieldWad >= 0) return int24(_yieldWad / _oneWad);
     return int24((_yieldWad - _oneWad + 1) / _oneWad);
+  }
+
+  /// @notice Converts a WAD-scaled yield to an int24 tick using ceiling division
+  /// @dev Rounds toward positive infinity, the opposite of _wadToTick
+  /// @param _yieldWad The WAD-scaled yield value to convert
+  /// @return The tick as int24, ceiled toward positive infinity
+  function _wadToTickCeil(int256 _yieldWad) internal pure returns (int24) {
+    int256 _oneWad = int256(WAD);
+    if (_yieldWad >= 0) return int24((_yieldWad + _oneWad - 1) / _oneWad);
+    return int24(_yieldWad / _oneWad);
   }
 
   /// @notice Derives the WAD-scaled yield from a discount factor price
