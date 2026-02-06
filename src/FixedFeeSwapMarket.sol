@@ -700,6 +700,40 @@ contract FixedFeeSwapMarket is BaseHook {
     });
   }
 
+  /// @notice Swaps tokens directly without going through PoolManager
+  /// @param _amountIn The amount of input tokens
+  /// @param _principalForCash True to swap PT→cash, false to swap cash→PT
+  /// @param _priceLimitWad Price limit in WAD (0 = no limit)
+  /// @return amountInUsed The amount of input tokens consumed
+  /// @return amountOut The amount of output tokens received
+  function swap(uint256 _amountIn, bool _principalForCash, uint256 _priceLimitWad)
+    external
+    returns (uint256 amountInUsed, uint256 amountOut)
+  {
+    if (_amountIn == 0) revert FixedFeeSwap__SwapAmountCannotBeZero();
+    if (activeLiquidity == 0) revert FixedFeeSwap__NoActiveLiquidity();
+    if (currentPrice == 0) currentPrice = tickToPrice(currentTick);
+
+    (amountInUsed, amountOut) = _executeSwapLoop(_amountIn, _principalForCash, _priceLimitWad);
+
+    // Execute token transfers
+    if (_principalForCash) {
+      // User sends principal (TOKEN0), receives cash (TOKEN1)
+      if (amountInUsed != 0) TOKEN0.safeTransferFrom(msg.sender, address(this), amountInUsed);
+      if (amountOut != 0) TOKEN1.safeTransfer(msg.sender, amountOut);
+    } else {
+      // User sends cash (TOKEN1), receives principal (TOKEN0)
+      if (amountInUsed != 0) TOKEN1.safeTransferFrom(msg.sender, address(this), amountInUsed);
+      if (amountOut != 0) TOKEN0.safeTransfer(msg.sender, amountOut);
+    }
+  }
+
+  /// @notice Returns the current market price, computing from tick if not yet initialized
+  /// @return The current price in WAD precision
+  function getCurrentPrice() external view returns (int256) {
+    return currentPrice != 0 ? currentPrice : tickToPrice(currentTick);
+  }
+
   /// @notice Converts a yield in basis points to the corresponding tick
   /// @param yieldBps The yield rate in basis points
   /// @return The tick value representing this yield
