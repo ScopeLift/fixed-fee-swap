@@ -3231,7 +3231,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
   /// price init).
   function testFuzz_PriceLimitAlreadyHit_PrincipalForCash_NoOp(uint256 amountIn) public {
     amountIn = _boundSwapAmount(amountIn);
-    assertEq(hook.getCurrentPrice(), 0, "Assumes lazy price init");
+    assertEq(hook.getCurrentPrice(), hook.tickToPrice(hook.getCurrentTick()), "Assumes lazy price init");
     int24 tickBefore = hook.getCurrentTick();
     uint128 activeBefore = hook.getActiveLiquidity();
     int256 expectedPrice = hook.tickToPrice(tickBefore);
@@ -3263,7 +3263,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
   /// price init).
   function testFuzz_PriceLimitAlreadyHit_CashForPrincipal_NoOp(uint256 amountIn) public {
     amountIn = _boundSwapAmount(amountIn);
-    assertEq(hook.getCurrentPrice(), 0, "Assumes lazy price init");
+    assertEq(hook.getCurrentPrice(), hook.tickToPrice(hook.getCurrentTick()), "Assumes lazy price init");
     int24 tickBefore = hook.getCurrentTick();
     uint128 activeBefore = hook.getActiveLiquidity();
     int256 expectedPrice = hook.tickToPrice(tickBefore);
