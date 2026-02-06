@@ -154,8 +154,8 @@ contract VaultShareToken is ERC20, IFeeTrackingToken {
     emit FeesClaimed(_user, _claimedToken0, _claimedToken1);
 
     // Transfer tokens to the user
-    _transferAmount(FEE_TOKEN0, _user, _claimedToken0);
-    _transferAmount(FEE_TOKEN1, _user, _claimedToken1);
+    if (_claimedToken0 > 0) _transferAmount(FEE_TOKEN0, _user, _claimedToken0);
+    if (_claimedToken1 > 0) _transferAmount(FEE_TOKEN1, _user, _claimedToken1);
   }
 
   /// @notice Transfers an amount of tokens to a user.

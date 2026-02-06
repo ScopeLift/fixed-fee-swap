@@ -96,7 +96,7 @@ contract Constructor is ZapperTest {
 
   function test_RevertIf_FixedFeeSwapIsZero() public {
     vm.expectRevert(Zapper.Zapper_InvalidAddress.selector);
-    new Zapper(FixedFeeSwap(address(0)));
+    new Zapper(FixedFeeSwap(payable(address(0))));
   }
 }
 

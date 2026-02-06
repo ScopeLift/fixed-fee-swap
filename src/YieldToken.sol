@@ -3,12 +3,11 @@ pragma solidity 0.8.26;
 
 // External Imports
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 // Internal imports
 import {FeeTracking} from "src/lib/FeeTracking.sol";
 import {IFeeTrackingToken} from "src/interface/IFeeTrackingToken.sol";
+import {IFixedFeeSwap} from "src/interface/IFixedFeeSwap.sol";
 
 contract YieldToken is ERC20, IFeeTrackingToken {
   using FeeTracking for FeeTracking.GlobalFees;
@@ -21,9 +20,6 @@ contract YieldToken is ERC20, IFeeTrackingToken {
   /// @notice Thrown when the caller is not authorized.
   error YieldToken_NotAuthorized();
 
-  /// @notice Thrown when a transfer fails.
-  error YieldToken_TransferFailed();
-
   /*//////////////////////////////////////////////////////////////
                         STATE VARIABLES
   //////////////////////////////////////////////////////////////*/
@@ -32,7 +28,7 @@ contract YieldToken is ERC20, IFeeTrackingToken {
   /// @dev See: https://github.com/Uniswap/v4-core/blob/main/src/types/Currency.sol#L37-L38
   address private constant NATIVE = address(0);
 
-  /// @notice The fixed fee swap hook address.
+  /// @notice The fixed fee swap address.
   address public immutable FIXED_FEE_SWAP;
 
   /// @notice The token address in which token0 fees are collected / distributed.
@@ -54,7 +50,7 @@ contract YieldToken is ERC20, IFeeTrackingToken {
   /// @notice Initializes the yield token metadata.
   /// @param _name ERC20 name value.
   /// @param _symbol ERC20 symbol value.
-  /// @param _fixedFeeSwap The fixed fee swap hook address.
+  /// @param _fixedFeeSwap The `FixedFeeSwap` address.
   constructor(
     string memory _name,
     string memory _symbol,
@@ -92,7 +88,7 @@ contract YieldToken is ERC20, IFeeTrackingToken {
   /// @return _claimedToken0 Amount of `FEE_TOKEN_0` transferred to `_user`.
   /// @return _claimedToken1 Amount of `FEE_TOKEN_1` transferred to `_user`.
   function claim(address _user) external returns (uint256 _claimedToken0, uint256 _claimedToken1) {
-    _requireHook();
+    _requireFixedFeeSwap();
     (_claimedToken0, _claimedToken1) = _claim(_user);
   }
 
@@ -100,7 +96,7 @@ contract YieldToken is ERC20, IFeeTrackingToken {
   /// @param _to The address to mint tokens to.
   /// @param _amount The amount of tokens to mint.
   function mint(address _to, uint256 _amount) external {
-    _requireHook();
+    _requireFixedFeeSwap();
     _mint(_to, _amount);
   }
 
@@ -108,7 +104,7 @@ contract YieldToken is ERC20, IFeeTrackingToken {
   /// @param _from The address to burn tokens from.
   /// @param _amount The amount of tokens to burn.
   function burn(address _from, uint256 _amount) external {
-    _requireHook();
+    _requireFixedFeeSwap();
     _claim(_from);
     _burn(_from, _amount);
   }
@@ -118,9 +114,9 @@ contract YieldToken is ERC20, IFeeTrackingToken {
   /// last call).
   /// @param _collectedFeeToken1 Newly collected token1 fees collected from the pool (delta since
   /// last call).
-  /// @dev Can only be called by the hook to update fees when collecting from the vault.
+  /// @dev Can only be called by `FixedFeeSwap` to update fees when collecting from the vault.
   function updateFees(uint256 _collectedFeeToken0, uint256 _collectedFeeToken1) external {
-    _requireHook();
+    _requireFixedFeeSwap();
     _updateFees(_collectedFeeToken0, _collectedFeeToken1);
   }
 
@@ -128,8 +124,8 @@ contract YieldToken is ERC20, IFeeTrackingToken {
                         INTERNAL FUNCTIONS
   //////////////////////////////////////////////////////////////*/
 
-  /// @notice Requires the caller to be the fixed fee swap hook.
-  function _requireHook() internal view {
+  /// @notice Requires the caller to be the `FixedFeeSwap`.
+  function _requireFixedFeeSwap() internal view {
     if (msg.sender != FIXED_FEE_SWAP) revert YieldToken_NotAuthorized();
   }
 
@@ -172,7 +168,12 @@ contract YieldToken is ERC20, IFeeTrackingToken {
   /// @param _user The address to claim fees for.
   /// @return _claimedToken0 Amount of `FEE_TOKEN_0` that was transferred.
   /// @return _claimedToken1 Amount of `FEE_TOKEN_1` that was transferred.
+  /// @dev
+  ///      - Syncs fees via FixedFeeSwap.collectFeesToYT, then transfers fees from FixedFeeSwap to
+  /// the user. - Reverts if YT fee collection is already closed.
   function _claim(address _user) internal returns (uint256 _claimedToken0, uint256 _claimedToken1) {
+    IFixedFeeSwap(FIXED_FEE_SWAP).collectFeesToYT();
+
     // Update user fees to ensure we're syncing to the latest global indices
     _updateUserFees(_user);
 
@@ -182,23 +183,7 @@ contract YieldToken is ERC20, IFeeTrackingToken {
     // Emit event for transparency
     emit FeesClaimed(_user, _claimedToken0, _claimedToken1);
 
-    // Transfer tokens to the user
-    _transferAmount(FEE_TOKEN0, _user, _claimedToken0);
-    _transferAmount(FEE_TOKEN1, _user, _claimedToken1);
-  }
-
-  /// @notice Transfers an amount of tokens to a user.
-  /// @param _token The address of the token to transfer.
-  /// @param _to The address to transfer the tokens to.
-  /// @param _amount The amount of tokens to transfer.
-  /// @dev Following Uniswap v4's `Currency` convention: NATIVE represents native ETH.
-  ///      See: https://github.com/Uniswap/v4-core/blob/main/src/types/Currency.sol#L37-L38
-  function _transferAmount(address _token, address _to, uint256 _amount) internal {
-    if (_token == NATIVE) {
-      (bool _success,) = payable(_to).call{value: _amount}("");
-      if (!_success) revert YieldToken_TransferFailed();
-    } else {
-      SafeERC20.safeTransfer(IERC20(_token), _to, _amount);
-    }
+    // Transfer tokens directly from FixedFeeSwap to the user
+    IFixedFeeSwap(FIXED_FEE_SWAP).transferFeesToUser(_user, _claimedToken0, _claimedToken1);
   }
 }

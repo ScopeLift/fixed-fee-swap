@@ -15,6 +15,13 @@ import {FeeTracking} from "src/lib/FeeTracking.sol";
 
 contract FixedFeeSwap {
   using SafeERC20 for IERC20;
+
+  /// @notice Checkpoint of the last-seen VaultShareToken fee indexes used for YT fee syncing.
+  struct VstFeeCheckpoint {
+    uint256 feeIndex0LastScaled;
+    uint256 feeIndex1LastScaled;
+  }
+
   /*//////////////////////////////////////////////////////////////
                         ERRORS
   //////////////////////////////////////////////////////////////*/
@@ -39,6 +46,13 @@ contract FixedFeeSwap {
 
   /// @notice Thrown when a transfer fails.
   error FixedFeeSwap_TransferFailed();
+
+  /// @notice Thrown when fees may no longer be sent to the YieldToken (one post-maturity YT claim
+  /// already used).
+  error FixedFeeSwap_YTFeeCollectionClosed();
+
+  /// @notice Thrown when the caller is not authorized.
+  error FixedFeeSwap_NotAuthorized();
 
   /*//////////////////////////////////////////////////////////////
                         EVENTS
@@ -87,6 +101,11 @@ contract FixedFeeSwap {
   /// @dev See: https://github.com/Uniswap/v4-core/blob/main/src/types/Currency.sol#L37-L38
   address private constant NATIVE = address(0);
 
+  /// @notice When true, fees are no longer sent to the YT: `collectFeesToYT` reverts and redeem
+  ///         uses the PT-only fee path (fees distributed to PT redeemers).
+  /// @dev Set after the single allowed YT fee claim at or after maturity (during redeem).
+  bool public ytFeeCollectionClosed;
+
   /// @notice The vault share token.
   VaultShareToken public immutable VAULT_SHARE_TOKEN;
 
@@ -99,6 +118,9 @@ contract FixedFeeSwap {
   /// @notice The maturity after which yield token will be 0. (principal token will be equal to
   /// vault share token)
   uint256 public immutable MATURITY;
+
+  /// @notice Tracks the last VaultShareToken fee indexes that have been synced into YT accounting.
+  VstFeeCheckpoint public vstFeeCheckpoint;
 
   /*//////////////////////////////////////////////////////////////
                         CONSTRUCTOR
@@ -146,6 +168,9 @@ contract FixedFeeSwap {
   /// @dev The caller must have approved the hook to spend the vault share token.
   /// @dev When we split VST, we split it into equal amounts of YT + PT (1:1 ratio).
   function deposit(uint256 _amount) external {
+    // Sync YT fees first so holders get all yield earned so far.
+    _syncYTFees();
+
     if (block.timestamp >= MATURITY) revert FixedFeeSwap_SplitAfterMaturity();
 
     if (_amount == 0) revert FixedFeeSwap_InvalidAmount();
@@ -188,13 +213,16 @@ contract FixedFeeSwap {
 
     bool _maturityReached = block.timestamp >= MATURITY;
 
-    if (!_maturityReached) {
-      // -------- BEFORE MATURITY ( needs both PT and YT) --------
+    if (!ytFeeCollectionClosed) {
+      // YT fee path: burn YT and pay user their YT fee share (requires PT + YT).
       _claimAndBurnYieldTokens(msg.sender, _amount);
+
+      // This redeem was the single allowed YT fee claim at or after maturity; close YT collection
+      // so future redeems use PT-only.
+      if (_maturityReached) ytFeeCollectionClosed = true;
     } else {
-      // -------- AFTER MATURITY --------
-      // Note: Post maturity, YT tokens are valued at 0, so we could burn them as well,
-      // but it's not required since they have no value. Users can burn YT separately if desired.
+      // PT-only fee path (YT fee collection already closed; no more fees sent to YT).
+      // Post maturity, YT is valued at 0; fees are distributed to the user proportionally to PT.
       _claimFeesAccruedAfterMaturity(msg.sender, _amount);
     }
 
@@ -210,6 +238,32 @@ contract FixedFeeSwap {
     VAULT_SHARE_TOKEN.transfer(msg.sender, _vstAmount);
 
     emit Redeem(msg.sender, _vstAmount, _maturityReached);
+  }
+
+  /// @notice Collects this hook's accrued fees from the vault for YieldToken holders.
+  /// @dev
+  ///      - Reverts when `ytFeeCollectionClosed` is true.
+  ///      - Syncs YT fee accounting and claims from the vault into this contract.
+  ///      - YT holders receive fees via `transferFeesToUser` when claiming.
+  function collectFeesToYT() external {
+    if (ytFeeCollectionClosed) revert FixedFeeSwap_YTFeeCollectionClosed();
+
+    _syncYTFees();
+
+    // Claim fees from the vault into this contract; YT will call transferFeesToUser to pay users
+    VAULT_SHARE_TOKEN.claim(address(this));
+  }
+
+  /// @notice Transfers fee tokens directly to a user. Called by YieldToken during fee claims.
+  /// @param _user The address to transfer the fees to.
+  /// @param _amount0 The amount of fee token0 to transfer.
+  /// @param _amount1 The amount of fee token1 to transfer.
+  /// @dev Can only be called by the YieldToken contract.
+  function transferFeesToUser(address _user, uint256 _amount0, uint256 _amount1) external {
+    if (msg.sender != address(YIELD_TOKEN)) revert FixedFeeSwap_NotAuthorized();
+
+    if (_amount0 > 0) _transferFeeToken(VAULT_SHARE_TOKEN.FEE_TOKEN0(), _user, _amount0);
+    if (_amount1 > 0) _transferFeeToken(VAULT_SHARE_TOKEN.FEE_TOKEN1(), _user, _amount1);
   }
 
   /// @notice Claims fees and burns leftover yield tokens after maturity.
@@ -237,7 +291,8 @@ contract FixedFeeSwap {
   /// @notice Claims fees and burns YT tokens
   /// @param _user The address to claim fees from and burn YT tokens for.
   /// @param _amount The amount of YT tokens to claim fees from and burn.
-  /// @dev Burns the YT tokens, which internally claims fees before burning.
+  /// @dev Burns the YT tokens (which claims fees from the YT's balance before burning).
+  ///      Someone must have called collectFeesToYT() before maturity so the YT holds fee tokens.
   function _claimAndBurnYieldTokens(address _user, uint256 _amount) internal {
     // Caller should have enough YT tokens
     if (YIELD_TOKEN.balanceOf(_user) < _amount) revert FixedFeeSwap_InsufficientBalance();
@@ -255,8 +310,6 @@ contract FixedFeeSwap {
   function _claimFeesAccruedAfterMaturity(address _user, uint256 _amount) internal {
     // Get total PT supply to calculate proportional share
     uint256 _totalSupply = PRINCIPAL_TOKEN.totalSupply();
-
-    if (_totalSupply == 0) revert FixedFeeSwap_InsufficientBalance();
 
     // Get contract balances for both fee tokens
     address _feeToken0 = VAULT_SHARE_TOKEN.FEE_TOKEN0();
@@ -278,6 +331,9 @@ contract FixedFeeSwap {
       _totalSupply,
       Math.Rounding.Floor
     ) / FeeTracking.PRECISION;
+
+    // Claim this hook's accrued fees from the vault into the contract so PT redeemers can be paid.
+    VAULT_SHARE_TOKEN.claim(address(this));
 
     // Transfer post-maturity fees to the user
     if (_feeToken0Amount > 0) _transferFeeToken(_feeToken0, _user, _feeToken0Amount);
@@ -308,4 +364,53 @@ contract FixedFeeSwap {
       IERC20(_token).safeTransfer(_to, _amount);
     }
   }
+
+  /// @notice Syncs YieldToken fee accounting against the latest VaultShareToken fee indexes.
+  /// @dev
+  ///  - View-only with respect to the vault and pool; no tokens move here.
+  ///  - Computes the additional vault yield accumulated on the VST balance held by this hook since
+  ///    the last sync, and feeds that into YT's fee indexes via `updateFees`.
+  function _syncYTFees() internal {
+    // Read the latest VaultShareToken global fee indexes (fee per 1 VST, scaled by PRECISION).
+    uint256 _feeIndex0Now = VAULT_SHARE_TOKEN.globalFeeIndex0Scaled();
+    uint256 _feeIndex1Now = VAULT_SHARE_TOKEN.globalFeeIndex1Scaled();
+
+    VstFeeCheckpoint memory _checkpoint = vstFeeCheckpoint;
+
+    // Compute index deltas since the last sync.
+    uint256 _deltaIndex0 = _feeIndex0Now - _checkpoint.feeIndex0LastScaled;
+    uint256 _deltaIndex1 = _feeIndex1Now - _checkpoint.feeIndex1LastScaled;
+
+    // Advance checkpoints unconditionally to avoid double-counting.
+    vstFeeCheckpoint.feeIndex0LastScaled = _feeIndex0Now;
+    vstFeeCheckpoint.feeIndex1LastScaled = _feeIndex1Now;
+
+    // If nothing changed, there's no new yield to attribute.
+    if (_deltaIndex0 == 0 && _deltaIndex1 == 0) return;
+
+    // Yield attributable to YT is based on the VST held by this hook.
+    uint256 _vstBalance = VAULT_SHARE_TOKEN.balanceOf(address(this));
+    if (_vstBalance == 0) return;
+
+    uint256 _newFees0;
+    uint256 _newFees1;
+
+    if (_deltaIndex0 > 0) {
+      // Each VST has earned `_deltaIndex0 / PRECISION` units of token0 since last sync.
+      _newFees0 = Math.mulDiv(_vstBalance, _deltaIndex0, FeeTracking.PRECISION);
+    }
+
+    if (_deltaIndex1 > 0) {
+      // Each VST has earned `_deltaIndex1 / PRECISION` units of token1 since last sync.
+      _newFees1 = Math.mulDiv(_vstBalance, _deltaIndex1, FeeTracking.PRECISION);
+    }
+
+    if (_newFees0 > 0 || _newFees1 > 0) {
+      // Update YT fee-per-share indexes
+      YIELD_TOKEN.updateFees(_newFees0, _newFees1);
+    }
+  }
+
+  /// @notice Accepts native ETH sent by the VaultShareToken when claiming fees.
+  receive() external payable {}
 }

@@ -91,8 +91,8 @@ contract LPVaultTest is Test, Deployers {
   /// @dev Assumes address is safe for use as depositor or receiver in tests.
   function _assumeSafeAddress(address _addr) internal view {
     vm.assume(
-      _addr != address(0) && _addr != address(manager) && _addr != address(vault)
-        && _addr != address(this)
+      _addr != address(0) && _addr != address(this) && _addr != address(manager)
+        && _addr != address(vault)
     );
   }
 
