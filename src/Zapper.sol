@@ -7,6 +7,8 @@ import {YieldToken} from "src/YieldToken.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
 import {FixedFeeSwap} from "src/FixedFeeSwap.sol";
 import {FeeTracking} from "src/lib/FeeTracking.sol";
+import {FixedFeeSwapMarket} from "src/FixedFeeSwapMarket.sol";
+
 // External Imports
 import {IERC3156FlashBorrower} from "@openzeppelin/contracts/interfaces/IERC3156FlashBorrower.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -70,16 +72,23 @@ contract Zapper is IERC3156FlashBorrower {
   /// @notice The fixed fee swap hook address.
   FixedFeeSwap public immutable FIXED_FEE_SWAP;
 
+  /// @notice The fixed fee swap market address.
+  FixedFeeSwapMarket public immutable FIXED_FEE_SWAP_MARKET;
+
   /*//////////////////////////////////////////////////////////////
                         CONSTRUCTOR
   //////////////////////////////////////////////////////////////*/
 
   /// @notice Initializes the zapper.
   /// @param _fixedFeeSwap The fixed fee swap address.
-  constructor(FixedFeeSwap _fixedFeeSwap) {
-    if (address(_fixedFeeSwap) == address(0)) revert Zapper_InvalidAddress();
+  /// @param _fixedFeeSwapMarket The fixed fee swap market address.
+  constructor(FixedFeeSwap _fixedFeeSwap, FixedFeeSwapMarket _fixedFeeSwapMarket) {
+    if (address(_fixedFeeSwap) == address(0) || address(_fixedFeeSwapMarket) == address(0)) {
+      revert Zapper_InvalidAddress();
+    }
 
     FIXED_FEE_SWAP = _fixedFeeSwap;
+    FIXED_FEE_SWAP_MARKET = _fixedFeeSwapMarket;
     YIELD_TOKEN = _fixedFeeSwap.YIELD_TOKEN();
     PRINCIPAL_TOKEN = _fixedFeeSwap.PRINCIPAL_TOKEN();
     VAULT_SHARE_TOKEN = _fixedFeeSwap.VAULT_SHARE_TOKEN();
@@ -121,7 +130,9 @@ contract Zapper is IERC3156FlashBorrower {
     VAULT_SHARE_TOKEN.transferFrom(msg.sender, address(this), _vstAmount);
 
     // 2. Calculate PT debt: X = vstAmount / (1 - ptPrice)
-    uint256 _ptPrice = 0.98e18; // Mock: 0.98 VST per PT (18 decimals)
+    // Get current PT price from market (WAD-scaled, e.g., 0.98e18 = 0.98 VST per PT)
+    int256 _ptPriceSigned = FIXED_FEE_SWAP_MARKET.getCurrentPrice();
+    uint256 _ptPrice = _ptPriceSigned > 0 ? uint256(_ptPriceSigned) : 0;
     uint256 _ptDebt =
       Math.mulDiv(_vstAmount, FeeTracking.PRECISION, FeeTracking.PRECISION - _ptPrice);
 
@@ -194,11 +205,16 @@ contract Zapper is IERC3156FlashBorrower {
   /// @notice Handles flash loan callback for buying YT.
   /// @param _amount The amount of PT to repay (flash loan amount).
   function _handleBuyFlashLoan(uint256 _amount) internal {
-    // Mock: Swap PT for VST (assume 1 PT = 0.98 VST)
-    // In production, this would be an AMM swap
-    uint256 _vstFromSwap = (_amount * 98) / 100;
+    // Swap PT for VST (cash) using the market
+    // principalForCash = true means: PT in → cash out
+    IERC20(address(PRINCIPAL_TOKEN)).approve(address(FIXED_FEE_SWAP_MARKET), _amount);
+    FIXED_FEE_SWAP_MARKET.swap(
+      _amount, // amountIn (PT)
+      true, // principalForCash = true (we're swapping principal FOR cash)
+      0 // no price limit
+    );
 
-    // Combine swapped VST with user's VST
+    // Combine swapped VST with user's existing VST
     uint256 _totalVst = VAULT_SHARE_TOKEN.balanceOf(address(this));
 
     // Split all VST into PT + YT
@@ -211,31 +227,26 @@ contract Zapper is IERC3156FlashBorrower {
     // YT stays in contract and will be sent to user after callback
   }
 
-  /// @notice Calculates and swaps portion of available VST for PT to repay flash loan.
-  /// @param _availableVST The amount of VST available to swap.
-  /// @param _neededPt The amount of PT needed to repay flash loan.
-  /// @return _swappedPT The amount of PT obtained from swapping VST.
-  /// @dev Mock implementation: uses deposit() with assumption that 1 VST = 0.5 PT + 0.5 YT.
-  ///      Since deposit() gives 1 VST = 1 PT + 1 YT, we swap 2x the needed PT to account for this.
-  ///      This ensures we always leave some VST for the user. In production, use AMM curve.
+  /// @notice Swaps VST (cash) for PT using the FixedFeeSwapMarket
+  /// @param _availableVST The amount of VST available to swap
+  /// @param _neededPt The amount of PT needed to repay flash loan (unused, swap all available)
+  /// @return _swappedPT The amount of PT obtained from swapping VST
   function _calculateAndSwapVSTForPT(uint256 _availableVST, uint256 _neededPt)
     internal
     returns (uint256 _swappedPT)
   {
-    // Mock: Assume we need 2 VST to get 1 PT (since deposit gives 1 VST = 1 PT + 1 YT,
-    // but we only need PT, so we effectively need 2 VST per 1 PT)
-    uint256 _vstToSwap = _neededPt * 2;
+    // Approve market to spend VST (cash token)
+    IERC20(address(VAULT_SHARE_TOKEN)).approve(address(FIXED_FEE_SWAP_MARKET), _availableVST);
 
-    // Cap at available VST
-    if (_vstToSwap > _availableVST) _vstToSwap = _availableVST;
+    // Swap VST (cash) for PT (principal)
+    // principalForCash = false means: cash in → PT out
+    (, _swappedPT) = FIXED_FEE_SWAP_MARKET.swap(
+      _availableVST, // amountIn (VST)
+      false, // principalForCash = false (we're swapping cash FOR principal)
+      0 // no price limit
+    );
 
-    // Use deposit to swap VST for PT+YT (mock: 1 VST = 1 PT + 1 YT)
-    IERC20(address(VAULT_SHARE_TOKEN)).approve(address(FIXED_FEE_SWAP), _vstToSwap);
-    FIXED_FEE_SWAP.deposit(_vstToSwap);
-    // When we split VST, we split it into equal amounts of YT + PT (1:1 ratio)
-    _swappedPT = _vstToSwap;
-    // YT amount is unused but left in contract
-
-    // Note: This mock always leaves VST for the user since we swap 2x the needed PT
+    // Note: If we get less PT than needed, the flash loan repayment will fail
+    // The caller should ensure sufficient VST is available for the swap
   }
 }

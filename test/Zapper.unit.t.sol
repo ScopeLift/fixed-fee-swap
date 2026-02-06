@@ -9,6 +9,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 // Internal imports
 import {Zapper} from "src/Zapper.sol";
 import {FixedFeeSwap} from "src/FixedFeeSwap.sol";
+import {FixedFeeSwapMarket} from "src/FixedFeeSwapMarket.sol";
+import {FixedFeeSwapMarketMock} from "test/mock/FixedFeeSwapMarketMock.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
 import {PrincipalToken} from "src/PrincipalToken.sol";
 import {YieldToken} from "src/YieldToken.sol";
@@ -17,10 +19,10 @@ import {ERC20Mock} from "test/mock/ERC20Mock.sol";
 contract ZapperTest is Test {
   Zapper internal zapper;
   FixedFeeSwap internal fixedFeeSwap;
+  FixedFeeSwapMarketMock internal fixedFeeSwapMarketMock;
   VaultShareToken internal vaultShareToken;
   ERC20Mock internal token0;
   ERC20Mock internal token1;
-  IPoolManager internal poolManager;
 
   address internal user;
   uint256 internal maturity;
@@ -37,15 +39,24 @@ contract ZapperTest is Test {
     vaultShareToken =
       new VaultShareToken("Vault Share Token", "VST", address(token0), address(token1));
 
-    // PoolManager is only stored in the hook; we never call into it in these tests
-    poolManager = IPoolManager(makeAddr("poolManager"));
-
     // Choose a maturity strictly in the future
     maturity = block.timestamp + 30 days;
 
     fixedFeeSwap = new FixedFeeSwap(vaultShareToken, maturity);
 
-    zapper = new Zapper(fixedFeeSwap);
+    // Create mock FixedFeeSwapMarket for PT/VST trading
+    PrincipalToken pt = fixedFeeSwap.PRINCIPAL_TOKEN();
+    fixedFeeSwapMarketMock = new FixedFeeSwapMarketMock(
+      address(pt), // token0 = PT (principal)
+      address(vaultShareToken) // token1 = VST (cash)
+    );
+
+    // Fund the mock market with tokens so it can perform swaps
+    // Use a large but reasonable amount to cover all test scenarios
+    deal(address(pt), address(fixedFeeSwapMarketMock), 1e30);
+    deal(address(vaultShareToken), address(fixedFeeSwapMarketMock), 1e30);
+
+    zapper = new Zapper(fixedFeeSwap, FixedFeeSwapMarket(address(fixedFeeSwapMarketMock)));
 
     user = makeAddr("user");
   }
@@ -55,7 +66,8 @@ contract ZapperTest is Test {
   }
 
   function _boundToRealisticAmount(uint256 _amount) internal pure returns (uint256) {
-    return bound(_amount, 1, type(uint128).max);
+    // Use a smaller max to avoid overflow issues in price calculations
+    return bound(_amount, 1, 1e24); // Max 1 million tokens with 18 decimals
   }
 
   /// @notice Helper function to deposit VST for a user and get PT and YT tokens.
@@ -89,6 +101,7 @@ contract ZapperTest is Test {
 contract Constructor is ZapperTest {
   function test_SetsAllParamsCorrectly() public view {
     assertEq(address(zapper.FIXED_FEE_SWAP()), address(fixedFeeSwap));
+    assertEq(address(zapper.FIXED_FEE_SWAP_MARKET()), address(fixedFeeSwapMarketMock));
     assertEq(address(zapper.YIELD_TOKEN()), address(fixedFeeSwap.YIELD_TOKEN()));
     assertEq(address(zapper.PRINCIPAL_TOKEN()), address(fixedFeeSwap.PRINCIPAL_TOKEN()));
     assertEq(address(zapper.VAULT_SHARE_TOKEN()), address(fixedFeeSwap.VAULT_SHARE_TOKEN()));
@@ -96,7 +109,14 @@ contract Constructor is ZapperTest {
 
   function test_RevertIf_FixedFeeSwapIsZero() public {
     vm.expectRevert(Zapper.Zapper_InvalidAddress.selector);
-    new Zapper(FixedFeeSwap(payable(address(0))));
+    new Zapper(
+      FixedFeeSwap(payable(address(0))), FixedFeeSwapMarket(address(fixedFeeSwapMarketMock))
+    );
+  }
+
+  function test_RevertIf_FixedFeeSwapMarketIsZero() public {
+    vm.expectRevert(Zapper.Zapper_InvalidAddress.selector);
+    new Zapper(fixedFeeSwap, FixedFeeSwapMarket(address(0)));
   }
 }
 
@@ -528,11 +548,13 @@ contract OnFlashLoan is ZapperTest {
   function testFuzz_BuyPathApprovesVSTForDeposit(uint256 _amount) public {
     _amount = _boundToRealisticAmount(_amount);
 
-    // Setup: Give zapper VST (simulating user's VST that was transferred)
-    deal(address(vaultShareToken), address(zapper), _amount);
-
     // Get PT contract
     PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
+
+    // Setup: Give zapper VST (simulating user's VST that was transferred)
+    deal(address(vaultShareToken), address(zapper), _amount);
+    // Give zapper PT (simulating flash loan having already transferred PT)
+    deal(address(_pt), address(zapper), _amount);
 
     // Verify initial approval is zero
     assertEq(
@@ -554,11 +576,13 @@ contract OnFlashLoan is ZapperTest {
   function testFuzz_BuyPathApprovesPTForRepayment(uint256 _amount) public {
     _amount = _boundToRealisticAmount(_amount);
 
-    // Setup: Give zapper VST (simulating user's VST that was transferred)
-    deal(address(vaultShareToken), address(zapper), _amount);
-
     // Get PT contract
     PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
+
+    // Setup: Give zapper VST (simulating user's VST that was transferred)
+    deal(address(vaultShareToken), address(zapper), _amount);
+    // Give zapper PT (simulating flash loan having already transferred PT)
+    deal(address(_pt), address(zapper), _amount);
 
     // Verify initial approval is zero
     assertEq(
