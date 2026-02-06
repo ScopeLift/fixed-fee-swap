@@ -644,7 +644,11 @@ contract FixedFeeSwapMarket is BaseHook {
     if (_currentPrice <= 0) revert FixedFeeSwap__InvalidPriceDirection();
 
     uint256 _scaledTime = _scaledTimeElapsedWad();
-    int256 _startYieldWad = _yieldWadFromPrice(_currentPrice, _scaledTime);
+    // Derive start yield directly from the integer tick to avoid exp/ln round-trip error.
+    // After integer-tick snapping, currentPrice == tickToPrice(currentTick), so the yield
+    // is exactly currentTick * WAD. Using _yieldWadFromPrice would introduce ~2000 wei of
+    // PT error per tick crossing, accumulating to insolvency over many crossings.
+    int256 _startYieldWad = int256(currentTick) * int256(WAD);
 
     int256 _nextTickPrice = tickToPrice(_nextTick);
     if (_nextTickPrice > _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
@@ -772,7 +776,8 @@ contract FixedFeeSwapMarket is BaseHook {
     if (_currentPrice <= 0) revert FixedFeeSwap__InvalidPriceDirection();
 
     uint256 _scaledTime = _scaledTimeElapsedWad();
-    int256 _startYieldWad = _yieldWadFromPrice(_currentPrice, _scaledTime);
+    // Derive start yield directly from the integer tick (same rationale as _getCashSwapAmount).
+    int256 _startYieldWad = int256(currentTick) * int256(WAD);
 
     int256 _nextTickPrice = tickToPrice(_nextTick);
     if (_nextTickPrice < _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
