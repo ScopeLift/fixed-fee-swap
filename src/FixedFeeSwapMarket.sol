@@ -49,7 +49,7 @@ struct PositionInfo {
 struct SwapContext {
   bool principalForCash;
   bool tickMovingLeft;
-  uint256 priceLimitWad;
+  int24 tickLimit;
 }
 
 contract FixedFeeSwapMarket is BaseHook {
@@ -138,6 +138,7 @@ contract FixedFeeSwapMarket is BaseHook {
   // ============ Constants ============
 
   int24 constant YIELD_PER_TICK = 1;
+  int24 constant NO_TICK_LIMIT = type(int24).max;
   uint256 constant WAD = 1e18;
   uint256 constant BIPS = 10_000;
   uint256 constant SWAP_HOOK_PARAMS_LENGTH = 96;
@@ -419,14 +420,14 @@ contract FixedFeeSwapMarket is BaseHook {
   }
 
   /// @notice Hook called before a swap is executed via PoolManager
-  /// @dev Hook data schema: `abi.encode(int256 amountIn, bool principalForCash, uint256
-  /// priceLimitWad)`. If `principalForCash` is true, TOKEN0 is input and TOKEN1 is output, meaning
+  /// @dev Hook data schema: `abi.encode(int256 amountIn, bool principalForCash, int24
+  /// tickLimit)`. If `principalForCash` is true, TOKEN0 is input and TOKEN1 is output, meaning
   /// the tick increases and price decreases.
-  /// If `priceLimitWad` is 0, the swap only stops once `amountIn` is fully consumed.
+  /// If `tickLimit` is `NO_TICK_LIMIT`, the swap only stops once `amountIn` is fully consumed.
   /// amountIn is the gross amount before fees that the trader provides.
   /// @param _sender The address initiating the swap
   /// @param _hookParams Encoded swap parameters containing amountIn, principalForCash, and
-  /// priceLimitWad @return The hook selector, a zero delta because the swap is handled internally,
+  /// tickLimit @return The hook selector, a zero delta because the swap is handled internally,
   /// and zero fee override
   function _beforeSwap(
     address _sender,
@@ -439,14 +440,14 @@ contract FixedFeeSwapMarket is BaseHook {
     }
     if (_hookParams.length != SWAP_HOOK_PARAMS_LENGTH) revert FixedFeeSwap__InvalidHookParams();
 
-    (int256 _amountIn, bool _principalForCash, uint256 _priceLimitWad) =
-      abi.decode(_hookParams, (int256, bool, uint256));
+    (int256 _amountIn, bool _principalForCash, int24 _tickLimit) =
+      abi.decode(_hookParams, (int256, bool, int24));
     if (_amountIn <= 0) revert FixedFeeSwap__SwapAmountCannotBeZero();
     if (activeLiquidity == 0) revert FixedFeeSwap__NoActiveLiquidity();
     currentPrice = tickToPrice(currentTick);
 
     (uint256 _amountInUsed, uint256 _amountOutCalculated) =
-      _executeSwapLoop(uint256(_amountIn), _principalForCash, _priceLimitWad);
+      _executeSwapLoop(uint256(_amountIn), _principalForCash, _tickLimit);
 
     // Execute token transfers
     // TOKEN0 = principal token, TOKEN1 = cash token
@@ -466,32 +467,29 @@ contract FixedFeeSwapMarket is BaseHook {
 
   // ============ Internal Functions - Swap Execution ============
 
-  /// @notice Executes the main swap loop, iterating through ticks until input is consumed or price
+  /// @notice Executes the main swap loop, iterating through ticks until input is consumed or tick
   /// limit is hit
   /// @param _amountInGross The gross input amount (before fees)
   /// @param _principalForCash True for PT→cash swap, false for cash→PT swap
-  /// @param _priceLimitWad Price limit in WAD; 0 means no limit
+  /// @param _tickLimit Tick limit; NO_TICK_LIMIT means no limit
   /// @return _amountInUsed Total gross input consumed
   /// @return _amountOutCalculated Total output tokens to send to trader
-  function _executeSwapLoop(uint256 _amountInGross, bool _principalForCash, uint256 _priceLimitWad)
+  function _executeSwapLoop(uint256 _amountInGross, bool _principalForCash, int24 _tickLimit)
     internal
     returns (uint256 _amountInUsed, uint256 _amountOutCalculated)
   {
     uint256 _amountInNet = _netOfFee(_amountInGross);
     uint256 _amountInRemainingNet = _amountInNet;
     SwapContext memory _ctx = SwapContext({
-      principalForCash: _principalForCash,
-      tickMovingLeft: !_principalForCash,
-      priceLimitWad: _priceLimitWad
+      principalForCash: _principalForCash, tickMovingLeft: !_principalForCash, tickLimit: _tickLimit
     });
 
     while (_amountInRemainingNet != 0) {
-      // Slippage protection: stop the swap if the price has moved past the caller's limit.
-      // For principal→cash swaps, price decreases so we stop when price falls to the limit.
-      // For cash→principal swaps, price increases so we stop when price rises to the limit.
-      if (_ctx.priceLimitWad != 0) {
-        uint256 _price = uint256(currentPrice);
-        if (_ctx.principalForCash ? _price <= _ctx.priceLimitWad : _price >= _ctx.priceLimitWad) {
+      // Slippage protection: stop the swap if the tick has moved past the caller's limit.
+      // For principal→cash swaps, tick increases so we stop when tick reaches the limit.
+      // For cash→principal swaps, tick decreases so we stop when tick reaches the limit.
+      if (_ctx.tickLimit != NO_TICK_LIMIT) {
+        if (_ctx.principalForCash ? currentTick >= _ctx.tickLimit : currentTick <= _ctx.tickLimit) {
           break;
         }
       }
@@ -538,7 +536,7 @@ contract FixedFeeSwapMarket is BaseHook {
     SwapContext memory _ctx
   ) internal returns (uint256, uint256, int24) {
     (uint256 _netConsumed, uint256 _amountOut, int256 _stepPrice, int24 _stepTick) = _calculateSwap(
-      _amountInNet.toInt256(), currentPrice, _nextTick, _ctx.principalForCash, _ctx.priceLimitWad
+      _amountInNet.toInt256(), currentPrice, _nextTick, _ctx.principalForCash, _ctx.tickLimit
     );
     // If the swap step couldn't move a full tick (sub-tick snap to zero), stop gracefully.
     if (_netConsumed == 0 || _amountOut == 0) return (0, 0, currentTick);
@@ -577,7 +575,7 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @param _currentPrice The current price at the start of this step
   /// @param _nextTick The next initialized tick boundary
   /// @param _principalToCash True for PT→cash, false for cash→PT
-  /// @param _priceLimitWad Price limit in WAD; 0 means no limit
+  /// @param _tickLimit Tick limit; NO_TICK_LIMIT means no limit
   /// @return amountInConsumed Amount of input consumed
   /// @return amountOut Amount of output produced
   /// @return newPrice Price after the swap step
@@ -587,12 +585,12 @@ contract FixedFeeSwapMarket is BaseHook {
     int256 _currentPrice,
     int24 _nextTick,
     bool _principalToCash,
-    uint256 _priceLimitWad
+    int24 _tickLimit
   ) internal view returns (uint256, uint256, int256, int24) {
     if (_principalToCash) {
-      return _getCashSwapAmount(_amountIn, _currentPrice, _nextTick, _priceLimitWad);
+      return _getCashSwapAmount(_amountIn, _currentPrice, _nextTick, _tickLimit);
     }
-    return _getPrincipalSwapAmount(_amountIn, _currentPrice, _nextTick, _priceLimitWad);
+    return _getPrincipalSwapAmount(_amountIn, _currentPrice, _nextTick, _tickLimit);
   }
 
   // ============ Internal Functions - PT→Cash Swap Math ============
@@ -626,7 +624,7 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @param _amountIn The amount of PT available to trade for cash
   /// @param _currentPrice The price calculated with the current yield tick
   /// @param _nextTick The next initialized tick boundary
-  /// @param _priceLimitWad Price limit in WAD; 0 means no limit
+  /// @param _tickLimit Tick limit; NO_TICK_LIMIT means no limit
   /// @return _amountInConsumed PT consumed in this step
   /// @return _cashOut Cash tokens to send to the trader
   /// @return _newPrice Price after this step
@@ -635,7 +633,7 @@ contract FixedFeeSwapMarket is BaseHook {
     int256 _amountIn,
     int256 _currentPrice,
     int24 _nextTick,
-    uint256 _priceLimitWad
+    int24 _tickLimit
   )
     internal
     view
@@ -651,17 +649,16 @@ contract FixedFeeSwapMarket is BaseHook {
     // PT error per tick crossing, accumulating to insolvency over many crossings.
     int256 _startYieldWad = int256(currentTick) * int256(WAD);
 
-    int256 _nextTickPrice = tickToPrice(_nextTick);
-    if (_nextTickPrice > _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
-
-    // For PT→cash, price decreases so the limit is a minimum price.
-    // Use the limit as target if it's higher (closer) than the tick boundary.
-    int256 _targetPrice = _nextTickPrice;
+    // For PT→cash, tick increases. Use the tick limit as target if it's lower (closer) than
+    // the next tick boundary.
     int256 _targetYieldWad = int256(_nextTick) * int256(WAD);
+    int256 _targetPrice = tickToPrice(_nextTick);
+    if (_targetPrice > _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
     if (_targetYieldWad <= _startYieldWad) revert FixedFeeSwap__InvalidTickTraversal();
-    if (_priceLimitWad != 0 && int256(_priceLimitWad) > _targetPrice) {
-      _targetPrice = int256(_priceLimitWad);
-      _targetYieldWad = _yieldWadFromPrice(_targetPrice, _scaledTime);
+    if (_tickLimit != NO_TICK_LIMIT && _tickLimit < _nextTick) {
+      _nextTick = _tickLimit;
+      _targetYieldWad = int256(_tickLimit) * int256(WAD);
+      _targetPrice = _priceFromYieldWad(_targetYieldWad, _scaledTime);
     }
 
     if (_targetPrice > _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
@@ -674,17 +671,8 @@ contract FixedFeeSwapMarket is BaseHook {
 
     if (uint256(_amountIn) >= _principalToTarget) {
       _amountInConsumed = _principalToTarget;
-      if (_targetPrice == _nextTickPrice) {
-        // Exact tick boundary — no snapping needed
-        _newTick = _nextTick;
-        _newPrice = _targetPrice;
-      } else {
-        // Price limit mid-tick — snap to floored tick for consistent accounting
-        _newTick = _wadToTick(_targetYieldWad);
-        _newPrice = _priceFromYieldWad(int256(_newTick) * int256(WAD), _scaledTime);
-        // If snapping pushed the price back to or past the start, the limit is unreachable
-        if (_newPrice >= _currentPrice) return (0, 0, 0, 0);
-      }
+      _newTick = _nextTick;
+      _newPrice = _targetPrice;
       _cashOut = FixedPointMathLib.mulDiv(
         uint256(activeLiquidity), uint256(_currentPrice - _newPrice), _scaledTime
       );
@@ -758,7 +746,7 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @param _amountIn The amount of cash available to trade for PT
   /// @param _currentPrice The price calculated with the current yield tick
   /// @param _nextTick The next initialized tick boundary
-  /// @param _priceLimitWad Price limit in WAD; 0 means no limit
+  /// @param _tickLimit Tick limit; NO_TICK_LIMIT means no limit
   /// @return _amountInConsumed Cash consumed in this step
   /// @return _principalOut PT tokens to send to the trader
   /// @return _newPrice Price after this step
@@ -767,7 +755,7 @@ contract FixedFeeSwapMarket is BaseHook {
     int256 _amountIn,
     int256 _currentPrice,
     int24 _nextTick,
-    uint256 _priceLimitWad
+    int24 _tickLimit
   )
     internal
     view
@@ -780,17 +768,16 @@ contract FixedFeeSwapMarket is BaseHook {
     // Derive start yield directly from the integer tick (same rationale as _getCashSwapAmount).
     int256 _startYieldWad = int256(currentTick) * int256(WAD);
 
-    int256 _nextTickPrice = tickToPrice(_nextTick);
-    if (_nextTickPrice < _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
-
-    // For cash→PT, price increases so the limit is a maximum price.
-    // Use the limit as target if it's lower (closer) than the tick boundary.
-    int256 _targetPrice = _nextTickPrice;
+    // For cash→PT, tick decreases. Use the tick limit as target if it's higher (closer) than
+    // the next tick boundary.
     int256 _targetYieldWad = int256(_nextTick) * int256(WAD);
+    int256 _targetPrice = tickToPrice(_nextTick);
+    if (_targetPrice < _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
     if (_targetYieldWad >= _startYieldWad) revert FixedFeeSwap__InvalidTickTraversal();
-    if (_priceLimitWad != 0 && int256(_priceLimitWad) < _targetPrice) {
-      _targetPrice = int256(_priceLimitWad);
-      _targetYieldWad = _yieldWadFromPrice(_targetPrice, _scaledTime);
+    if (_tickLimit != NO_TICK_LIMIT && _tickLimit > _nextTick) {
+      _nextTick = _tickLimit;
+      _targetYieldWad = int256(_tickLimit) * int256(WAD);
+      _targetPrice = _priceFromYieldWad(_targetYieldWad, _scaledTime);
     }
 
     if (_targetPrice < _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
@@ -803,21 +790,9 @@ contract FixedFeeSwapMarket is BaseHook {
 
     if (uint256(_amountIn) >= _cashInToTarget) {
       _amountInConsumed = _cashInToTarget;
-      uint256 _yieldDeltaWad;
-      if (_targetPrice == _nextTickPrice) {
-        // Exact tick boundary — no snapping needed
-        _newTick = _nextTick;
-        _newPrice = _targetPrice;
-        _yieldDeltaWad = uint256(_startYieldWad - _targetYieldWad);
-      } else {
-        // Price limit mid-tick — snap to ceiled tick (Cash→PT: yield decreasing, ceil rounds in
-        // pool's favor)
-        _newTick = _wadToTickCeil(_targetYieldWad);
-        _newPrice = _priceFromYieldWad(int256(_newTick) * int256(WAD), _scaledTime);
-        // If snapping pushed the price back to or past the start, the limit is unreachable
-        if (_newPrice <= _currentPrice) return (0, 0, 0, 0);
-        _yieldDeltaWad = uint256(_startYieldWad - int256(_newTick) * int256(WAD));
-      }
+      _newTick = _nextTick;
+      _newPrice = _targetPrice;
+      uint256 _yieldDeltaWad = uint256(_startYieldWad - _targetYieldWad);
       _principalOut = FixedPointMathLib.mulDiv(uint256(activeLiquidity), _yieldDeltaWad, BIPS * WAD);
       return (_amountInConsumed, _principalOut, _newPrice, _newTick);
     }
