@@ -216,6 +216,8 @@ contract Burn is YieldTokenTest {
     uint256 _collectedFeeToken1
   ) public {
     _assumeSafeAddress(_user);
+    // User cannot be hook because fee transfers from hook to hook are no-ops
+    vm.assume(_user != hook);
     _mintAmount = _boundMintAmount(_mintAmount);
     _collectedFeeToken0 = _boundFeeAmount(_collectedFeeToken0);
     _collectedFeeToken1 = _boundFeeAmount(_collectedFeeToken1);
