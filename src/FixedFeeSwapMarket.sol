@@ -126,8 +126,8 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @notice Thrown when a swap step produces zero output for nonzero input
   error FixedFeeSwap__SwapStepProducedZeroOut();
 
-  /// @notice Thrown at START_TIME when no time has elapsed, to prevent division by zero
-  error FixedFeeSwap__TimeElapsedIsZero();
+  /// @notice Thrown when a swap or time-dependent calculation is attempted at or after maturity
+  error FixedFeeSwap__MarketExpired();
 
   /// @notice Thrown when a tick's gross liquidity would underflow
   error FixedFeeSwap__TickLiquidityGrossUnderflow();
@@ -226,16 +226,16 @@ contract FixedFeeSwapMarket is BaseHook {
   }
 
   /// @notice Converts a tick to its corresponding discount factor price
-  /// @dev Price is calculated as exp(-yield * scaledTimeElapsed) where yield = tick *
-  /// YIELD_PER_TICK
+  /// @dev Price is calculated as exp(-yield * scaledTimeRemaining) where yield = tick *
+  /// YIELD_PER_TICK. At START_TIME, remaining = duration so prices are fully discounted.
+  /// At MATURITY, all prices converge to 1.0 (PT redeemable 1:1).
   /// @param _tick The tick value to convert
   /// @return The price as a WAD-scaled discount factor, where 1e18 represents a price of 1.0
   function tickToPrice(int256 _tick) public view returns (int256) {
-    uint256 _elapsed = block.timestamp - START_TIME;
-    if (_elapsed == 0) return int256(WAD);
+    if (block.timestamp >= MATURITY) return int256(WAD);
+    uint256 _remaining = MATURITY - block.timestamp;
     uint256 _duration = MATURITY - START_TIME;
-    if (_elapsed > _duration) _elapsed = _duration;
-    uint256 _scaledTime = (_elapsed * WAD) / _duration;
+    uint256 _scaledTime = (_remaining * WAD) / _duration;
     return _priceFromYieldWad(_tick * YIELD_PER_TICK * int256(WAD), _scaledTime);
   }
 
@@ -443,6 +443,7 @@ contract FixedFeeSwapMarket is BaseHook {
     (int256 _amountIn, bool _principalForCash, int24 _tickLimit) =
       abi.decode(_hookParams, (int256, bool, int24));
     if (_amountIn <= 0) revert FixedFeeSwap__SwapAmountCannotBeZero();
+    if (block.timestamp >= MATURITY) revert FixedFeeSwap__MarketExpired();
     if (activeLiquidity == 0) revert FixedFeeSwap__NoActiveLiquidity();
     currentPrice = tickToPrice(currentTick);
 
@@ -642,7 +643,7 @@ contract FixedFeeSwapMarket is BaseHook {
     if (_amountIn <= 0) revert FixedFeeSwap__SwapAmountCannotBeZero();
     if (_currentPrice <= 0) revert FixedFeeSwap__InvalidPriceDirection();
 
-    uint256 _scaledTime = _scaledTimeElapsedWad();
+    uint256 _scaledTime = _scaledTimeRemainingWad();
     // Derive start yield directly from the integer tick to avoid exp/ln round-trip error.
     // After integer-tick snapping, currentPrice == tickToPrice(currentTick), so the yield
     // is exactly currentTick * WAD. Using _yieldWadFromPrice would introduce ~2000 wei of
@@ -701,7 +702,7 @@ contract FixedFeeSwapMarket is BaseHook {
     returns (uint256 _amountInConsumed, uint256 _cashOut, int256 _newPrice, int24 _newTick)
   {
     _amountInConsumed = _amountIn;
-    uint256 _scaledTime = _scaledTimeElapsedWad();
+    uint256 _scaledTime = _scaledTimeRemainingWad();
 
     // Yield movement is linear in PT: Δyield = PT_in * BIPS / L
     int256 _endYieldWad = _startYieldWad
@@ -764,7 +765,7 @@ contract FixedFeeSwapMarket is BaseHook {
     if (_amountIn <= 0) revert FixedFeeSwap__SwapAmountCannotBeZero();
     if (_currentPrice <= 0) revert FixedFeeSwap__InvalidPriceDirection();
 
-    uint256 _scaledTime = _scaledTimeElapsedWad();
+    uint256 _scaledTime = _scaledTimeRemainingWad();
     // Derive start yield directly from the integer tick (same rationale as _getCashSwapAmount).
     int256 _startYieldWad = int256(currentTick) * int256(WAD);
 
@@ -819,7 +820,7 @@ contract FixedFeeSwapMarket is BaseHook {
     returns (uint256 _amountInConsumed, uint256 _principalOut, int256 _newPrice, int24 _newTick)
   {
     _amountInConsumed = _amountIn;
-    uint256 _scaledTime = _scaledTimeElapsedWad();
+    uint256 _scaledTime = _scaledTimeRemainingWad();
 
     // newPrice = startPrice + (scaledTime / L) * cashIn
     int256 _exactNewPrice = _startPrice
@@ -994,7 +995,10 @@ contract FixedFeeSwapMarket is BaseHook {
   }
 
   /// @notice Calculates the cash token amount for a liquidity position across a tick range
-  /// @dev Amount depends on time: amount = liquidity * (priceLower - priceUpper) / scaledTime
+  /// @dev Uses elapsed-time pricing for LP accounting to guarantee solvency. The elapsed-time
+  /// cash component decreases over time, ensuring the contract always holds enough cash to
+  /// cover withdrawals. Swap pricing uses remaining-time independently.
+  /// amount = liquidity * (priceLower - priceUpper) / scaledTimeElapsed
   /// @param _lowerYield The lower tick boundary of the range
   /// @param _upperYield The upper tick boundary of the range
   /// @param _liquidity The liquidity amount, positive for mint and negative for burn
@@ -1007,13 +1011,32 @@ contract FixedFeeSwapMarket is BaseHook {
   {
     int256 _liq = int256(_liquidity);
     uint256 _absLiquidity = _liq.abs();
-    int256 _upperTickPrice = tickToPrice(_upperYield);
-    int256 _lowerTickPrice = tickToPrice(_lowerYield);
     uint256 _scaledTimeWad = _scaledTimeElapsedWad();
+    int256 _upperTickPrice = _priceElapsed(int256(_upperYield) * int256(WAD), _scaledTimeWad);
+    int256 _lowerTickPrice = _priceElapsed(int256(_lowerYield) * int256(WAD), _scaledTimeWad);
     if (_lowerTickPrice < _upperTickPrice) revert FixedFeeSwap__InvalidPriceDirection();
     uint256 _priceDiff = uint256(_lowerTickPrice - _upperTickPrice);
     uint256 _amount = FixedPointMathLib.mulDiv(_absLiquidity, _priceDiff, _scaledTimeWad);
     return _liq < 0 ? -int256(_amount) : int256(_amount);
+  }
+
+  /// @notice Calculates the scaled time elapsed since market start as a fraction of total duration
+  /// @dev Used exclusively for LP accounting to ensure solvency. Returns WAD at maturity.
+  /// @return The scaled time elapsed in WAD precision
+  function _scaledTimeElapsedWad() internal view returns (uint256) {
+    uint256 _elapsed = block.timestamp - START_TIME;
+    if (_elapsed == 0) return 1; // Avoid division by zero; 1 wei of elapsed time
+    uint256 _duration = MATURITY - START_TIME;
+    if (_elapsed > _duration) _elapsed = _duration;
+    return (_elapsed * WAD) / _duration;
+  }
+
+  /// @notice Computes elapsed-time price for LP accounting: exp(-yield / BIPS * scaledTimeElapsed)
+  /// @param _yieldWad The yield in WAD-scaled basis points
+  /// @param _scaledTime The scaled elapsed time
+  /// @return The discount factor price in WAD
+  function _priceElapsed(int256 _yieldWad, uint256 _scaledTime) internal pure returns (int256) {
+    return _priceFromYieldWad(_yieldWad, _scaledTime);
   }
 
   // ============ Internal Functions - Fee Tracking ============
@@ -1100,16 +1123,15 @@ contract FixedFeeSwapMarket is BaseHook {
 
   // ============ Internal Functions - Price/Yield Conversions ============
 
-  /// @notice Calculates the scaled time elapsed since market start as a fraction of total duration
-  /// @dev Returns a WAD-scaled value where 1e18 represents the full duration from START_TIME to
-  /// MATURITY @return The scaled time elapsed in WAD precision, where 1e18 represents 100% of the
-  /// duration
-  function _scaledTimeElapsedWad() internal view returns (uint256) {
-    uint256 _elapsed = block.timestamp - START_TIME;
-    if (_elapsed == 0) revert FixedFeeSwap__TimeElapsedIsZero();
+  /// @notice Calculates the scaled time remaining until maturity as a fraction of total duration
+  /// @dev Returns a WAD-scaled value where 1e18 represents the full duration remaining.
+  /// At START_TIME returns WAD (full duration). Reverts at or after MATURITY.
+  /// @return The scaled time remaining in WAD precision
+  function _scaledTimeRemainingWad() internal view returns (uint256) {
+    if (block.timestamp >= MATURITY) revert FixedFeeSwap__MarketExpired();
+    uint256 _remaining = MATURITY - block.timestamp;
     uint256 _duration = MATURITY - START_TIME;
-    if (_elapsed > _duration) _elapsed = _duration;
-    return (_elapsed * WAD) / _duration;
+    return (_remaining * WAD) / _duration;
   }
 
   /// @notice Converts a WAD-scaled yield value to an int24 tick using floor division
@@ -1134,7 +1156,7 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @notice Derives the WAD-scaled yield from a discount factor price
   /// @dev Uses the formula: yield = -ln(price) / scaledTime * BIPS
   /// @param _price The discount factor price in WAD
-  /// @param _scaledTime The scaled time elapsed since market start
+  /// @param _scaledTime The scaled time remaining until maturity
   /// @return The yield in WAD-scaled basis points
   function _yieldWadFromPrice(int256 _price, uint256 _scaledTime) internal pure returns (int256) {
     int256 _lnP = FixedPointMathLib.lnWad(_price);
@@ -1147,7 +1169,7 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @notice Derives a discount factor price from a WAD-scaled yield
   /// @dev Uses the formula: price = exp(-yield / BIPS * scaledTime)
   /// @param _yieldWad The yield in WAD-scaled basis points
-  /// @param _scaledTime The scaled time elapsed since market start
+  /// @param _scaledTime The scaled time remaining until maturity
   /// @return The discount factor price in WAD
   function _priceFromYieldWad(int256 _yieldWad, uint256 _scaledTime)
     internal

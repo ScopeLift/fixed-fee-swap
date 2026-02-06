@@ -5,7 +5,7 @@ import {FixedFeeSwapMarket, TickInfo, PositionInfo} from "src/FixedFeeSwapMarket
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
-import {SwapParams} from "v4-core/types/PoolOperation.sol";
+import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 import {BeforeSwapDelta} from "v4-core/types/BeforeSwapDelta.sol";
 
 contract FixedFeeSwapMarketHarness is FixedFeeSwapMarket {
@@ -71,6 +71,24 @@ contract FixedFeeSwapMarketHarness is FixedFeeSwapMarket {
     bytes calldata hookParams
   ) external returns (bytes4 selector, BeforeSwapDelta delta, uint24 fee) {
     return _beforeSwap(sender, key, params, hookParams);
+  }
+
+  function exposed_beforeAddLiquidity(
+    address sender,
+    PoolKey calldata key,
+    ModifyLiquidityParams calldata params,
+    bytes calldata hookData
+  ) external returns (bytes4) {
+    return _beforeAddLiquidity(sender, key, params, hookData);
+  }
+
+  function exposed_beforeRemoveLiquidity(
+    address sender,
+    PoolKey calldata key,
+    ModifyLiquidityParams calldata params,
+    bytes calldata hookData
+  ) external returns (bytes4) {
+    return _beforeRemoveLiquidity(sender, key, params, hookData);
   }
 
   // State getters

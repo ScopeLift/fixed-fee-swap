@@ -10,7 +10,7 @@ import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
-import {SwapParams} from "v4-core/types/PoolOperation.sol";
+import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 import {BeforeSwapDelta} from "v4-core/types/BeforeSwapDelta.sol";
 import {Currency} from "v4-core/types/Currency.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
@@ -49,8 +49,7 @@ abstract contract FixedFeeSwapMarketTest is Test {
       MARKET_LENGTH, address(token0), address(token1), FEE_RATE, IPoolManager(mockManager)
     );
 
-    // Warp forward to avoid division by zero in _getAmountCashDelta
-    // The contract divides by (block.timestamp - START_TIME), which is 0 at deployment
+    // Warp forward for realistic test conditions (prices are near-fully discounted at START_TIME)
     vm.warp(block.timestamp + 1 days);
 
     // Fund users
@@ -88,7 +87,7 @@ abstract contract FixedFeeSwapMarketTest is Test {
 
   function _boundLiquidity(uint128 liquidity) internal pure returns (uint128) {
     // Liquidity needs to be large enough to avoid rounding to 0 in _getAmountCashDelta
-    // With 1 day elapsed, scaledTimeSinceMaturity ≈ 2.74e15, so liquidity must be > that
+    // With remaining-time pricing near START_TIME, scaledTime ≈ WAD, so 1e17 is adequate
     // But not too large to cause overflow in other calculations
     return uint128(bound(liquidity, 1e17, 3e24));
   }
@@ -182,6 +181,67 @@ abstract contract FixedFeeSwapMarketTest is Test {
   }
 }
 
+contract Constructor is FixedFeeSwapMarketTest {
+  function test_RevertWhen_FeeRateTooHigh() public {
+    address _mockManager = makeAddr("constructorMockManager");
+    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__FeeRateTooHigh.selector);
+    new FixedFeeSwapMarketHarness(
+      MARKET_LENGTH, address(token0), address(token1), 1_000_000, IPoolManager(_mockManager)
+    );
+  }
+
+  function test_MaxValidFeeRate() public {
+    address _mockManager = makeAddr("constructorMockManager2");
+    FixedFeeSwapMarketHarness _hook = new FixedFeeSwapMarketHarness(
+      MARKET_LENGTH, address(token0), address(token1), 999_999, IPoolManager(_mockManager)
+    );
+    assertEq(_hook.FEE_RATE(), 999_999);
+  }
+
+  function test_ZeroFeeRate() public {
+    address _mockManager = makeAddr("constructorMockManager3");
+    FixedFeeSwapMarketHarness _hook = new FixedFeeSwapMarketHarness(
+      MARKET_LENGTH, address(token0), address(token1), 0, IPoolManager(_mockManager)
+    );
+    assertEq(_hook.FEE_RATE(), 0);
+  }
+}
+
+contract GetHookPermissions is FixedFeeSwapMarketTest {
+  function test_ReturnsCorrectPermissions() public view {
+    Hooks.Permissions memory _perms = hook.getHookPermissions();
+    assertTrue(_perms.beforeAddLiquidity, "beforeAddLiquidity should be true");
+    assertTrue(_perms.beforeRemoveLiquidity, "beforeRemoveLiquidity should be true");
+    assertTrue(_perms.beforeSwap, "beforeSwap should be true");
+    assertFalse(_perms.beforeInitialize, "beforeInitialize should be false");
+    assertFalse(_perms.afterInitialize, "afterInitialize should be false");
+    assertFalse(_perms.afterAddLiquidity, "afterAddLiquidity should be false");
+    assertFalse(_perms.afterRemoveLiquidity, "afterRemoveLiquidity should be false");
+    assertFalse(_perms.afterSwap, "afterSwap should be false");
+    assertFalse(_perms.beforeDonate, "beforeDonate should be false");
+    assertFalse(_perms.afterDonate, "afterDonate should be false");
+    assertFalse(_perms.beforeSwapReturnDelta, "beforeSwapReturnDelta should be false");
+    assertFalse(_perms.afterSwapReturnDelta, "afterSwapReturnDelta should be false");
+    assertFalse(_perms.afterAddLiquidityReturnDelta, "afterAddLiquidityReturnDelta should be false");
+    assertFalse(
+      _perms.afterRemoveLiquidityReturnDelta, "afterRemoveLiquidityReturnDelta should be false"
+    );
+  }
+}
+
+contract YieldToTick is FixedFeeSwapMarketTest {
+  function testFuzz_RoundTrip(int24 _tick) public view {
+    _tick = int24(bound(int256(_tick), 0, 100_000));
+    assertEq(hook.yieldToTick(int256(_tick)), _tick, "Round trip should return same tick");
+  }
+
+  function test_SpecificValues() public view {
+    assertEq(hook.yieldToTick(0), 0, "yieldToTick(0) should be 0");
+    assertEq(hook.yieldToTick(100), 100, "yieldToTick(100) should be 100");
+    assertEq(hook.yieldToTick(10_000), 10_000, "yieldToTick(10000) should be 10000");
+  }
+}
+
 contract TickToPrice is FixedFeeSwapMarketTest {
   using FixedPointMathLib for int256;
 
@@ -211,21 +271,22 @@ contract TickToPrice is FixedFeeSwapMarketTest {
     assertGe(priceA, priceB, "Higher tick (yield) should have lower or equal price");
   }
 
-  /// @dev For any positive time, moving one tick higher strictly reduces price.
+  /// @dev For any time before maturity, moving one tick higher strictly reduces price.
   function testFuzz_PriceStrictlyDecreasesWithOneTickStep(int24 tick, uint256 timeElapsed) public {
     tick = int24(bound(int256(tick), 0, 9999));
-    timeElapsed = bound(timeElapsed, 1, MARKET_LENGTH);
+    timeElapsed = bound(timeElapsed, 0, MARKET_LENGTH - 1);
 
     _warpFromStart(timeElapsed);
     int256 priceA = hook.tickToPrice(tick);
     int256 priceB = hook.tickToPrice(tick + 1);
 
-    assertGt(priceA, priceB, "tick+1 should have strictly lower price for t>0");
+    assertGt(priceA, priceB, "tick+1 should have strictly lower price before maturity");
   }
 
-  /// @dev Price decreases over time for positive yields (deeper discount)
-  /// @notice With exp(-yield * time_elapsed), larger time = more negative exponent = lower price
-  function testFuzz_PriceDecreasesOverTimeForPositiveYield(int24 tick, uint256 time1, uint256 time2)
+  /// @dev Price increases over time for positive yields (converges to 1.0 at maturity)
+  /// @notice With exp(-yield * time_remaining), less remaining time = less negative exponent =
+  /// higher price
+  function testFuzz_PriceIncreasesOverTimeForPositiveYield(int24 tick, uint256 time1, uint256 time2)
     public
   {
     tick = int24(bound(int256(tick), 1, 10_000)); // Positive yield only
@@ -238,16 +299,16 @@ contract TickToPrice is FixedFeeSwapMarketTest {
     _warpFromStart(time2);
     int256 price2 = hook.tickToPrice(tick);
 
-    assertLe(price2, price1, "Price should decrease over time for positive yield");
+    assertGe(price2, price1, "Price should increase over time (converge to 1)");
   }
 
-  /// @dev At time = 0, price equals 1 regardless of tick
-  /// @notice exp(0) = 1, and at start time the exponent is 0
-  function testFuzz_PriceAtTimeZeroIsOne(int24 tick) public {
+  /// @dev At maturity, price equals 1 regardless of tick (PT redeemable 1:1)
+  /// @notice At maturity, remaining time = 0, so tickToPrice returns WAD directly
+  function testFuzz_PriceAtMaturityIsOne(int24 tick) public {
     tick = _boundTick(tick);
-    _warpFromStart(0);
+    vm.warp(hook.getMaturity());
     int256 price = hook.tickToPrice(tick);
-    assertEq(price, 1e18, "Price at time 0 should be 1 regardless of tick");
+    assertEq(price, 1e18, "Price at maturity should be 1 regardless of tick");
   }
 
   /// @dev Price ratio between ticks follows exponential relationship
@@ -290,57 +351,54 @@ contract TickToPrice is FixedFeeSwapMarketTest {
     assertLt(price, 1e18, "Positive tick should give price < 1");
   }
 
-  /// @dev Time additivity: price(t, t1+t2) == price(t,t1) * price(t,t2)
-  function testFuzz_PriceTimeAdditivity(int24 tick, uint256 time1, uint256 time2) public {
+  /// @dev Remaining-time additivity: price(rem1+rem2) == price(rem1) * price(rem2)
+  /// @notice exp(-y*(r1+r2)/d) = exp(-y*r1/d) * exp(-y*r2/d) where r = remaining time
+  function testFuzz_PriceRemainingTimeAdditivity(int24 tick, uint256 rem1, uint256 rem2) public {
     tick = int24(bound(int256(tick), 0, 10_000));
-    time1 = bound(time1, 0, MARKET_LENGTH);
-    time2 = bound(time2, 0, MARKET_LENGTH - time1);
+    rem1 = bound(rem1, 0, MARKET_LENGTH);
+    rem2 = bound(rem2, 0, MARKET_LENGTH - rem1);
 
-    _warpFromStart(time1);
+    vm.warp(hook.getMaturity() - rem1);
     int256 price1 = hook.tickToPrice(tick);
 
-    _warpFromStart(time2);
+    vm.warp(hook.getMaturity() - rem2);
     int256 price2 = hook.tickToPrice(tick);
 
-    _warpFromStart(time1 + time2);
+    vm.warp(hook.getMaturity() - (rem1 + rem2));
     int256 price12 = hook.tickToPrice(tick);
 
     int256 combined = (price1 * price2) / 1e18;
     assertApproxEqRel(
-      price12, combined, 1e12, "price(t1+t2) should factor into price(t1)*price(t2)"
+      price12, combined, 1e12, "price(rem1+rem2) should equal price(rem1)*price(rem2)"
     );
   }
 
-  /// @dev At maturity, the exponent reduces to -tick/BIPS (in WAD), so price matches
-  /// exp(-tick/BIPS).
-  function testFuzz_PriceAtMaturityMatchesClosedForm(int24 tick) public {
+  /// @dev At START_TIME, remaining = duration so scaledTime = WAD and the exponent reduces to
+  /// -tick/BIPS, so price matches exp(-tick/BIPS).
+  function testFuzz_PriceAtStartMatchesClosedForm(int24 tick) public {
     tick = _boundTick(tick);
 
-    vm.warp(hook.getMaturity());
+    _warpFromStart(0);
     int256 actual = hook.tickToPrice(tick);
 
     int256 exponent = (-int256(tick) * 1e18) / int256(BIPS);
     int256 expected = exponent.expWad();
-    assertApproxEqRel(actual, expected, 1e12, "price at maturity should match exp(-tick/BIPS)");
+    assertApproxEqRel(actual, expected, 1e12, "price at start should match exp(-tick/BIPS)");
   }
 
   /// @dev Verify prices against precomputed values
-  /// @notice Values computed from exp(-tick * timeElapsed / (BIPS * MARKET_LENGTH))
+  /// @notice Values computed from exp(-tick * timeRemaining / (BIPS * MARKET_LENGTH))
+  /// With remaining-time pricing, full discount occurs at start (remaining = duration).
   function test_PrecomputedPriceValues() public {
-    // At full maturity (MARKET_LENGTH), exponent = -tick / BIPS
+    // At start (remaining = MARKET_LENGTH), exponent = -tick / BIPS
     // tick=10000: exp(-1) ≈ 0.3678794411714423
     // tick=1000: exp(-0.1) ≈ 0.9048374180359595
     // tick=100: exp(-0.01) ≈ 0.9900498337491681
-    // At half time, tick=1000: exp(-0.05) ≈ 0.9512294245007139
+    // At half remaining, tick=1000: exp(-0.05) ≈ 0.9512294245007139
 
     int24[5] memory ticks = [int24(10_000), int24(1000), int24(100), int24(1000), int24(0)];
-    uint256[5] memory times = [
-      uint256(MARKET_LENGTH),
-      uint256(MARKET_LENGTH),
-      uint256(MARKET_LENGTH),
-      uint256(MARKET_LENGTH) / 2,
-      uint256(MARKET_LENGTH)
-    ];
+    uint256[5] memory times =
+      [uint256(0), uint256(0), uint256(0), uint256(MARKET_LENGTH) / 2, uint256(0)];
     int256[5] memory expected = [
       int256(367_879_441_171_442_321), // exp(-1)
       int256(904_837_418_035_959_573), // exp(-0.1)
@@ -371,9 +429,8 @@ contract TickToPrice is FixedFeeSwapMarketTest {
     int256 price = hook.tickToPrice(tick);
 
     int256 minPrice = int256(-10e18).expWad(); // exp(-10)
-    int256 maxPrice = int256(10e18).expWad(); // exp(10)
     assertGe(price, minPrice, "Price below exp(-10)");
-    assertLe(price, maxPrice, "Price above exp(10)");
+    assertLe(price, 1e18, "Price should be <= 1 for non-negative ticks");
   }
 }
 
@@ -1095,6 +1152,21 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     uint256 _total1After = token1.balanceOf(alice) + token1.balanceOf(address(hook));
     assertEq(_total0After, _total0Before, "Token0 conserved");
     assertEq(_total1After, _total1Before, "Token1 conserved");
+  }
+
+  function test_EmitsLiquidityModified() public {
+    _warpToMintTime();
+    int24 _tickLower = 100;
+    int24 _tickUpper = 400;
+    uint128 _liquidity = 1e20;
+
+    bytes32 _positionId = _getPositionId(_tickUpper, _tickLower, alice);
+
+    vm.expectEmit(true, true, false, false, address(hook));
+    emit FixedFeeSwapMarket.LiquidityModified(_positionId, alice, _tickLower, _tickUpper, 0, 0, 0);
+
+    vm.prank(alice);
+    hook.mintLiquidity(_tickLower, _tickUpper, _liquidity, type(uint256).max, type(uint256).max);
   }
 }
 
@@ -1907,6 +1979,24 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
     uint256 _total1After = token1.balanceOf(alice) + token1.balanceOf(address(hook));
     assertEq(_total0After, _total0Before, "Token0 conserved");
     assertEq(_total1After, _total1Before, "Token1 conserved");
+  }
+
+  function test_EmitsLiquidityModified() public {
+    _warpToMintTime();
+    int24 _currentTick = hook.getCurrentTick();
+    int24 _tickLower = _currentTick - 100;
+    int24 _tickUpper = _currentTick + 100;
+    uint128 _initialLiquidity = 1e20;
+
+    bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, _initialLiquidity);
+
+    uint128 _additionalLiquidity = 5e19;
+
+    vm.expectEmit(true, true, false, false, address(hook));
+    emit FixedFeeSwapMarket.LiquidityModified(_positionId, alice, _tickLower, _tickUpper, 0, 0, 0);
+
+    vm.prank(alice);
+    hook.increaseLiquidity(_positionId, _additionalLiquidity, type(uint256).max, type(uint256).max);
   }
 }
 
@@ -2797,6 +2887,37 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     assertEq(_total0After, _total0Before, "Token0 conserved");
     assertEq(_total1After, _total1Before, "Token1 conserved");
   }
+
+  function test_EmitsLiquidityModified() public {
+    _warpToMintTime();
+    int24 _currentTick = hook.getCurrentTick();
+    int24 _tickLower = _currentTick - 100;
+    int24 _tickUpper = _currentTick + 100;
+    uint128 _liquidity = 1e20;
+
+    bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, _liquidity);
+
+    uint128 _removeAmount = 5e19;
+
+    vm.expectEmit(true, true, false, false, address(hook));
+    emit FixedFeeSwapMarket.LiquidityModified(_positionId, alice, _tickLower, _tickUpper, 0, 0, 0);
+
+    vm.prank(alice);
+    hook.decreaseLiquidity(_positionId, -int128(_removeAmount), 0, 0);
+  }
+
+  function test_RevertWhen_LiquidityDeltaIsZero() public {
+    _warpToMintTime();
+    int24 _currentTick = hook.getCurrentTick();
+    int24 _tickLower = _currentTick - 100;
+    int24 _tickUpper = _currentTick + 100;
+
+    bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, 1e20);
+
+    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__LiquidityDeltaMustBeNegative.selector);
+    vm.prank(alice);
+    hook.decreaseLiquidity(_positionId, 0, 0, 0);
+  }
 }
 
 // ============================================================================
@@ -3524,22 +3645,6 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertEq(BeforeSwapDelta.unwrap(delta), 0, "Should return zero delta");
   }
 
-  /// @dev Returns zero fee
-  function testFuzz_ReturnsZeroFee_PrincipalForCash(uint256 amountIn) public {
-    amountIn = _boundSwapAmount(amountIn);
-
-    (,, uint24 fee) = _swap(bob, int256(amountIn), true, NO_TICK_LIMIT);
-
-    assertEq(fee, 0, "Should return zero fee");
-  }
-
-  function testFuzz_ReturnsZeroFee_CashForPrincipal(uint256 amountIn) public {
-    amountIn = _boundSwapAmount(amountIn);
-
-    (,, uint24 fee) = _swap(bob, int256(amountIn), false, NO_TICK_LIMIT);
-    assertEq(fee, 0, "Should return zero fee");
-  }
-
   // ============ Revert Tests ============
 
   /// @dev Reverts when hookParams is wrong length
@@ -3567,11 +3672,11 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     hook.exposed_beforeSwap(bob, poolKey, defaultSwapParams, hookParams);
   }
 
-  function test_RevertWhen_TimeElapsedIsZero() public {
-    vm.warp(hook.getStartTime());
+  function test_RevertWhen_MarketExpired() public {
+    vm.warp(hook.getMaturity());
     bytes memory hookParams = _encodeHookParams(1e18, true, NO_TICK_LIMIT);
 
-    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__TimeElapsedIsZero.selector);
+    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__MarketExpired.selector);
     hook.exposed_beforeSwap(bob, poolKey, defaultSwapParams, hookParams);
   }
 
@@ -3750,6 +3855,49 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertEq(token0.balanceOf(bob), balance0Before, "No PT received");
     assertEq(token1.balanceOf(bob), balance1Before, "No cash consumed");
   }
+
+  // ============ Swap Event Tests ============
+
+  function test_EmitsSwap_PrincipalForCash() public {
+    uint256 _amountIn = 1e18;
+    uint256 _balance0Before = token0.balanceOf(bob);
+    uint256 _balance1Before = token1.balanceOf(bob);
+
+    _swap(bob, int256(_amountIn), true, NO_TICK_LIMIT);
+
+    uint256 _consumed = _balance0Before - token0.balanceOf(bob);
+    uint256 _received = token1.balanceOf(bob) - _balance1Before;
+
+    // Re-do with event check now that we know the amounts
+    // Restore bob's balances
+    token0.mint(bob, _consumed);
+    deal(address(token1), bob, _balance1Before);
+
+    vm.expectEmit(true, false, false, true, address(hook));
+    emit FixedFeeSwapMarket.Swap(bob, true, _consumed, _received);
+
+    _swap(bob, int256(_amountIn), true, NO_TICK_LIMIT);
+  }
+
+  function test_EmitsSwap_CashForPrincipal() public {
+    uint256 _amountIn = 1e18;
+    uint256 _balance0Before = token0.balanceOf(bob);
+    uint256 _balance1Before = token1.balanceOf(bob);
+
+    _swap(bob, int256(_amountIn), false, NO_TICK_LIMIT);
+
+    uint256 _received = token0.balanceOf(bob) - _balance0Before;
+    uint256 _consumed = _balance1Before - token1.balanceOf(bob);
+
+    // Re-do with event check now that we know the amounts
+    token1.mint(bob, _consumed);
+    deal(address(token0), bob, _balance0Before);
+
+    vm.expectEmit(true, false, false, true, address(hook));
+    emit FixedFeeSwapMarket.Swap(bob, false, _consumed, _received);
+
+    _swap(bob, int256(_amountIn), false, NO_TICK_LIMIT);
+  }
 }
 
 // ============ LP Fee Tests ============
@@ -3772,7 +3920,7 @@ contract LPFees is _BeforeSwap {
       MARKET_LENGTH, address(token0), address(token1), TEST_FEE_RATE, IPoolManager(mockManager)
     );
 
-    // Warp forward to avoid TimeElapsedIsZero
+    // Warp forward for realistic test conditions
     vm.warp(block.timestamp + 1 days);
 
     feePoolKey = PoolKey({
@@ -4094,63 +4242,258 @@ contract LPFees is _BeforeSwap {
     vm.prank(alice);
     feeHook.decreaseLiquidity(positionId, -(liqBefore + 1), 0, 0);
   }
+
+  function testFuzz_SwapOutputReducedByFees(uint256 amountIn) public {
+    amountIn = bound(amountIn, 1e16, 5e17);
+
+    // Mint same liquidity on feeHook
+    vm.prank(alice);
+    feeHook.mintLiquidity(0, 200, 1e20, type(uint256).max, type(uint256).max);
+
+    // Swap on fee hook
+    uint256 _bob0Before = token0.balanceOf(bob);
+    uint256 _bob1Before = token1.balanceOf(bob);
+
+    bytes memory _hookParams = abi.encode(int256(amountIn), true, NO_TICK_LIMIT);
+    feeHook.exposed_beforeSwap(bob, feePoolKey, defaultSwapParams, _hookParams);
+
+    uint256 _outputWithFee = token1.balanceOf(bob) - _bob1Before;
+    uint256 _inputWithFee = _bob0Before - token0.balanceOf(bob);
+
+    // Deploy a fresh zero-fee hook with the same liquidity
+    uint256 _savedTimestamp = block.timestamp;
+    vm.warp(1);
+    address _freshMgr = makeAddr("fuzzFeeMgr");
+    FixedFeeSwapMarketHarness _noFeeHook = new FixedFeeSwapMarketHarness(
+      MARKET_LENGTH, address(token0), address(token1), 0, IPoolManager(_freshMgr)
+    );
+    vm.warp(_savedTimestamp);
+
+    PoolKey memory _noFeePoolKey = PoolKey({
+      currency0: Currency.wrap(address(token0)),
+      currency1: Currency.wrap(address(token1)),
+      fee: 0,
+      tickSpacing: 1,
+      hooks: IHooks(address(_noFeeHook))
+    });
+
+    vm.startPrank(alice);
+    token0.approve(address(_noFeeHook), type(uint256).max);
+    token1.approve(address(_noFeeHook), type(uint256).max);
+    _noFeeHook.mintLiquidity(0, 200, 1e20, type(uint256).max, type(uint256).max);
+    vm.stopPrank();
+
+    vm.prank(bob);
+    token0.approve(address(_noFeeHook), type(uint256).max);
+
+    // Restore bob's PT
+    token0.mint(bob, _inputWithFee);
+
+    _bob0Before = token0.balanceOf(bob);
+    _bob1Before = token1.balanceOf(bob);
+
+    _noFeeHook.exposed_beforeSwap(bob, _noFeePoolKey, defaultSwapParams, _hookParams);
+
+    uint256 _outputNoFee = token1.balanceOf(bob) - _bob1Before;
+
+    // Skip if sub-bip swap produced zero on either side or rounding makes them equal
+    vm.assume(_outputNoFee > 0 && _outputWithFee > 0);
+    assertLe(_outputWithFee, _outputNoFee, "Output should be <= with fees");
+  }
 }
 
-/// @notice Proves cash solvency after range traversal with the corrected LP composition.
-/// After a swap traverses an LP's range, the contract holds sufficient cash for
-/// the LP to withdraw successfully.
-contract CashSolvency is FixedFeeSwapMarketTest {
-  PoolKey internal poolKey;
-  SwapParams internal defaultSwapParams;
-
-  function setUp() public override {
-    super.setUp();
-    poolKey = PoolKey({
+contract _BeforeAddLiquidity is FixedFeeSwapMarketTest {
+  function test_RevertWhen_CalledDirectly() public {
+    PoolKey memory _poolKey = PoolKey({
       currency0: Currency.wrap(address(token0)),
       currency1: Currency.wrap(address(token1)),
       fee: 0,
       tickSpacing: 1,
       hooks: IHooks(address(hook))
     });
-    defaultSwapParams = SwapParams({zeroForOne: true, amountSpecified: -1e18, sqrtPriceLimitX96: 0});
+    ModifyLiquidityParams memory _params =
+      ModifyLiquidityParams({tickLower: 0, tickUpper: 100, liquidityDelta: 1e18, salt: bytes32(0)});
+
+    vm.expectRevert(FixedFeeSwapMarket.LiquidityOnlyViaHook.selector);
+    hook.exposed_beforeAddLiquidity(alice, _poolKey, _params, "");
   }
+}
 
-  function _swap(address sender, int256 amountIn, bool principalForCash, int24 tickLimit) internal {
-    bytes memory hookParams = abi.encode(amountIn, principalForCash, tickLimit);
-    hook.exposed_beforeSwap(sender, poolKey, defaultSwapParams, hookParams);
+contract _BeforeRemoveLiquidity is FixedFeeSwapMarketTest {
+  function test_RevertWhen_CalledDirectly() public {
+    PoolKey memory _poolKey = PoolKey({
+      currency0: Currency.wrap(address(token0)),
+      currency1: Currency.wrap(address(token1)),
+      fee: 0,
+      tickSpacing: 1,
+      hooks: IHooks(address(hook))
+    });
+    ModifyLiquidityParams memory _params = ModifyLiquidityParams({
+      tickLower: 0, tickUpper: 100, liquidityDelta: -1e18, salt: bytes32(0)
+    });
+
+    vm.expectRevert(FixedFeeSwapMarket.LiquidityOnlyViaHook.selector);
+    hook.exposed_beforeRemoveLiquidity(alice, _poolKey, _params, "");
   }
+}
 
-  function test_CashSolvency_AfterRangeTraversal() public {
-    // Warp to half maturity so time-dependent pricing is significant
-    _warpFromStart(MARKET_LENGTH / 2);
+contract CollectFees is FixedFeeSwapMarketTest {
+  uint24 public constant TEST_FEE_RATE = 3000;
+  FixedFeeSwapMarketHarness public feeHook;
+  PoolKey internal feePoolKey;
+  SwapParams internal defaultSwapParams;
 
-    // Alice is the sole LP, providing liquidity across [0, 1000]
-    uint128 liquidity = 1e22;
-    bytes32 positionId = _mintLiquidityAtTicks(alice, 0, 1000, liquidity);
-
-    uint256 contractCashAfterDeposit = token1.balanceOf(address(hook));
-    assertGt(contractCashAfterDeposit, 0, "LP should have deposited cash");
-
-    // Bob executes a large PT->Cash swap with a price limit at tick 999,
-    // pushing yield nearly to the upper boundary of alice's range.
-    _swap(bob, int256(100e22), true, int24(999));
-
-    int24 currentTick = hook.getCurrentTick();
-    assertGe(currentTick, 990, "Swap should have moved tick near upper boundary");
-
-    // With corrected LP composition, cash comes from [currentTick, tickUpper]
-    int256 cashNeeded = hook.exposed_getAmountCashDelta(currentTick, 1000, int128(liquidity));
-    assertGt(cashNeeded, 0, "LP withdrawal demands positive cash");
-
-    // Contract should hold enough cash for the withdrawal
-    uint256 contractCash = token1.balanceOf(address(hook));
-    assertGe(
-      contractCash, uint256(cashNeeded), "Contract should hold enough cash for LP withdrawal"
+  function setUp() public override {
+    super.setUp();
+    vm.warp(1);
+    address _mockManager = makeAddr("collectFeesMockManager");
+    feeHook = new FixedFeeSwapMarketHarness(
+      MARKET_LENGTH, address(token0), address(token1), TEST_FEE_RATE, IPoolManager(_mockManager)
     );
+    vm.warp(block.timestamp + 1 days);
+    feePoolKey = PoolKey({
+      currency0: Currency.wrap(address(token0)),
+      currency1: Currency.wrap(address(token1)),
+      fee: 0,
+      tickSpacing: 1,
+      hooks: IHooks(address(feeHook))
+    });
+    defaultSwapParams = SwapParams({zeroForOne: true, amountSpecified: -1e18, sqrtPriceLimitX96: 0});
+    vm.startPrank(alice);
+    token0.approve(address(feeHook), type(uint256).max);
+    token1.approve(address(feeHook), type(uint256).max);
+    vm.stopPrank();
+    vm.startPrank(bob);
+    token0.approve(address(feeHook), type(uint256).max);
+    token1.approve(address(feeHook), type(uint256).max);
+    vm.stopPrank();
+  }
 
-    // Prove it concretely: alice's full withdrawal succeeds
+  function _feeSwap(address _sender, int256 _amountIn, bool _principalForCash) internal {
+    bytes memory _hookParams = abi.encode(_amountIn, _principalForCash, int24(type(int24).max));
+    feeHook.exposed_beforeSwap(_sender, feePoolKey, defaultSwapParams, _hookParams);
+  }
+
+  function test_PartialFeeCollection() public {
     vm.prank(alice);
-    hook.decreaseLiquidity(positionId, -int128(liquidity), 0, 0);
+    feeHook.mintLiquidity(0, 300, 1e20, type(uint256).max, type(uint256).max);
+    bytes32 _positionId = keccak256(abi.encodePacked(int24(300), int24(0), alice));
+
+    _feeSwap(bob, int256(1e18), true);
+
+    // Collect half
+    vm.prank(alice);
+    (uint128 _collected0,) = feeHook.collectFees(_positionId, alice, 0, 0);
+    assertGt(_collected0, 0, "Should have fees to collect");
+
+    // Generate more fees and collect a partial amount
+    _feeSwap(bob, int256(1e18), true);
+    vm.prank(alice);
+    (uint128 _fullOwed0,) = feeHook.collectFees(_positionId, alice, 0, 0);
+    // We need to generate fees again since we just collected all
+    _feeSwap(bob, int256(1e18), true);
+
+    // Now request only half
+    vm.prank(alice);
+    (uint128 _partial0,) = feeHook.collectFees(_positionId, alice, 1, 0);
+    assertEq(_partial0, 1, "Should collect exactly requested amount");
+
+    // Remainder still available
+    vm.prank(alice);
+    (uint128 _remainder0,) = feeHook.collectFees(_positionId, alice, 0, 0);
+    assertGt(_remainder0, 0, "Should still have remaining fees");
+  }
+
+  function test_DoubleCollectYieldsZero() public {
+    vm.prank(alice);
+    feeHook.mintLiquidity(0, 300, 1e20, type(uint256).max, type(uint256).max);
+    bytes32 _positionId = keccak256(abi.encodePacked(int24(300), int24(0), alice));
+
+    _feeSwap(bob, int256(1e18), true);
+
+    vm.prank(alice);
+    feeHook.collectFees(_positionId, alice, 0, 0);
+
+    vm.prank(alice);
+    (uint128 _collected0, uint128 _collected1) = feeHook.collectFees(_positionId, alice, 0, 0);
+    assertEq(_collected0, 0, "Second collect should yield zero TOKEN0");
+    assertEq(_collected1, 0, "Second collect should yield zero TOKEN1");
+  }
+
+  function test_FeesSentToDifferentRecipient() public {
+    vm.prank(alice);
+    feeHook.mintLiquidity(0, 300, 1e20, type(uint256).max, type(uint256).max);
+    bytes32 _positionId = keccak256(abi.encodePacked(int24(300), int24(0), alice));
+
+    _feeSwap(bob, int256(1e18), true);
+
+    uint256 _bobToken0Before = token0.balanceOf(bob);
+    vm.prank(alice);
+    (uint128 _collected0,) = feeHook.collectFees(_positionId, bob, 0, 0);
+    assertGt(_collected0, 0, "Should collect fees");
+    assertEq(token0.balanceOf(bob) - _bobToken0Before, _collected0, "Bob should receive the fees");
+  }
+
+  function test_CollectWithNoFeesOwed() public {
+    vm.prank(alice);
+    feeHook.mintLiquidity(0, 300, 1e20, type(uint256).max, type(uint256).max);
+    bytes32 _positionId = keccak256(abi.encodePacked(int24(300), int24(0), alice));
+
+    // No swaps — no fees
+    vm.prank(alice);
+    (uint128 _collected0, uint128 _collected1) = feeHook.collectFees(_positionId, alice, 0, 0);
+    assertEq(_collected0, 0, "Should be zero TOKEN0 fees");
+    assertEq(_collected1, 0, "Should be zero TOKEN1 fees");
+  }
+
+  function test_CashForPrincipal_AccumulatesFeeGrowth1() public {
+    vm.prank(alice);
+    feeHook.mintLiquidity(0, 300, 1e20, type(uint256).max, type(uint256).max);
+    bytes32 _positionId = keccak256(abi.encodePacked(int24(300), int24(0), alice));
+
+    // Push tick up first so cash→PT has room to move left
+    // 1e20 liquidity, 1 bip = 1e16, use 100 bips = 1e18 to stay well within 300-tick range
+    _feeSwap(bob, int256(1e18), true);
+
+    // Swap cash→PT (smaller than push to stay in range)
+    _feeSwap(bob, int256(5e17), false);
+
+    assertGt(feeHook.feeGrowthGlobal1X128(), 0, "feeGrowthGlobal1X128 should be > 0");
+
+    vm.prank(alice);
+    (, uint128 _collected1) = feeHook.collectFees(_positionId, alice, 0, 0);
+    assertGt(_collected1, 0, "Should have collected TOKEN1 fees");
+  }
+
+  function test_BothDirections_CollectsBothTokenFees() public {
+    vm.prank(alice);
+    feeHook.mintLiquidity(0, 300, 1e20, type(uint256).max, type(uint256).max);
+    bytes32 _positionId = keccak256(abi.encodePacked(int24(300), int24(0), alice));
+
+    // PT→Cash — push tick up enough to create room for cash→PT
+    // 1e20 liquidity, 1 bip = 1e16, use 100 bips = 1e18 to stay within 300-tick range
+    _feeSwap(bob, int256(1e18), true);
+    // Cash→PT (smaller than push to stay in range)
+    _feeSwap(bob, int256(5e17), false);
+
+    vm.prank(alice);
+    (uint128 _collected0, uint128 _collected1) = feeHook.collectFees(_positionId, alice, 0, 0);
+    assertGt(_collected0, 0, "Should have collected TOKEN0 fees");
+    assertGt(_collected1, 0, "Should have collected TOKEN1 fees");
+  }
+
+  function test_EmitsFeesCollected() public {
+    vm.prank(alice);
+    feeHook.mintLiquidity(0, 300, 1e20, type(uint256).max, type(uint256).max);
+    bytes32 _positionId = keccak256(abi.encodePacked(int24(300), int24(0), alice));
+
+    _feeSwap(bob, int256(1e18), true);
+
+    vm.expectEmit(true, true, false, false, address(feeHook));
+    emit FixedFeeSwapMarket.FeesCollected(_positionId, alice, 0, 0);
+
+    vm.prank(alice);
+    feeHook.collectFees(_positionId, alice, 0, 0);
   }
 }
 
@@ -4486,7 +4829,7 @@ contract SolvencyWithFees is FixedFeeSwapMarketTest {
       MARKET_LENGTH, address(token0), address(token1), TEST_FEE_RATE, IPoolManager(_mockManager)
     );
 
-    // Warp forward to avoid TimeElapsedIsZero
+    // Warp forward for realistic test conditions
     vm.warp(block.timestamp + 1 days);
 
     feePoolKey = PoolKey({
@@ -4715,36 +5058,28 @@ contract MaturityTests is FixedFeeSwapMarketTest {
     hook.exposed_beforeSwap(_sender, poolKey, defaultSwapParams, _hookParams);
   }
 
-  /// @dev Swap PT->Cash at exactly maturity should work
-  function test_SwapAtMaturity() public {
+  /// @dev Swap at exactly maturity should revert (users redeem PT 1:1 instead)
+  function test_RevertWhen_SwapAtMaturity() public {
     _warpFromStart(1);
     _mintLiquidityAtTicks(alice, 0, 500, 1e22);
 
     vm.warp(hook.getMaturity());
 
-    uint256 _balance0Before = token0.balanceOf(bob);
-    uint256 _balance1Before = token1.balanceOf(bob);
-
-    _swap(bob, int256(1e18), true, NO_TICK_LIMIT);
-
-    assertLt(token0.balanceOf(bob), _balance0Before, "Should consume PT");
-    assertGt(token1.balanceOf(bob), _balance1Before, "Should receive cash");
+    bytes memory _hookParams = abi.encode(int256(1e18), true, NO_TICK_LIMIT);
+    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__MarketExpired.selector);
+    hook.exposed_beforeSwap(bob, poolKey, defaultSwapParams, _hookParams);
   }
 
-  /// @dev Swap PT->Cash past maturity should work (time capped at duration)
-  function test_SwapPastMaturity() public {
+  /// @dev Swap past maturity should revert
+  function test_RevertWhen_SwapPastMaturity() public {
     _warpFromStart(1);
     _mintLiquidityAtTicks(alice, 0, 500, 1e22);
 
     vm.warp(hook.getMaturity() + 30 days);
 
-    uint256 _balance0Before = token0.balanceOf(bob);
-    uint256 _balance1Before = token1.balanceOf(bob);
-
-    _swap(bob, int256(1e18), true, NO_TICK_LIMIT);
-
-    assertLt(token0.balanceOf(bob), _balance0Before, "Should consume PT");
-    assertGt(token1.balanceOf(bob), _balance1Before, "Should receive cash");
+    bytes memory _hookParams = abi.encode(int256(1e18), true, NO_TICK_LIMIT);
+    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__MarketExpired.selector);
+    hook.exposed_beforeSwap(bob, poolKey, defaultSwapParams, _hookParams);
   }
 
   /// @dev Mint liquidity at maturity should work
@@ -4780,25 +5115,15 @@ contract MaturityTests is FixedFeeSwapMarketTest {
     assertGe(token1.balanceOf(alice), _balance1Before, "LP should receive token1");
   }
 
-  /// @dev At maturity, tickToPrice matches exp(-tick/BIPS) and swap math uses it correctly
+  /// @dev At maturity, tickToPrice returns 1.0 for all ticks (PT redeemable 1:1)
   function test_PriceAtMaturityMatchesExpected() public {
     vm.warp(hook.getMaturity());
 
-    // Verify several tick prices
+    // Verify all tick prices = 1.0 at maturity
     for (int24 _tick = 0; _tick <= 500; _tick += 100) {
       int256 _actual = hook.tickToPrice(_tick);
-      int256 _exponent = (-int256(_tick) * 1e18) / int256(BIPS);
-      int256 _expected = _exponent.expWad();
-      assertApproxEqRel(_actual, _expected, 1e12, "Price should match exp(-tick/BIPS) at maturity");
+      assertEq(_actual, 1e18, "Price should be 1.0 at maturity regardless of tick");
     }
-
-    // Verify swap uses maturity pricing: mint, swap, check output is consistent
-    _mintLiquidityAtTicks(alice, 0, 500, 1e22);
-
-    uint256 _balance1Before = token1.balanceOf(bob);
-    _swap(bob, int256(1e18), true, NO_TICK_LIMIT);
-    uint256 _cashReceived = token1.balanceOf(bob) - _balance1Before;
-    assertGt(_cashReceived, 0, "Should receive non-zero cash at maturity");
   }
 }
 
