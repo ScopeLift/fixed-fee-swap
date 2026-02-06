@@ -254,6 +254,7 @@ contract FixedFeeSwapMarket is BaseHook {
     uint256 _amount0Max,
     uint256 _amount1Max
   ) external virtual {
+    if (_tickLower < 0) revert FixedFeeSwap__InvalidTickRange();
     bytes32 _positionId = _getPositionId(msg.sender, _tickUpper, _tickLower);
     PositionInfo storage _position = positions[_positionId];
     bool _isNew = _position.owner == address(0);
@@ -809,15 +810,15 @@ contract FixedFeeSwapMarket is BaseHook {
         _newPrice = _targetPrice;
         _yieldDeltaWad = uint256(_startYieldWad - _targetYieldWad);
       } else {
-        // Price limit mid-tick — snap to ceiled tick (Cash→PT: yield decreasing, ceil rounds in pool's favor)
+        // Price limit mid-tick — snap to ceiled tick (Cash→PT: yield decreasing, ceil rounds in
+        // pool's favor)
         _newTick = _wadToTickCeil(_targetYieldWad);
         _newPrice = _priceFromYieldWad(int256(_newTick) * int256(WAD), _scaledTime);
         // If snapping pushed the price back to or past the start, the limit is unreachable
         if (_newPrice <= _currentPrice) return (0, 0, 0, 0);
         _yieldDeltaWad = uint256(_startYieldWad - int256(_newTick) * int256(WAD));
       }
-      _principalOut =
-        FixedPointMathLib.mulDiv(uint256(activeLiquidity), _yieldDeltaWad, BIPS * WAD);
+      _principalOut = FixedPointMathLib.mulDiv(uint256(activeLiquidity), _yieldDeltaWad, BIPS * WAD);
       return (_amountInConsumed, _principalOut, _newPrice, _newTick);
     }
 
@@ -854,8 +855,8 @@ contract FixedFeeSwapMarket is BaseHook {
     int256 _endYieldWad = _yieldWadFromPrice(_exactNewPrice, _scaledTime);
 
     // Snap to ceiled integer tick so swap output matches LP composition accounting.
-    // Cash→PT decreases yield, so ceiling rounds in favor of the pool (less PT output, higher price).
-    // Returns zero consumed/output if the tick didn't move (swap too small).
+    // Cash→PT decreases yield, so ceiling rounds in favor of the pool (less PT output, higher
+    // price). Returns zero consumed/output if the tick didn't move (swap too small).
     _newTick = _wadToTickCeil(_endYieldWad);
     int256 _snappedYieldWad = int256(_newTick) * int256(WAD);
     _newPrice = _priceFromYieldWad(_snappedYieldWad, _scaledTime);
