@@ -83,10 +83,9 @@ contract Zapper is IERC3156FlashBorrower {
   /// @param _fixedFeeSwap The fixed fee swap address.
   /// @param _fixedFeeSwapMarket The fixed fee swap market address.
   constructor(FixedFeeSwap _fixedFeeSwap, FixedFeeSwapMarket _fixedFeeSwapMarket) {
-    if (
-      address(_fixedFeeSwap) == address(0)
-      || address(_fixedFeeSwapMarket) == address(0)
-    ) revert Zapper_InvalidAddress();
+    if (address(_fixedFeeSwap) == address(0) || address(_fixedFeeSwapMarket) == address(0)) {
+      revert Zapper_InvalidAddress();
+    }
 
     FIXED_FEE_SWAP = _fixedFeeSwap;
     FIXED_FEE_SWAP_MARKET = _fixedFeeSwapMarket;
