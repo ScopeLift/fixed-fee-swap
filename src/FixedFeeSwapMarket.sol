@@ -4,9 +4,7 @@ pragma solidity 0.8.26;
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
 import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
-import {LiquidityAmounts} from "v4-periphery/src/libraries/LiquidityAmounts.sol";
 import {LiquidityMath} from "v4-core/libraries/LiquidityMath.sol";
-import {SqrtPriceMath} from "v4-core/libraries/SqrtPriceMath.sol";
 import {SafeCast} from "v4-core/libraries/SafeCast.sol";
 import {TickBitmap} from "v4-core/libraries/TickBitmap.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
@@ -30,7 +28,7 @@ struct TickInfo {
   uint256 feeGrowthOutside1X128;
 }
 
-struct BalanceDelta {
+struct TokenDelta {
   int128 amount0;
   int128 amount1;
 }
@@ -54,11 +52,7 @@ struct SwapContext {
   uint256 priceLimitWad;
 }
 
-// 1. ticks are yield, 1 tick represents 1 bip of yield
-// 2. Add liquidity by yield, implement how positions like this would work
-// 3. Swap, iterate through ticks
 contract FixedFeeSwapMarket is BaseHook {
-  using FixedPointMathLib for uint256;
   using SafeCast for uint256;
   using SafeCast for int256;
   using FixedPointMathLib for int256;
@@ -72,6 +66,20 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @notice Emitted when fees are collected from a position
   event FeesCollected(
     bytes32 indexed positionId, address indexed recipient, uint128 amount0, uint128 amount1
+  );
+
+  /// @notice Emitted when a swap is executed
+  event Swap(address indexed sender, bool principalForCash, uint256 amountIn, uint256 amountOut);
+
+  /// @notice Emitted when liquidity is modified for a position
+  event LiquidityModified(
+    bytes32 indexed positionId,
+    address indexed owner,
+    int24 tickLower,
+    int24 tickUpper,
+    int128 liquidityDelta,
+    int128 amount0,
+    int128 amount1
   );
 
   // ============ Errors ============
@@ -121,6 +129,9 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @notice Thrown at START_TIME when no time has elapsed, to prevent division by zero
   error FixedFeeSwap__TimeElapsedIsZero();
 
+  /// @notice Thrown when a tick's gross liquidity would underflow
+  error FixedFeeSwap__TickLiquidityGrossUnderflow();
+
   /// @notice Thrown when liquidity is added or removed via PoolManager instead of this hook
   error LiquidityOnlyViaHook();
 
@@ -129,6 +140,7 @@ contract FixedFeeSwapMarket is BaseHook {
   int24 constant YIELD_PER_TICK = 1;
   uint256 constant WAD = 1e18;
   uint256 constant BIPS = 10_000;
+  uint256 constant SWAP_HOOK_PARAMS_LENGTH = 96;
 
   /// @notice Denominator for fee calculations, set to 1e6 to support hundredths of a bip
   uint256 constant FEE_DENOMINATOR = 1_000_000;
@@ -167,9 +179,6 @@ contract FixedFeeSwapMarket is BaseHook {
 
   // ============ Constructor ============
 
-  // 1. Market opens on deployment. We will
-  // want to make this better. Maturities may want
-  // to end at the same time.
   constructor(
     uint48 _lengthOfMarket,
     address _token0,
@@ -209,25 +218,24 @@ contract FixedFeeSwapMarket is BaseHook {
   }
 
   /// @notice Converts a yield in basis points to the corresponding tick
-  /// @param yieldBps The yield rate in basis points
+  /// @param _yieldBps The yield rate in basis points
   /// @return The tick value representing this yield
-  function yieldToTick(int256 yieldBps) public view returns (int24) {
-    return int24(yieldBps / YIELD_PER_TICK);
+  function yieldToTick(int256 _yieldBps) public pure returns (int24) {
+    return int24(_yieldBps / YIELD_PER_TICK);
   }
 
   /// @notice Converts a tick to its corresponding discount factor price
   /// @dev Price is calculated as exp(-yield * scaledTimeElapsed) where yield = tick *
-  /// YIELD_PER_TICK @param _tick The tick value to convert
+  /// YIELD_PER_TICK
+  /// @param _tick The tick value to convert
   /// @return The price as a WAD-scaled discount factor, where 1e18 represents a price of 1.0
   function tickToPrice(int256 _tick) public view returns (int256) {
-    // exp(- Y * time to maturity)
-    int256 _yieldTick = (_tick * YIELD_PER_TICK);
-    uint256 _timeBetweenMaturity = (BIPS * (MATURITY - START_TIME));
-    uint256 _scaledTimeSinceMaturity = (block.timestamp - START_TIME) * WAD;
-    int256 _scaledPriceExponent =
-      -1 * (_yieldTick * _scaledTimeSinceMaturity.toInt128()) / _timeBetweenMaturity.toInt128();
-    int256 _price = _scaledPriceExponent.expWad();
-    return _price;
+    uint256 _elapsed = block.timestamp - START_TIME;
+    if (_elapsed == 0) return int256(WAD);
+    uint256 _duration = MATURITY - START_TIME;
+    if (_elapsed > _duration) _elapsed = _duration;
+    uint256 _scaledTime = (_elapsed * WAD) / _duration;
+    return _priceFromYieldWad(_tick * YIELD_PER_TICK * int256(WAD), _scaledTime);
   }
 
   // ============ External Functions ============
@@ -246,41 +254,35 @@ contract FixedFeeSwapMarket is BaseHook {
     uint256 _amount0Max,
     uint256 _amount1Max
   ) external virtual {
-    bytes32 _positionId = keccak256(abi.encodePacked(_tickUpper, _tickLower, msg.sender));
-    PositionInfo storage position = positions[_positionId];
-    bool isNew = position.owner == address(0);
-    int128 liquidityBefore = position.liquidity;
+    bytes32 _positionId = _getPositionId(msg.sender, _tickUpper, _tickLower);
+    PositionInfo storage _position = positions[_positionId];
+    bool _isNew = _position.owner == address(0);
+    int128 _liquidityBefore = _position.liquidity;
 
-    if (isNew) {
-      position.tickUpper = _tickUpper;
-      position.tickLower = _tickLower;
-      position.owner = msg.sender;
-      position.tokensOwed0 = 0;
-      position.tokensOwed1 = 0;
+    if (_isNew) {
+      _position.tickUpper = _tickUpper;
+      _position.tickLower = _tickLower;
+      _position.owner = msg.sender;
     }
 
     // Call modifyLiquidity first so tick init sets feeGrowthOutside correctly
-    BalanceDelta memory _balanceDelta =
+    TokenDelta memory _tokenDelta =
       _modifyLiquidity(msg.sender, _tickUpper, _tickLower, _liquidity.toInt128());
-    if (
-      _balanceDelta.amount0.toUint128() > _amount0Max
-        || _balanceDelta.amount1.toUint128() > _amount1Max
-    ) revert FixedFeeSwap__InvalidLiquidityAmount();
+    uint128 _amount0In = _tokenDelta.amount0.toUint128();
+    uint128 _amount1In = _tokenDelta.amount1.toUint128();
+    if (_amount0In > _amount0Max || _amount1In > _amount1Max) {
+      revert FixedFeeSwap__InvalidLiquidityAmount();
+    }
 
     // Update liquidity without overwriting fee fields
-    position.liquidity = position.liquidity + _liquidity.toInt128();
+    _position.liquidity = _position.liquidity + _liquidity.toInt128();
 
     // Initialize snapshots when liquidity transitions from 0 -> positive
     // (isNew implies liquidityBefore == 0, so we only need to check liquidityBefore)
-    if (liquidityBefore == 0) _refreshFeeSnapshots(position);
+    if (_liquidityBefore == 0) _refreshFeeSnapshots(_position);
 
-    if (_balanceDelta.amount0.toUint128() > 0) {
-      TOKEN0.safeTransferFrom(msg.sender, address(this), _balanceDelta.amount0.toUint128());
-    }
-
-    if (_balanceDelta.amount1.toUint128() > 0) {
-      TOKEN1.safeTransferFrom(msg.sender, address(this), _balanceDelta.amount1.toUint128());
-    }
+    if (_amount0In != 0) TOKEN0.safeTransferFrom(msg.sender, address(this), _amount0In);
+    if (_amount1In != 0) TOKEN1.safeTransferFrom(msg.sender, address(this), _amount1In);
   }
 
   /// @notice Increases liquidity for an existing position
@@ -295,30 +297,26 @@ contract FixedFeeSwapMarket is BaseHook {
     uint256 _amount0Max,
     uint256 _amount1Max
   ) external virtual {
-    PositionInfo storage position = _requirePositionOwner(_positionId);
-    int128 liquidityBefore = position.liquidity;
+    PositionInfo storage _position = _requirePositionOwner(_positionId);
+    int128 _liquidityBefore = _position.liquidity;
 
     // modifyLiquidity accrues fees internally and refreshes snapshots
-    BalanceDelta memory _balanceDelta =
-      _modifyLiquidity(msg.sender, position.tickUpper, position.tickLower, _liquidity.toInt128());
-    if (
-      _balanceDelta.amount0.toUint128() > _amount0Max
-        || _balanceDelta.amount1.toUint128() > _amount1Max
-    ) revert FixedFeeSwap__InvalidLiquidityAmount();
+    TokenDelta memory _tokenDelta =
+      _modifyLiquidity(msg.sender, _position.tickUpper, _position.tickLower, _liquidity.toInt128());
+    uint128 _amount0In = _tokenDelta.amount0.toUint128();
+    uint128 _amount1In = _tokenDelta.amount1.toUint128();
+    if (_amount0In > _amount0Max || _amount1In > _amount1Max) {
+      revert FixedFeeSwap__InvalidLiquidityAmount();
+    }
 
     // Update position liquidity without overwriting fee fields
-    position.liquidity = position.liquidity + _liquidity.toInt128();
+    _position.liquidity = _position.liquidity + _liquidity.toInt128();
 
     // If the position had zero liquidity, refresh snapshots to prevent earning past fees
-    if (liquidityBefore == 0) _refreshFeeSnapshots(position);
+    if (_liquidityBefore == 0) _refreshFeeSnapshots(_position);
 
-    if (_balanceDelta.amount0.toUint128() > 0) {
-      TOKEN0.safeTransferFrom(msg.sender, address(this), _balanceDelta.amount0.toUint128());
-    }
-
-    if (_balanceDelta.amount1.toUint128() > 0) {
-      TOKEN1.safeTransferFrom(msg.sender, address(this), _balanceDelta.amount1.toUint128());
-    }
+    if (_amount0In != 0) TOKEN0.safeTransferFrom(msg.sender, address(this), _amount0In);
+    if (_amount1In != 0) TOKEN1.safeTransferFrom(msg.sender, address(this), _amount1In);
   }
 
   /// @notice Decreases liquidity from an existing position and withdraws tokens
@@ -333,63 +331,64 @@ contract FixedFeeSwapMarket is BaseHook {
     uint256 _amount0Min,
     uint256 _amount1Min
   ) external virtual {
-    PositionInfo storage position = _requirePositionOwner(_positionId);
+    PositionInfo storage _position = _requirePositionOwner(_positionId);
     if (_liquidity >= 0) revert FixedFeeSwap__LiquidityDeltaMustBeNegative();
-    if (position.liquidity < 0) revert FixedFeeSwap__InvalidLiquidityAmount();
-    if (uint128(position.liquidity) < uint128(_liquidity.abs())) {
+    if (_position.liquidity < 0) revert FixedFeeSwap__InvalidLiquidityAmount();
+    if (uint128(_position.liquidity) < uint128(_liquidity.abs())) {
       revert FixedFeeSwap__InsufficientPositionLiquidity();
     }
 
     // modifyLiquidity accrues fees owed before burning liquidity
-    BalanceDelta memory _balanceDelta =
-      _modifyLiquidity(msg.sender, position.tickUpper, position.tickLower, _liquidity);
-    if (_balanceDelta.amount0.abs() < _amount0Min || _balanceDelta.amount1.abs() < _amount1Min) {
+    TokenDelta memory _tokenDelta =
+      _modifyLiquidity(msg.sender, _position.tickUpper, _position.tickLower, _liquidity);
+    uint128 _amount0Out = uint128(_tokenDelta.amount0.abs());
+    uint128 _amount1Out = uint128(_tokenDelta.amount1.abs());
+    if (_amount0Out < _amount0Min || _amount1Out < _amount1Min) {
       revert FixedFeeSwap__InvalidLiquidityAmount();
     }
 
     // Update position liquidity without overwriting fee fields
-    position.liquidity = position.liquidity + _liquidity;
+    _position.liquidity = _position.liquidity + _liquidity;
 
-    if (_balanceDelta.amount0 < 0) TOKEN0.safeTransfer(msg.sender, _balanceDelta.amount0.abs());
-
-    if (_balanceDelta.amount1 < 0) TOKEN1.safeTransfer(msg.sender, _balanceDelta.amount1.abs());
+    if (_tokenDelta.amount0 < 0) TOKEN0.safeTransfer(msg.sender, _amount0Out);
+    if (_tokenDelta.amount1 < 0) TOKEN1.safeTransfer(msg.sender, _amount1Out);
   }
 
   /// @notice Collects accumulated fees for a position
-  /// @param positionId The position identifier
-  /// @param recipient Address to receive the fees
-  /// @param amount0Requested Maximum TOKEN0 fees to collect, or 0 to collect all available
-  /// @param amount1Requested Maximum TOKEN1 fees to collect, or 0 to collect all available
-  /// @return amount0 Actual TOKEN0 fees collected
-  /// @return amount1 Actual TOKEN1 fees collected
+  /// @param _positionId The position identifier
+  /// @param _recipient Address to receive the fees
+  /// @param _amount0Requested Maximum TOKEN0 fees to collect, or 0 to collect all available
+  /// @param _amount1Requested Maximum TOKEN1 fees to collect, or 0 to collect all available
+  /// @return _amount0 Actual TOKEN0 fees collected
+  /// @return _amount1 Actual TOKEN1 fees collected
   function collectFees(
-    bytes32 positionId,
-    address recipient,
-    uint128 amount0Requested,
-    uint128 amount1Requested
-  ) external returns (uint128 amount0, uint128 amount1) {
-    PositionInfo storage position = _requirePositionOwner(positionId);
+    bytes32 _positionId,
+    address _recipient,
+    uint128 _amount0Requested,
+    uint128 _amount1Requested
+  ) external returns (uint128 _amount0, uint128 _amount1) {
+    PositionInfo storage _position = _requirePositionOwner(_positionId);
 
     // Accrue pending fees before collection
-    _accruePositionFees(position);
+    _accruePositionFees(_position);
 
     // Calculate amounts to collect (0 means collect all, otherwise min of requested and owed)
-    amount0 = (amount0Requested == 0 || amount0Requested > position.tokensOwed0)
-      ? position.tokensOwed0
-      : amount0Requested;
-    amount1 = (amount1Requested == 0 || amount1Requested > position.tokensOwed1)
-      ? position.tokensOwed1
-      : amount1Requested;
+    _amount0 = (_amount0Requested == 0 || _amount0Requested > _position.tokensOwed0)
+      ? _position.tokensOwed0
+      : _amount0Requested;
+    _amount1 = (_amount1Requested == 0 || _amount1Requested > _position.tokensOwed1)
+      ? _position.tokensOwed1
+      : _amount1Requested;
 
     // Update owed amounts (CEI: update state before transfers)
-    position.tokensOwed0 -= amount0;
-    position.tokensOwed1 -= amount1;
+    _position.tokensOwed0 -= _amount0;
+    _position.tokensOwed1 -= _amount1;
 
     // Transfer fees
-    if (amount0 > 0) TOKEN0.safeTransfer(recipient, amount0);
-    if (amount1 > 0) TOKEN1.safeTransfer(recipient, amount1);
+    if (_amount0 > 0) TOKEN0.safeTransfer(_recipient, _amount0);
+    if (_amount1 > 0) TOKEN1.safeTransfer(_recipient, _amount1);
 
-    emit FeesCollected(positionId, recipient, amount0, amount1);
+    emit FeesCollected(_positionId, _recipient, _amount0, _amount1);
   }
 
   // ============ Internal Functions - Hook Overrides ============
@@ -437,136 +436,135 @@ contract FixedFeeSwapMarket is BaseHook {
     if (_hookParams.length == 0) {
       return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(0, 0), 0);
     }
-    if (_hookParams.length != 96) revert FixedFeeSwap__InvalidHookParams();
+    if (_hookParams.length != SWAP_HOOK_PARAMS_LENGTH) revert FixedFeeSwap__InvalidHookParams();
 
-    (int256 amountIn, bool principalForCash, uint256 priceLimitWad) =
+    (int256 _amountIn, bool _principalForCash, uint256 _priceLimitWad) =
       abi.decode(_hookParams, (int256, bool, uint256));
-    if (amountIn <= 0) revert FixedFeeSwap__SwapAmountCannotBeZero();
+    if (_amountIn <= 0) revert FixedFeeSwap__SwapAmountCannotBeZero();
     if (activeLiquidity == 0) revert FixedFeeSwap__NoActiveLiquidity();
-    if (currentPrice == 0) currentPrice = tickToPrice(currentTick);
+    currentPrice = tickToPrice(currentTick);
 
-    (uint256 amountInUsed, uint256 amountOutCalculated) =
-      _executeSwapLoop(uint256(amountIn), principalForCash, priceLimitWad);
+    (uint256 _amountInUsed, uint256 _amountOutCalculated) =
+      _executeSwapLoop(uint256(_amountIn), _principalForCash, _priceLimitWad);
 
     // Execute token transfers
     // TOKEN0 = principal token, TOKEN1 = cash token
-    if (principalForCash) {
+    if (_principalForCash) {
       // User sends principal (TOKEN0), receives cash (TOKEN1)
-      if (amountInUsed != 0) TOKEN0.safeTransferFrom(_sender, address(this), amountInUsed);
-      if (amountOutCalculated != 0) TOKEN1.safeTransfer(_sender, amountOutCalculated);
+      if (_amountInUsed != 0) TOKEN0.safeTransferFrom(_sender, address(this), _amountInUsed);
+      if (_amountOutCalculated != 0) TOKEN1.safeTransfer(_sender, _amountOutCalculated);
     } else {
       // User sends cash (TOKEN1), receives principal (TOKEN0)
-      if (amountInUsed != 0) TOKEN1.safeTransferFrom(_sender, address(this), amountInUsed);
-      if (amountOutCalculated != 0) TOKEN0.safeTransfer(_sender, amountOutCalculated);
+      if (_amountInUsed != 0) TOKEN1.safeTransferFrom(_sender, address(this), _amountInUsed);
+      if (_amountOutCalculated != 0) TOKEN0.safeTransfer(_sender, _amountOutCalculated);
     }
+
+    emit Swap(_sender, _principalForCash, _amountInUsed, _amountOutCalculated);
     return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(0, 0), 0);
   }
 
   // ============ Internal Functions - Swap Execution ============
 
   /// @notice Executes the main swap loop, iterating through ticks until input is consumed or price
-  /// limit is hit @param amountInGross The gross input amount (before fees)
-  /// @param principalForCash True for PT→cash swap, false for cash→PT swap
-  /// @param priceLimitWad Price limit in WAD; 0 means no limit
-  /// @return amountInUsed Total gross input consumed
-  /// @return amountOutCalculated Total output tokens to send to trader
-  function _executeSwapLoop(uint256 amountInGross, bool principalForCash, uint256 priceLimitWad)
+  /// limit is hit
+  /// @param _amountInGross The gross input amount (before fees)
+  /// @param _principalForCash True for PT→cash swap, false for cash→PT swap
+  /// @param _priceLimitWad Price limit in WAD; 0 means no limit
+  /// @return _amountInUsed Total gross input consumed
+  /// @return _amountOutCalculated Total output tokens to send to trader
+  function _executeSwapLoop(uint256 _amountInGross, bool _principalForCash, uint256 _priceLimitWad)
     internal
-    returns (uint256 amountInUsed, uint256 amountOutCalculated)
+    returns (uint256 _amountInUsed, uint256 _amountOutCalculated)
   {
-    uint256 amountInNet = _netOfFee(amountInGross);
-    uint256 amountInFee = amountInGross - amountInNet;
-    uint256 amountInRemainingNet = amountInNet;
-    SwapContext memory ctx = SwapContext({
-      principalForCash: principalForCash,
-      tickMovingLeft: !principalForCash,
-      priceLimitWad: priceLimitWad
+    uint256 _amountInNet = _netOfFee(_amountInGross);
+    uint256 _amountInRemainingNet = _amountInNet;
+    SwapContext memory _ctx = SwapContext({
+      principalForCash: _principalForCash,
+      tickMovingLeft: !_principalForCash,
+      priceLimitWad: _priceLimitWad
     });
 
-    while (amountInRemainingNet != 0) {
+    while (_amountInRemainingNet != 0) {
       // Slippage protection: stop the swap if the price has moved past the caller's limit.
       // For principal→cash swaps, price decreases so we stop when price falls to the limit.
       // For cash→principal swaps, price increases so we stop when price rises to the limit.
-      if (ctx.priceLimitWad != 0) {
-        uint256 price = uint256(currentPrice);
-        if (ctx.principalForCash ? price <= ctx.priceLimitWad : price >= ctx.priceLimitWad) {
+      if (_ctx.priceLimitWad != 0) {
+        uint256 _price = uint256(currentPrice);
+        if (_ctx.principalForCash ? _price <= _ctx.priceLimitWad : _price >= _ctx.priceLimitWad) {
           break;
         }
       }
 
       // Find next initialized tick
-      int24 nextTick;
-      bool initialized;
+      int24 _nextTick;
+      bool _initialized;
       {
-        int24 searchTick = (ctx.tickMovingLeft && currentTick != type(int24).min)
+        int24 _searchTick = (_ctx.tickMovingLeft && currentTick != type(int24).min)
           ? currentTick - YIELD_PER_TICK
           : currentTick;
-        (nextTick, initialized) = tickBitmap.nextInitializedTickWithinOneWord(
-          searchTick, YIELD_PER_TICK, ctx.tickMovingLeft
+        (_nextTick, _initialized) = tickBitmap.nextInitializedTickWithinOneWord(
+          _searchTick, YIELD_PER_TICK, _ctx.tickMovingLeft
         );
       }
 
       // Compute swap step and update state
-      (uint256 stepNet, uint256 stepOut, int24 newTick) =
-        _executeSwapStep(amountInRemainingNet, nextTick, initialized, ctx);
+      (uint256 _stepNet, uint256 _stepOut, int24 _newTick) =
+        _executeSwapStep(_amountInRemainingNet, _nextTick, _initialized, _ctx);
 
-      amountInRemainingNet -= stepNet;
-      amountOutCalculated += stepOut;
-      currentTick = newTick;
+      _amountInRemainingNet -= _stepNet;
+      _amountOutCalculated += _stepOut;
+      currentTick = _newTick;
     }
 
-    uint256 totalNetUsed = amountInNet - amountInRemainingNet;
-    amountInUsed = totalNetUsed + amountInFee;
-    if (amountInUsed > amountInGross) amountInUsed = amountInGross;
+    uint256 _totalNetUsed = _amountInNet - _amountInRemainingNet;
+    _amountInUsed =
+      FixedPointMathLib.mulDivUp(_totalNetUsed, FEE_DENOMINATOR, FEE_DENOMINATOR - FEE_RATE);
+    if (_amountInUsed > _amountInGross) _amountInUsed = _amountInGross;
   }
 
   /// @notice Executes a single swap step: calculates amounts, updates fees, crosses tick if needed
-  /// @param amountInNet Net input amount (after fees) available for this step
-  /// @param nextTick The next initialized tick boundary
-  /// @param initialized Whether nextTick is an initialized tick with liquidity changes
-  /// @param ctx Swap context containing direction flags
-  /// @return stepNet Net input consumed in this step
-  /// @return stepOut Output tokens produced in this step
-  /// @return newTick The tick position after this step
+  /// @param _amountInNet Net input amount (after fees) available for this step
+  /// @param _nextTick The next initialized tick boundary
+  /// @param _initialized Whether _nextTick is an initialized tick with liquidity changes
+  /// @param _ctx Swap context containing direction flags
   function _executeSwapStep(
-    uint256 amountInNet,
-    int24 nextTick,
-    bool initialized,
-    SwapContext memory ctx
-  ) internal returns (uint256 stepNet, uint256 stepOut, int24 newTick) {
-    (uint256 netConsumed, uint256 amountOut, int256 stepPrice, int24 stepTick) = _calculateSwap(
-      amountInNet.toInt256(), currentPrice, nextTick, ctx.principalForCash, ctx.priceLimitWad
+    uint256 _amountInNet,
+    int24 _nextTick,
+    bool _initialized,
+    SwapContext memory _ctx
+  ) internal returns (uint256, uint256, int24) {
+    (uint256 _netConsumed, uint256 _amountOut, int256 _stepPrice, int24 _stepTick) = _calculateSwap(
+      _amountInNet.toInt256(), currentPrice, _nextTick, _ctx.principalForCash, _ctx.priceLimitWad
     );
-    if (netConsumed == 0) revert FixedFeeSwap__SwapStepProducedZeroIn();
-    if (amountOut == 0) revert FixedFeeSwap__SwapStepProducedZeroOut();
-
-    stepNet = netConsumed;
+    if (_netConsumed == 0) revert FixedFeeSwap__SwapStepProducedZeroIn();
+    if (_amountOut == 0) revert FixedFeeSwap__SwapStepProducedZeroOut();
 
     // Compute fee for this step directly from net consumed and attribute to LPs.
     // Per-step tracking is needed because activeLiquidity changes at tick crossings.
-    uint256 stepFee =
-      FixedPointMathLib.mulDivUp(netConsumed, FEE_RATE, FEE_DENOMINATOR - FEE_RATE);
-    if (stepFee > 0 && activeLiquidity > 0) {
-      if (ctx.principalForCash) {
-        feeGrowthGlobal0X128 += FixedPointMathLib.mulDiv(stepFee, Q128, activeLiquidity);
+    uint256 _stepFee =
+      FixedPointMathLib.mulDivUp(_netConsumed, FEE_RATE, FEE_DENOMINATOR - FEE_RATE);
+    if (_stepFee > 0 && activeLiquidity > 0) {
+      if (_ctx.principalForCash) {
+        feeGrowthGlobal0X128 += FixedPointMathLib.mulDiv(_stepFee, Q128, activeLiquidity);
       } else {
-        feeGrowthGlobal1X128 += FixedPointMathLib.mulDiv(stepFee, Q128, activeLiquidity);
+        feeGrowthGlobal1X128 += FixedPointMathLib.mulDiv(_stepFee, Q128, activeLiquidity);
       }
     }
 
     // Cross tick if needed
-    bool hitBoundary = stepTick == nextTick;
-    if (hitBoundary && initialized) {
-      _crossTick(nextTick);
-      int128 liquidityNet = ticks[nextTick].liquidityNet;
-      if (ctx.tickMovingLeft) liquidityNet = -liquidityNet;
-      activeLiquidity = LiquidityMath.addDelta(activeLiquidity, liquidityNet);
+    bool _hitBoundary = _stepTick == _nextTick;
+    if (_hitBoundary && _initialized) {
+      _crossTick(_nextTick);
+      int128 _liquidityNet = ticks[_nextTick].liquidityNet;
+      if (_ctx.tickMovingLeft) _liquidityNet = -_liquidityNet;
+      activeLiquidity = LiquidityMath.addDelta(activeLiquidity, _liquidityNet);
     }
 
     // Update price and calculate new tick
-    currentPrice = stepPrice;
-    newTick = (ctx.tickMovingLeft && hitBoundary) ? stepTick - YIELD_PER_TICK : stepTick;
-    stepOut = amountOut;
+    currentPrice = _stepPrice;
+    int24 _resultTick =
+      (_ctx.tickMovingLeft && _hitBoundary) ? _stepTick - YIELD_PER_TICK : _stepTick;
+    return (_netConsumed, _amountOut, _resultTick);
   }
 
   /// @notice Routes swap calculation to the appropriate direction-specific function
@@ -574,6 +572,7 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @param _currentPrice The current price at the start of this step
   /// @param _nextTick The next initialized tick boundary
   /// @param _principalToCash True for PT→cash, false for cash→PT
+  /// @param _priceLimitWad Price limit in WAD; 0 means no limit
   /// @return amountInConsumed Amount of input consumed
   /// @return amountOut Amount of output produced
   /// @return newPrice Price after the swap step
@@ -582,18 +581,9 @@ contract FixedFeeSwapMarket is BaseHook {
     int256 _amountIn,
     int256 _currentPrice,
     int24 _nextTick,
-    bool _principalToCash
-  ) internal returns (uint256, uint256, int256, int24) {
-    return _calculateSwap(_amountIn, _currentPrice, _nextTick, _principalToCash, 0);
-  }
-
-  function _calculateSwap(
-    int256 _amountIn,
-    int256 _currentPrice,
-    int24 _nextTick,
     bool _principalToCash,
     uint256 _priceLimitWad
-  ) internal returns (uint256, uint256, int256, int24) {
+  ) internal view returns (uint256, uint256, int256, int24) {
     if (_principalToCash) {
       return _getCashSwapAmount(_amountIn, _currentPrice, _nextTick, _priceLimitWad);
     }
@@ -601,249 +591,157 @@ contract FixedFeeSwapMarket is BaseHook {
   }
 
   // ============ Internal Functions - PT→Cash Swap Math ============
+  //
+  // Worked example — PT→cash swap crossing an initialized tick boundary
+  //
+  // This function computes a single segment; `_executeSwapLoop` orchestrates multiple segments
+  // and handles tick crossing.
+  //
+  // Scenario: trader sells 9,000 PT for cash. Active segment liquidity L0 = 3,000,000.
+  // Next initialized tick is 25 bips away (650 − 625 = 25 bips).
+  //
+  // PT required to traverse exactly to the next boundary:
+  //     PT_in_seg = L0 * (r0 − rNext)
+  // where r0 is the start yield, rNext is the boundary yield, L0 is the segment liquidity.
+  // Here 7,500 PT reaches the boundary; 1,500 PT remains for the next segment.
+  // (25 bips = 0.0025, so L0 = 7,500 / 0.0025 = 3,000,000 = 300 PT per bip.)
+  //
+  // Cash out for any segment is the integral of the discount-factor price over the yield move:
+  //     CashOut = (Lseg / t) * (exp(-r0 * t) - exp(-r1 * t))
+  // where t is time-to-maturity, r0/r1 are the start/end yields for the segment.
+  //
+  // After crossing, the remaining PT moves yield within the next segment (L1 = 1,000,000):
+  //     Δr = X / L1
+  // (1,500 / 1,000,000 = 0.0015 = 15 bips; L1 = 100 PT per bip.)
+  //
+  // Within-tick completion delegates to `_getCashSwapAmountWithinTick`.
+  // Total cash out = sum of per-segment cash outs.
 
-  /// @notice Calculate the cash out for a provided amount of PT in up to the next tick boundary.
-  /// @param _amountIn The amount of PT available to trade for cash.
-  /// @param _currentPrice The price calculated with the current yield tick.
-  /// @param _nextTick The next initialized within one word which is set as the boundary.
-  /// @dev This note documents a PT→cash swap that crosses an initialized tick boundary and
-  /// therefore must be evaluated piecewise, segment-by-segment. This function computes a single
-  /// segment; the outer loop in
-  /// `_executeSwapLoop` orchestrates multiple segments and handles tick crossing.
-  ///
-  /// In the scenario, the trader sells 9,000 PT for cash. The active (current) segment liquidity is
-  /// L0 = 3,000,000. The next initialized tick is 25 bips away (650 − 625 = 25 bips), so the
-  /// trade will first attempt to move the yield from the current yield r0 to the boundary yield
-  /// rNext, consuming PT
-  /// against the active segment liquidity L0. The amount of PT required to traverse exactly to the
-  /// next boundary is computed per segment as:
-  ///
-  ///     PT_in_seg = L0 * (r0 − rNext)
-  ///
-  /// where r0 is the yield at the start of the segment, rNext is the yield at the next initialized
-  /// tick in the direction of the swap, and L0 is the liquidity for that segment (note Lseg can
-  /// change after
-  /// crossing an initialized tick). The implementation must ensure the sign convention matches the
-  /// trade direction (i.e., the expression above should be positive for "PT in" consumed to
-  /// reach the boundary,
-  /// or equivalently an absolute value is taken if the model stores yields in the opposite
-  /// orientation).
-  /// For this trade, 7,500 PT is the amount that reaches the boundary, which means the swap crosses
-  /// the initialized tick after consuming 7,500 PT, and there is 1,500 PT remaining to continue
-  /// swapping in
-  /// the next segment. When the boundary is reached, this function returns `(principalToBoundary,
-  /// cashOutToBoundary, nextTickPrice, nextTick)`, signaling to the caller that a tick crossing is
-  /// needed.
-  /// (With r expressed as a decimal yield, 25 bips = 0.0025, so L0 = 7,500 / 0.0025 = 3,000,000.
-  /// Equivalently, this is 300 PT per bip since 3,000,000 * 0.0001 = 300.)
-  ///
-  /// Cash out for any segment is computed by integrating the discount-factor price over the yield
-  /// move:
-  ///     CashOut = (Lseg / t) * (exp(-r0 * t) - exp(-r1 * t))
-  ///
-  /// where t is the time-to-maturity, r0 is the yield at the start of the segment, and r1 is the
-  /// yield at the end of the segment. For the boundary-crossing segment, r1 is the boundary yield
-  /// rNext and
-  /// Lseg = L0 = 3,000,000. The r0/r1 ordering must be kept consistent with the intended sign of
-  /// CashOut; if the trade direction makes the expression negative under the chosen ordering, the
-  /// implementation
-  /// should either swap the bounds or apply the protocol's sign convention consistently across PT
-  /// and cash deltas.
-  ///
-  /// After the tick is crossed, the remaining PT amount X (here X = 1,500) no longer targets the
-  /// same boundary; instead it moves the yield within the next segment using the next segment
-  /// liquidity
-  /// L1 = 1,000,000. The tick crossing itself (updating `feeGrowthOutside` and adjusting
-  /// `activeLiquidity`) is handled by the caller before invoking this function again with the
-  /// reduced input and new liquidity:
-  ///
-  ///     Δr = X / L1
-  ///
-  /// This yields a new end yield r1 = r0 ± Δr (the ± depends on whether "selling PT" moves
-  /// yield up or down in the model). Once r1 is computed, the remaining cash out is calculated
-  /// using the same integral,
-  /// but with Lseg = L1:
-  ///
-  ///     CashOut = (L1 / t) * (exp(-r0 * t) - exp(-r1 * t))
-  ///
-  /// (Numerically here, Δr = 1,500 / 1,000,000 = 0.0015 = 15 bips; equivalently L1 = 100 PT per
-  /// bip since 1,000,000 * 0.0001 = 100.) When the swap completes within a tick range, this
-  /// function delegates to
-  /// `_getCashSwapAmountWithinTick`, which computes the partial amounts proportionally.
-  ///
-  /// The total cash out for the swap is the sum of the cash out from the boundary-crossing segment
-  /// (using L0) and the cash out from the remainder segment (using L1), and the final yield state
-  /// is the r1
-  /// reached after consuming all 9,000 PT.
-  /// @return amountInConsumed PT consumed in this step. Equals `_amountIn` if the swap completes
-  /// within the tick range, otherwise equals `principalToBoundary` when the boundary is reached.
-  /// @return cashOut Cash tokens to send to the trader for this segment.
-  /// @return newPrice Price after this step, to be used as `_currentPrice` in the next iteration.
-  /// @return newTick Tick after this step. If equal to `_nextTick`, the caller should cross the
-  /// tick.
-  function _getCashSwapAmount(int256 _amountIn, int256 _currentPrice, int24 _nextTick)
-    internal
-    returns (uint256, uint256, int256, int24)
-  {
-    return _getCashSwapAmount(_amountIn, _currentPrice, _nextTick, 0);
-  }
-
+  /// @notice Calculate cash out for PT in, up to the next tick boundary
+  /// @param _amountIn The amount of PT available to trade for cash
+  /// @param _currentPrice The price calculated with the current yield tick
+  /// @param _nextTick The next initialized tick boundary
+  /// @param _priceLimitWad Price limit in WAD; 0 means no limit
+  /// @return _amountInConsumed PT consumed in this step
+  /// @return _cashOut Cash tokens to send to the trader
+  /// @return _newPrice Price after this step
+  /// @return _newTick Tick after this step; if equal to `_nextTick`, caller should cross the tick
   function _getCashSwapAmount(
     int256 _amountIn,
     int256 _currentPrice,
     int24 _nextTick,
     uint256 _priceLimitWad
-  ) internal returns (uint256 amountInConsumed, uint256 cashOut, int256 newPrice, int24 newTick) {
+  )
+    internal
+    view
+    returns (uint256 _amountInConsumed, uint256 _cashOut, int256 _newPrice, int24 _newTick)
+  {
     if (_amountIn <= 0) revert FixedFeeSwap__SwapAmountCannotBeZero();
     if (_currentPrice <= 0) revert FixedFeeSwap__InvalidPriceDirection();
 
-    uint256 scaledTime = _scaledTimeElapsedWad();
-    int256 startYieldWad = _yieldWadFromPrice(_currentPrice, scaledTime);
+    uint256 _scaledTime = _scaledTimeElapsedWad();
+    int256 _startYieldWad = _yieldWadFromPrice(_currentPrice, _scaledTime);
 
-    int256 nextTickPrice = tickToPrice(_nextTick);
-    if (nextTickPrice > _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
+    int256 _nextTickPrice = tickToPrice(_nextTick);
+    if (_nextTickPrice > _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
 
     // For PT→cash, price decreases so the limit is a minimum price.
     // Use the limit as target if it's higher (closer) than the tick boundary.
-    int256 targetPrice = nextTickPrice;
-    int256 targetYieldWad = int256(_nextTick) * int256(WAD);
-    if (targetYieldWad <= startYieldWad) revert FixedFeeSwap__InvalidTickTraversal();
-    if (_priceLimitWad != 0 && int256(_priceLimitWad) > targetPrice) {
-      targetPrice = int256(_priceLimitWad);
-      targetYieldWad = _yieldWadFromPrice(targetPrice, scaledTime);
+    int256 _targetPrice = _nextTickPrice;
+    int256 _targetYieldWad = int256(_nextTick) * int256(WAD);
+    if (_targetYieldWad <= _startYieldWad) revert FixedFeeSwap__InvalidTickTraversal();
+    if (_priceLimitWad != 0 && int256(_priceLimitWad) > _targetPrice) {
+      _targetPrice = int256(_priceLimitWad);
+      _targetYieldWad = _yieldWadFromPrice(_targetPrice, _scaledTime);
     }
 
-    if (targetPrice > _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
-    if (targetYieldWad <= startYieldWad) revert FixedFeeSwap__InvalidTickTraversal();
+    if (_targetPrice > _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
+    if (_targetYieldWad <= _startYieldWad) revert FixedFeeSwap__InvalidTickTraversal();
 
-    uint256 principalToTarget = FixedPointMathLib.mulDivUp(
-      uint256(targetYieldWad - startYieldWad), uint256(activeLiquidity), BIPS * WAD
+    uint256 _principalToTarget = FixedPointMathLib.mulDivUp(
+      uint256(_targetYieldWad - _startYieldWad), uint256(activeLiquidity), BIPS * WAD
     );
-    if (principalToTarget == 0) revert FixedFeeSwap__InvalidTickTraversal();
+    if (_principalToTarget == 0) revert FixedFeeSwap__InvalidTickTraversal();
 
-    if (uint256(_amountIn) >= principalToTarget) {
-      amountInConsumed = principalToTarget;
-      newPrice = targetPrice;
-      cashOut = FixedPointMathLib.mulDiv(
-        uint256(activeLiquidity), uint256(_currentPrice - newPrice), scaledTime
+    if (uint256(_amountIn) >= _principalToTarget) {
+      _amountInConsumed = _principalToTarget;
+      _newPrice = _targetPrice;
+      _cashOut = FixedPointMathLib.mulDiv(
+        uint256(activeLiquidity), uint256(_currentPrice - _newPrice), _scaledTime
       );
-      newTick = targetPrice == nextTickPrice ? _nextTick : _wadToTick(targetYieldWad);
-      return (amountInConsumed, cashOut, newPrice, newTick);
+      _newTick = _targetPrice == _nextTickPrice ? _nextTick : _wadToTick(_targetYieldWad);
+      return (_amountInConsumed, _cashOut, _newPrice, _newTick);
     }
 
-    return _getCashSwapAmountWithinTick(uint256(_amountIn), _currentPrice, startYieldWad);
+    return _getCashSwapAmountWithinTick(uint256(_amountIn), _currentPrice, _startYieldWad);
   }
 
   /// @notice Computes within-tick swap for PT→cash using exact exponential math
   /// @dev Uses expWad to handle fractional tick movements: endPrice = exp(-endYield / BIPS *
-  /// scaledTime) @param amountIn The amount of principal tokens to swap
-  /// @param startPrice The price at the start of this swap step
-  /// @param startYieldWad The WAD-scaled yield at the start of this swap step
-  /// @return amountInConsumed Amount of input consumed
-  /// @return cashOut Amount of cash tokens output
-  /// @return newPrice Price after the swap
-  /// @return newTick Tick after the swap
-  function _getCashSwapAmountWithinTick(uint256 amountIn, int256 startPrice, int256 startYieldWad)
+  /// scaledTime) @param _amountIn The amount of principal tokens to swap
+  /// @param _startPrice The price at the start of this swap step
+  /// @param _startYieldWad The WAD-scaled yield at the start of this swap step
+  /// @return _amountInConsumed Amount of input consumed
+  /// @return _cashOut Amount of cash tokens output
+  /// @return _newPrice Price after the swap
+  /// @return _newTick Tick after the swap
+  function _getCashSwapAmountWithinTick(
+    uint256 _amountIn,
+    int256 _startPrice,
+    int256 _startYieldWad
+  )
     internal
     view
-    returns (uint256 amountInConsumed, uint256 cashOut, int256 newPrice, int24 newTick)
+    returns (uint256 _amountInConsumed, uint256 _cashOut, int256 _newPrice, int24 _newTick)
   {
-    amountInConsumed = amountIn;
-    uint256 scaledTime = _scaledTimeElapsedWad();
+    _amountInConsumed = _amountIn;
+    uint256 _scaledTime = _scaledTimeElapsedWad();
 
     // Yield movement is linear in PT: Δyield = PT_in * BIPS / L
-    int256 endYieldWad = startYieldWad
-      + int256(FixedPointMathLib.mulDiv(amountIn, BIPS * WAD, uint256(activeLiquidity)));
-    newPrice = _priceFromYieldWad(endYieldWad, scaledTime);
+    int256 _endYieldWad = _startYieldWad
+      + int256(FixedPointMathLib.mulDiv(_amountIn, BIPS * WAD, uint256(activeLiquidity)));
+    _newPrice = _priceFromYieldWad(_endYieldWad, _scaledTime);
 
     // Cash_out = (L / scaledTime) * (startPrice - newPrice)
-    if (newPrice > startPrice) revert FixedFeeSwap__InvalidPriceDirection();
-    cashOut = FixedPointMathLib.mulDiv(
-      uint256(activeLiquidity), uint256(startPrice - newPrice), scaledTime
+    if (_newPrice > _startPrice) revert FixedFeeSwap__InvalidPriceDirection();
+    _cashOut = FixedPointMathLib.mulDiv(
+      uint256(activeLiquidity), uint256(_startPrice - _newPrice), _scaledTime
     );
 
-    newTick = _wadToTick(endYieldWad);
+    _newTick = _wadToTick(_endYieldWad);
   }
 
   // ============ Internal Functions - Cash→PT Swap Math ============
+  //
+  // Worked example — cash→PT swap crossing an initialized tick boundary
+  //
+  // This function computes a single segment; `_executeSwapLoop` orchestrates multiple segments
+  // and handles tick crossing.
+  //
+  // Scenario: t = 0.5, initial yield r0 = 665, next initialized tick rNext = 650.
+  // Segment 1 liquidity L1 = 3,500,000; after crossing, L2 = 1,000,000. Trader sells 6,000 cash.
+  //
+  // Cash required to reach the next tick boundary:
+  //     Cash_in_seg = (L / t) * (exp(-rNext * t) - exp(-r * t))
+  //
+  // If cash budget >= Cash_in_seg, the swap reaches the boundary. The caller crosses the tick
+  // (updating feeGrowthOutside and activeLiquidity) then re-invokes with remaining cash.
+  //
+  // If cash budget < Cash_in_seg, the swap stays within the segment. Solving for end yield:
+  //     r1 = -(1 / t) * ln( exp(-r0 * t) + (t / L) * C )
+  //
+  // Within-tick completion delegates to `_getPrincipalSwapAmountWithinTick`.
+  // Total PT out = sum of per-segment PT outs.
 
-  /// @notice Calculate the PT out for a provided amount of cash in up to the next tick boundary.
-  /// @param _amountIn The amount of cash available to trade for PT.
-  /// @param _currentPrice The price calculated with the current yield tick.
-  /// @param _nextTick The next initialized tick within one word which is set as the boundary.
-  /// @dev This note documents a cash→PT swap where the trader provides cash in and receives PT
-  /// out. This function computes a single segment; the outer loop in `_executeSwapLoop`
-  /// orchestrates multiple segments
-  /// and handles tick crossing. The swap may cross one or more initialized tick boundaries. Because
-  /// the price is expressed via the discount factor exp(-r * t), the swap must be evaluated
-  /// segment-by-segment between initialized
-  /// ticks, consuming cash to move the yield from the current yield r0 toward the next boundary
-  /// yield rNext.
-  /// The concrete scenario assumed by this note is t = 0.5, an initial yield r0 = 665, and the next
-  /// initialized tick boundary at rNext = 650. The swap starts in segment 1 with active liquidity
-  /// L1 = 3,500,000. If the swap reaches the boundary and crosses the initialized tick, the active
-  /// liquidity updates to L2 = 1,000,000 for segment 2. The trader is selling 6,000 units of cash.
-  ///
-  /// The implementation first computes how much cash is required to move from the current yield r
-  /// to the next initialized tick at yield rNext within the current segment liquidity L. The cash
-  /// required to
-  /// reach the next tick boundary is:
-  ///
-  ///     Cash_in_seg = (L / t) * (exp(-rNext * t) - exp(-r * t))
-  ///
-  /// where r is the yield at the start of the segment step and L is the active segment liquidity
-  /// (L = L1 before the first crossing, and L = L2 after crossing to the next segment).
-  ///
-  /// If `Cash_in_seg` is less than or equal to the trader's remaining cash budget, then the swap
-  /// reaches the boundary at rNext = 650. In that case, the implementation consumes exactly
-  /// `Cash_in_seg` cash, updates
-  /// the state to the boundary yield, and returns `(cashInToBoundary, principalOutToBoundary,
-  /// nextTickPrice, nextTick)`, signaling to the caller that a tick crossing is needed. The caller
-  /// crosses the initialized
-  /// tick (updating `feeGrowthOutside` and adjusting `activeLiquidity` from L1 to L2) before
-  /// invoking this function again. This loop continues until either the cash is fully consumed or
-  /// the swap can no longer
-  /// reach the next boundary with the remaining cash.
-  ///
-  /// If instead the trader's remaining cash is insufficient to reach the next initialized tick,
-  /// the swap stays within the current segment. In that partial-fill case, the remaining cash
-  /// amount C moves the
-  /// discount factor from exp(-r0 * t) to a new level exp(-r1 * t) according to the segment
-  /// liquidity. Solving for the end yield r1 gives:
-  ///
-  ///     r1 = -(1 / t) * ln( exp(-r0 * t) + (t / L) * C )
-  ///
-  /// where r0 is the yield at the start of this final segment step (665 for the first segment in
-  /// this scenario), L is the active liquidity for that step (L1 unless the boundary has already
-  /// been crossed),
-  /// and C is the remaining cash being swapped in during this step. The implementation must ensure
-  /// the quantity inside the logarithm remains strictly positive; under correct direction
-  /// conventions this
-  /// should hold automatically, but defensive checks are appropriate because an invalid sign
-  /// convention or an over-consumption bug would violate the domain of ln().
-  ///
-  /// Once r1 is computed, the swap finalizes within the segment, and the PT out for that final step
-  /// (and thus the total PT out for the trade) is derived from the protocol's cash→PT accounting
-  /// using the
-  /// updated end yield. When the swap completes within a tick range, this function delegates to
-  /// `_getPrincipalSwapAmountWithinTick`, which computes the partial amounts proportionally. The
-  /// total swap outcome is the cumulative PT out across any full boundary-crossing steps plus the
-  /// PT out from this
-  /// final in-segment step, and the final yield state is r1 (or the final boundary yield if the
-  /// last step landed exactly on an initialized tick).
-  /// @return amountInConsumed Cash consumed in this step. Equals `_amountIn` if the swap completes
-  /// within the tick range, otherwise equals `cashInToBoundary` when the boundary is reached.
-  /// @return principalOut PT tokens to send to the trader for this segment.
-  /// @return newPrice Price after this step, to be used as `_currentPrice` in the next iteration.
-  /// @return newTick Tick after this step. If equal to `_nextTick`, the caller should cross the
-  /// tick.
-  function _getPrincipalSwapAmount(int256 _amountIn, int256 _currentPrice, int24 _nextTick)
-    internal
-    returns (uint256, uint256, int256, int24)
-  {
-    return _getPrincipalSwapAmount(_amountIn, _currentPrice, _nextTick, 0);
-  }
-
+  /// @notice Calculate PT out for cash in, up to the next tick boundary
+  /// @param _amountIn The amount of cash available to trade for PT
+  /// @param _currentPrice The price calculated with the current yield tick
+  /// @param _nextTick The next initialized tick boundary
+  /// @param _priceLimitWad Price limit in WAD; 0 means no limit
+  /// @return _amountInConsumed Cash consumed in this step
+  /// @return _principalOut PT tokens to send to the trader
+  /// @return _newPrice Price after this step
+  /// @return _newTick Tick after this step; if equal to `_nextTick`, caller should cross the tick
   function _getPrincipalSwapAmount(
     int256 _amountIn,
     int256 _currentPrice,
@@ -851,83 +749,84 @@ contract FixedFeeSwapMarket is BaseHook {
     uint256 _priceLimitWad
   )
     internal
-    returns (uint256 amountInConsumed, uint256 principalOut, int256 newPrice, int24 newTick)
+    view
+    returns (uint256 _amountInConsumed, uint256 _principalOut, int256 _newPrice, int24 _newTick)
   {
     if (_amountIn <= 0) revert FixedFeeSwap__SwapAmountCannotBeZero();
     if (_currentPrice <= 0) revert FixedFeeSwap__InvalidPriceDirection();
 
-    uint256 scaledTime = _scaledTimeElapsedWad();
-    int256 startYieldWad = _yieldWadFromPrice(_currentPrice, scaledTime);
+    uint256 _scaledTime = _scaledTimeElapsedWad();
+    int256 _startYieldWad = _yieldWadFromPrice(_currentPrice, _scaledTime);
 
-    int256 nextTickPrice = tickToPrice(_nextTick);
-    if (nextTickPrice < _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
+    int256 _nextTickPrice = tickToPrice(_nextTick);
+    if (_nextTickPrice < _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
 
     // For cash→PT, price increases so the limit is a maximum price.
     // Use the limit as target if it's lower (closer) than the tick boundary.
-    int256 targetPrice = nextTickPrice;
-    int256 targetYieldWad = int256(_nextTick) * int256(WAD);
-    if (targetYieldWad >= startYieldWad) revert FixedFeeSwap__InvalidTickTraversal();
-    if (_priceLimitWad != 0 && int256(_priceLimitWad) < targetPrice) {
-      targetPrice = int256(_priceLimitWad);
-      targetYieldWad = _yieldWadFromPrice(targetPrice, scaledTime);
+    int256 _targetPrice = _nextTickPrice;
+    int256 _targetYieldWad = int256(_nextTick) * int256(WAD);
+    if (_targetYieldWad >= _startYieldWad) revert FixedFeeSwap__InvalidTickTraversal();
+    if (_priceLimitWad != 0 && int256(_priceLimitWad) < _targetPrice) {
+      _targetPrice = int256(_priceLimitWad);
+      _targetYieldWad = _yieldWadFromPrice(_targetPrice, _scaledTime);
     }
 
-    if (targetPrice < _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
-    if (targetYieldWad >= startYieldWad) revert FixedFeeSwap__InvalidTickTraversal();
+    if (_targetPrice < _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
+    if (_targetYieldWad >= _startYieldWad) revert FixedFeeSwap__InvalidTickTraversal();
 
-    uint256 priceDiff = uint256(targetPrice - _currentPrice);
-    uint256 cashInToTarget =
-      FixedPointMathLib.mulDivUp(priceDiff, uint256(activeLiquidity), scaledTime);
-    if (cashInToTarget == 0) revert FixedFeeSwap__InvalidTickTraversal();
+    uint256 _priceDiff = uint256(_targetPrice - _currentPrice);
+    uint256 _cashInToTarget =
+      FixedPointMathLib.mulDivUp(_priceDiff, uint256(activeLiquidity), _scaledTime);
+    if (_cashInToTarget == 0) revert FixedFeeSwap__InvalidTickTraversal();
 
-    if (uint256(_amountIn) >= cashInToTarget) {
-      amountInConsumed = cashInToTarget;
-      newPrice = targetPrice;
+    if (uint256(_amountIn) >= _cashInToTarget) {
+      _amountInConsumed = _cashInToTarget;
+      _newPrice = _targetPrice;
 
-      uint256 yieldDeltaWad = uint256(startYieldWad - targetYieldWad);
-      principalOut = FixedPointMathLib.mulDiv(uint256(activeLiquidity), yieldDeltaWad, BIPS * WAD);
-      newTick = targetPrice == nextTickPrice ? _nextTick : _wadToTick(targetYieldWad);
-      return (amountInConsumed, principalOut, newPrice, newTick);
+      uint256 _yieldDeltaWad = uint256(_startYieldWad - _targetYieldWad);
+      _principalOut = FixedPointMathLib.mulDiv(uint256(activeLiquidity), _yieldDeltaWad, BIPS * WAD);
+      _newTick = _targetPrice == _nextTickPrice ? _nextTick : _wadToTick(_targetYieldWad);
+      return (_amountInConsumed, _principalOut, _newPrice, _newTick);
     }
 
-    return _getPrincipalSwapAmountWithinTick(uint256(_amountIn), _currentPrice, startYieldWad);
+    return _getPrincipalSwapAmountWithinTick(uint256(_amountIn), _currentPrice, _startYieldWad);
   }
 
   /// @notice Computes within-tick swap for cash→PT using exact logarithm math
   /// @dev Uses lnWad to compute: endYield = -ln(newPrice) / scaledTime * BIPS, then PT_out = L *
-  /// (startYield - endYield) / BIPS @param amountIn The amount of cash tokens to swap
-  /// @param startPrice The price at the start of this swap step
-  /// @param startYieldWad The WAD-scaled yield at the start of this swap step
-  /// @return amountInConsumed Amount of input consumed
-  /// @return principalOut Amount of principal tokens output
-  /// @return newPrice Price after the swap
-  /// @return newTick Tick after the swap
+  /// (startYield - endYield) / BIPS @param _amountIn The amount of cash tokens to swap
+  /// @param _startPrice The price at the start of this swap step
+  /// @param _startYieldWad The WAD-scaled yield at the start of this swap step
+  /// @return _amountInConsumed Amount of input consumed
+  /// @return _principalOut Amount of principal tokens output
+  /// @return _newPrice Price after the swap
+  /// @return _newTick Tick after the swap
   function _getPrincipalSwapAmountWithinTick(
-    uint256 amountIn,
-    int256 startPrice,
-    int256 startYieldWad
+    uint256 _amountIn,
+    int256 _startPrice,
+    int256 _startYieldWad
   )
     internal
     view
-    returns (uint256 amountInConsumed, uint256 principalOut, int256 newPrice, int24 newTick)
+    returns (uint256 _amountInConsumed, uint256 _principalOut, int256 _newPrice, int24 _newTick)
   {
-    amountInConsumed = amountIn;
-    uint256 scaledTime = _scaledTimeElapsedWad();
+    _amountInConsumed = _amountIn;
+    uint256 _scaledTime = _scaledTimeElapsedWad();
 
     // newPrice = startPrice + (scaledTime / L) * cashIn
-    newPrice =
-      startPrice + int256(FixedPointMathLib.mulDiv(scaledTime, amountIn, uint256(activeLiquidity)));
-    if (newPrice < startPrice) revert FixedFeeSwap__InvalidPriceDirection();
+    _newPrice = _startPrice
+      + int256(FixedPointMathLib.mulDiv(_scaledTime, _amountIn, uint256(activeLiquidity)));
+    if (_newPrice < _startPrice) revert FixedFeeSwap__InvalidPriceDirection();
 
     // endYieldWad = -ln(newPrice) / scaledTime * BIPS * WAD
-    int256 endYieldWad = _yieldWadFromPrice(newPrice, scaledTime);
-    newTick = _wadToTick(endYieldWad);
+    int256 _endYieldWad = _yieldWadFromPrice(_newPrice, _scaledTime);
+    _newTick = _wadToTick(_endYieldWad);
 
     // PT_out = L * (startYield - endYield) / BIPS using WAD precision
-    int256 yieldMovedWad = startYieldWad - endYieldWad;
-    if (yieldMovedWad <= 0) return (amountInConsumed, 0, newPrice, newTick);
-    principalOut =
-      FixedPointMathLib.mulDiv(uint256(activeLiquidity), uint256(yieldMovedWad), BIPS * WAD);
+    int256 _yieldMovedWad = _startYieldWad - _endYieldWad;
+    if (_yieldMovedWad <= 0) return (_amountInConsumed, 0, _newPrice, _newTick);
+    _principalOut =
+      FixedPointMathLib.mulDiv(uint256(activeLiquidity), uint256(_yieldMovedWad), BIPS * WAD);
   }
 
   // ============ Internal Functions - Liquidity Management ============
@@ -941,66 +840,53 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @return The token amounts required to deposit (positive) or to withdraw (negative)
   function _modifyLiquidity(address _owner, int24 _tickUpper, int24 _tickLower, int128 _liquidity)
     internal
-    returns (BalanceDelta memory)
+    returns (TokenDelta memory)
   {
     if (_tickLower >= _tickUpper) revert FixedFeeSwap__InvalidTickRange();
-    if (_liquidity == 0) return BalanceDelta({amount0: 0, amount1: 0});
+    if (_liquidity == 0) return TokenDelta({amount0: 0, amount1: 0});
 
-    bytes32 positionId = keccak256(abi.encodePacked(_tickUpper, _tickLower, _owner));
-    PositionInfo storage position = positions[positionId];
+    bytes32 _positionId = _getPositionId(_owner, _tickUpper, _tickLower);
+    PositionInfo storage _position = positions[_positionId];
 
     // Accrue fees before mutating ticks (must happen before tick data is cleared)
-    if (position.owner != address(0)) _accruePositionFees(position);
+    if (_position.owner != address(0)) _accruePositionFees(_position);
 
     // Mutate ticks / bitmap / activeLiquidity
-    bool _flippedLower = false;
-    bool _flippedUpper = false;
-    uint128 _liquidityGrossAfterLower = 0;
-    uint128 _liquidityGrossAfterUpper = 0;
+    (bool _flippedLower,) = _updateTickLiquidity(_tickLower, _liquidity, false);
+    (bool _flippedUpper,) = _updateTickLiquidity(_tickUpper, _liquidity, true);
 
-    // Adding liquidity, make sure ticks are available and reflect the new liquidity
-    if (_liquidity != 0) {
-      (_flippedLower, _liquidityGrossAfterLower) =
-        _updateTickLiquidity(_tickLower, _liquidity, false);
-      (_flippedUpper, _liquidityGrossAfterUpper) =
-        _updateTickLiquidity(_tickUpper, _liquidity, true);
-
-      // initialize tick
-      if (_flippedLower) tickBitmap.flipTick(_tickLower, YIELD_PER_TICK);
-
-      // initialize tick
-      if (_flippedUpper) tickBitmap.flipTick(_tickUpper, YIELD_PER_TICK);
+    if (_flippedLower) {
+      tickBitmap.flipTick(_tickLower, YIELD_PER_TICK);
+      if (_liquidity < 0) delete ticks[_tickLower];
     }
-    if (_liquidity < 0) {
-      // No liquidity left update
-      if (_flippedLower) delete ticks[_tickLower];
-
-      // No liquidity left update
-      if (_flippedUpper) delete ticks[_tickUpper];
+    if (_flippedUpper) {
+      tickBitmap.flipTick(_tickUpper, YIELD_PER_TICK);
+      if (_liquidity < 0) delete ticks[_tickUpper];
     }
 
     // Get token amounts owed for the liquidity
-    if (_liquidity != 0) {
-      // Get current tick and price
-      if (currentTick < _tickLower) {
-        return BalanceDelta({
-          amount0: _getAmountPrincipleDelta(_tickLower, _tickUpper, _liquidity).toInt128(),
-          amount1: 0
-        });
-      } else if (currentTick < _tickUpper) {
-        // Added to active liquidity since the price is in the range
-        activeLiquidity = LiquidityMath.addDelta(activeLiquidity, _liquidity);
+    TokenDelta memory _delta;
+    if (currentTick < _tickLower) {
+      _delta = TokenDelta({
+        amount0: _getAmountPrincipalDelta(_tickLower, _tickUpper, _liquidity).toInt128(), amount1: 0
+      });
+    } else if (currentTick < _tickUpper) {
+      activeLiquidity = LiquidityMath.addDelta(activeLiquidity, _liquidity);
 
-        return BalanceDelta({
-          amount0: _getAmountPrincipleDelta(currentTick, _tickUpper, _liquidity).toInt128(),
-          amount1: _getAmountCashDelta(_tickLower, currentTick, _liquidity).toInt128()
-        });
-      } else {
-        return BalanceDelta({
-          amount0: 0, amount1: _getAmountCashDelta(_tickLower, _tickUpper, _liquidity).toInt128()
-        });
-      }
+      _delta = TokenDelta({
+        amount0: _getAmountPrincipalDelta(currentTick, _tickUpper, _liquidity).toInt128(),
+        amount1: _getAmountCashDelta(_tickLower, currentTick, _liquidity).toInt128()
+      });
+    } else {
+      _delta = TokenDelta({
+        amount0: 0, amount1: _getAmountCashDelta(_tickLower, _tickUpper, _liquidity).toInt128()
+      });
     }
+
+    emit LiquidityModified(
+      _positionId, _owner, _tickLower, _tickUpper, _liquidity, _delta.amount0, _delta.amount1
+    );
+    return _delta;
   }
 
   /// @notice Updates the liquidity at a tick and initializes fee growth if tick is newly
@@ -1015,17 +901,17 @@ contract FixedFeeSwapMarket is BaseHook {
     internal
     returns (bool, uint128)
   {
-    TickInfo storage info = ticks[_tick];
+    TickInfo storage _info = ticks[_tick];
 
-    uint128 _liquidityGrossBefore = info.liquidityGross;
-    int128 _liquidityNetBefore = info.liquidityNet;
+    uint128 _liquidityGrossBefore = _info.liquidityGross;
+    int128 _liquidityNetBefore = _info.liquidityNet;
 
     uint128 _liquidityGrossAfter;
     if (_liquidityDelta > 0) {
       _liquidityGrossAfter = _liquidityGrossBefore + _liquidityDelta.toUint128();
     } else {
       if (_liquidityGrossBefore < _liquidityDelta.abs()) {
-        revert("Subtraction would cause underflow");
+        revert FixedFeeSwap__TickLiquidityGrossUnderflow();
       }
       _liquidityGrossAfter = _liquidityGrossBefore - uint128(_liquidityDelta.abs());
     }
@@ -1036,8 +922,8 @@ contract FixedFeeSwapMarket is BaseHook {
     // By convention, assume all prior fee growth occurred below this tick
     if (_liquidityGrossBefore == 0 && _liquidityGrossAfter > 0) {
       if (_tick <= currentTick) {
-        info.feeGrowthOutside0X128 = feeGrowthGlobal0X128;
-        info.feeGrowthOutside1X128 = feeGrowthGlobal1X128;
+        _info.feeGrowthOutside0X128 = feeGrowthGlobal0X128;
+        _info.feeGrowthOutside1X128 = feeGrowthGlobal1X128;
       }
       // If tick > currentTick, feeGrowthOutside stays 0 (all growth is below)
     }
@@ -1047,8 +933,8 @@ contract FixedFeeSwapMarket is BaseHook {
     int128 _liquidityNet =
       _upper ? _liquidityNetBefore - _liquidityDelta : _liquidityNetBefore + _liquidityDelta;
 
-    info.liquidityGross = _liquidityGrossAfter;
-    info.liquidityNet = _liquidityNet;
+    _info.liquidityGross = _liquidityGrossAfter;
+    _info.liquidityNet = _liquidityNet;
 
     return (_flipped, _liquidityGrossAfter);
   }
@@ -1057,31 +943,32 @@ contract FixedFeeSwapMarket is BaseHook {
   function _requirePositionOwner(bytes32 _positionId)
     internal
     view
-    returns (PositionInfo storage position)
+    returns (PositionInfo storage _position)
   {
-    position = positions[_positionId];
-    if (position.owner == address(0)) revert FixedFeeSwap__PositionNotFound();
-    if (position.owner != msg.sender) revert FixedFeeSwap__NotPositionOwner();
+    _position = positions[_positionId];
+    if (_position.owner == address(0)) revert FixedFeeSwap__PositionNotFound();
+    if (_position.owner != msg.sender) revert FixedFeeSwap__NotPositionOwner();
   }
 
   // ============ Internal Functions - Token Amount Calculations ============
 
   /// @notice Calculates the principal token amount for a liquidity position across a tick range
-  /// @dev Amount is linear in tick range: amount = liquidity * (upperYield - lowerYield)
+  /// @dev Amount = liquidity * (upperYield - lowerYield) / BIPS, consistent with swap math
   /// @param _lowerYield The lower tick boundary of the range
   /// @param _upperYield The upper tick boundary of the range
   /// @param _liquidity The liquidity amount, positive for mint and negative for burn
   /// @return The principal token delta: positive values indicate deposit required, negative values
   /// indicate withdrawal
-  function _getAmountPrincipleDelta(int24 _lowerYield, int24 _upperYield, int128 _liquidity)
+  function _getAmountPrincipalDelta(int24 _lowerYield, int24 _upperYield, int128 _liquidity)
     internal
     pure
     returns (int256)
   {
-    int256 liquidity = int256(_liquidity);
-    uint256 absLiquidity = liquidity.abs();
-    uint256 amount = absLiquidity * uint256(uint24(_upperYield - _lowerYield));
-    return liquidity < 0 ? -int256(amount) : int256(amount);
+    int256 _liq = int256(_liquidity);
+    uint256 _absLiquidity = _liq.abs();
+    uint256 _amount =
+      FixedPointMathLib.mulDiv(_absLiquidity, uint256(uint24(_upperYield - _lowerYield)), BIPS);
+    return _liq < 0 ? -int256(_amount) : int256(_amount);
   }
 
   /// @notice Calculates the cash token amount for a liquidity position across a tick range
@@ -1093,94 +980,100 @@ contract FixedFeeSwapMarket is BaseHook {
   /// indicate withdrawal
   function _getAmountCashDelta(int24 _lowerYield, int24 _upperYield, int128 _liquidity)
     internal
+    view
     returns (int256)
   {
-    int256 liquidity = int256(_liquidity);
-    uint256 absLiquidity = liquidity.abs();
+    int256 _liq = int256(_liquidity);
+    uint256 _absLiquidity = _liq.abs();
     int256 _upperTickPrice = tickToPrice(_upperYield);
     int256 _lowerTickPrice = tickToPrice(_lowerYield);
-    uint256 scaledTimeWad = _scaledTimeElapsedWad();
+    uint256 _scaledTimeWad = _scaledTimeElapsedWad();
     if (_lowerTickPrice < _upperTickPrice) revert FixedFeeSwap__InvalidPriceDirection();
-    uint256 priceDiff = uint256(_lowerTickPrice - _upperTickPrice);
-    uint256 amount = FixedPointMathLib.mulDiv(absLiquidity, priceDiff, scaledTimeWad);
-    return liquidity < 0 ? -int256(amount) : int256(amount);
+    uint256 _priceDiff = uint256(_lowerTickPrice - _upperTickPrice);
+    uint256 _amount = FixedPointMathLib.mulDiv(_absLiquidity, _priceDiff, _scaledTimeWad);
+    return _liq < 0 ? -int256(_amount) : int256(_amount);
   }
 
   // ============ Internal Functions - Fee Tracking ============
 
   /// @notice Accrues pending fees for a position and updates its fee growth snapshots
-  /// @param position The position storage pointer to update
-  function _accruePositionFees(PositionInfo storage position) internal {
-    if (position.liquidity <= 0) return;
+  /// @param _position The position storage pointer to update
+  function _accruePositionFees(PositionInfo storage _position) internal {
+    if (_position.liquidity <= 0) return;
 
-    (uint256 fg0, uint256 fg1) = _getFeeGrowthInside(position.tickLower, position.tickUpper);
-    uint256 liq = uint256(uint128(position.liquidity));
+    (uint256 _fg0, uint256 _fg1) = _getFeeGrowthInside(_position.tickLower, _position.tickUpper);
+    uint256 _liq = uint256(uint128(_position.liquidity));
 
     // Note: Cast to uint128 assumes fee amounts won't exceed type(uint128).max.
     // This is safe in practice as it would require mass fee accumulation beyond realistic volumes.
-    position.tokensOwed0 += uint128(
-      FixedPointMathLib.mulDiv(fg0 - position.feeGrowthInside0LastX128, liq, Q128)
+    _position.tokensOwed0 += uint128(
+      FixedPointMathLib.mulDiv(_fg0 - _position.feeGrowthInside0LastX128, _liq, Q128)
     );
-    position.tokensOwed1 += uint128(
-      FixedPointMathLib.mulDiv(fg1 - position.feeGrowthInside1LastX128, liq, Q128)
+    _position.tokensOwed1 += uint128(
+      FixedPointMathLib.mulDiv(_fg1 - _position.feeGrowthInside1LastX128, _liq, Q128)
     );
 
-    position.feeGrowthInside0LastX128 = fg0;
-    position.feeGrowthInside1LastX128 = fg1;
+    _position.feeGrowthInside0LastX128 = _fg0;
+    _position.feeGrowthInside1LastX128 = _fg1;
   }
 
   /// @notice Refreshes fee growth snapshots for a position (used when liquidity goes from 0 to
-  /// positive) @param position The position storage pointer to update
-  function _refreshFeeSnapshots(PositionInfo storage position) internal {
-    (uint256 fg0, uint256 fg1) = _getFeeGrowthInside(position.tickLower, position.tickUpper);
-    position.feeGrowthInside0LastX128 = fg0;
-    position.feeGrowthInside1LastX128 = fg1;
+  /// positive)
+  /// @param _position The position storage pointer to update
+  function _refreshFeeSnapshots(PositionInfo storage _position) internal {
+    (uint256 _fg0, uint256 _fg1) = _getFeeGrowthInside(_position.tickLower, _position.tickUpper);
+    _position.feeGrowthInside0LastX128 = _fg0;
+    _position.feeGrowthInside1LastX128 = _fg1;
   }
 
   /// @notice Calculates fee growth inside a tick range
-  /// @param tickLower The lower tick boundary
-  /// @param tickUpper The upper tick boundary
-  /// @return fg0 Fee growth for TOKEN0 inside the range
-  /// @return fg1 Fee growth for TOKEN1 inside the range
-  function _getFeeGrowthInside(int24 tickLower, int24 tickUpper)
+  /// @param _tickLower The lower tick boundary
+  /// @param _tickUpper The upper tick boundary
+  /// @return _fg0 Fee growth for TOKEN0 inside the range
+  /// @return _fg1 Fee growth for TOKEN1 inside the range
+  function _getFeeGrowthInside(int24 _tickLower, int24 _tickUpper)
     internal
     view
-    returns (uint256 fg0, uint256 fg1)
+    returns (uint256 _fg0, uint256 _fg1)
   {
-    TickInfo storage lower = ticks[tickLower];
-    TickInfo storage upper = ticks[tickUpper];
+    TickInfo storage _lower = ticks[_tickLower];
+    TickInfo storage _upper = ticks[_tickUpper];
 
-    bool belowLower = currentTick < tickLower;
-    bool aboveUpper = currentTick >= tickUpper;
+    bool _belowLower = currentTick < _tickLower;
+    bool _aboveUpper = currentTick >= _tickUpper;
 
-    uint256 below0 =
-      belowLower ? feeGrowthGlobal0X128 - lower.feeGrowthOutside0X128 : lower.feeGrowthOutside0X128;
-    uint256 below1 =
-      belowLower ? feeGrowthGlobal1X128 - lower.feeGrowthOutside1X128 : lower.feeGrowthOutside1X128;
-    uint256 above0 =
-      aboveUpper ? feeGrowthGlobal0X128 - upper.feeGrowthOutside0X128 : upper.feeGrowthOutside0X128;
-    uint256 above1 =
-      aboveUpper ? feeGrowthGlobal1X128 - upper.feeGrowthOutside1X128 : upper.feeGrowthOutside1X128;
+    uint256 _below0 = _belowLower
+      ? feeGrowthGlobal0X128 - _lower.feeGrowthOutside0X128
+      : _lower.feeGrowthOutside0X128;
+    uint256 _below1 = _belowLower
+      ? feeGrowthGlobal1X128 - _lower.feeGrowthOutside1X128
+      : _lower.feeGrowthOutside1X128;
+    uint256 _above0 = _aboveUpper
+      ? feeGrowthGlobal0X128 - _upper.feeGrowthOutside0X128
+      : _upper.feeGrowthOutside0X128;
+    uint256 _above1 = _aboveUpper
+      ? feeGrowthGlobal1X128 - _upper.feeGrowthOutside1X128
+      : _upper.feeGrowthOutside1X128;
 
-    fg0 = feeGrowthGlobal0X128 - below0 - above0;
-    fg1 = feeGrowthGlobal1X128 - below1 - above1;
+    _fg0 = feeGrowthGlobal0X128 - _below0 - _above0;
+    _fg1 = feeGrowthGlobal1X128 - _below1 - _above1;
   }
 
   /// @notice Updates fee growth outside values when crossing a tick
   /// @dev Crossing a tick flips the meaning of "outside" - subtracting from global inverts
   ///      the above/below perspective. This is the standard Uniswap v3 tick crossing pattern.
-  /// @param tick The tick being crossed
-  function _crossTick(int24 tick) internal {
-    TickInfo storage info = ticks[tick];
-    info.feeGrowthOutside0X128 = feeGrowthGlobal0X128 - info.feeGrowthOutside0X128;
-    info.feeGrowthOutside1X128 = feeGrowthGlobal1X128 - info.feeGrowthOutside1X128;
+  /// @param _tick The tick being crossed
+  function _crossTick(int24 _tick) internal {
+    TickInfo storage _info = ticks[_tick];
+    _info.feeGrowthOutside0X128 = feeGrowthGlobal0X128 - _info.feeGrowthOutside0X128;
+    _info.feeGrowthOutside1X128 = feeGrowthGlobal1X128 - _info.feeGrowthOutside1X128;
   }
 
   // ============ Internal Functions - Fee Helpers ============
 
   /// @notice Returns the amount available to swap after fees, given a gross exact-in amount.
-  function _netOfFee(uint256 amountInGross) internal view returns (uint256) {
-    return FixedPointMathLib.mulDiv(amountInGross, FEE_DENOMINATOR - FEE_RATE, FEE_DENOMINATOR);
+  function _netOfFee(uint256 _amountInGross) internal view returns (uint256) {
+    return FixedPointMathLib.mulDiv(_amountInGross, FEE_DENOMINATOR - FEE_RATE, FEE_DENOMINATOR);
   }
 
   // ============ Internal Functions - Price/Yield Conversions ============
@@ -1190,47 +1083,60 @@ contract FixedFeeSwapMarket is BaseHook {
   /// MATURITY @return The scaled time elapsed in WAD precision, where 1e18 represents 100% of the
   /// duration
   function _scaledTimeElapsedWad() internal view returns (uint256) {
-    uint256 elapsed = block.timestamp - START_TIME;
-    if (elapsed == 0) revert FixedFeeSwap__TimeElapsedIsZero();
-    uint256 duration = MATURITY - START_TIME;
-    if (elapsed > duration) elapsed = duration;
-    return (elapsed * WAD) / duration;
+    uint256 _elapsed = block.timestamp - START_TIME;
+    if (_elapsed == 0) revert FixedFeeSwap__TimeElapsedIsZero();
+    uint256 _duration = MATURITY - START_TIME;
+    if (_elapsed > _duration) _elapsed = _duration;
+    return (_elapsed * WAD) / _duration;
   }
 
   /// @notice Converts a WAD-scaled yield value to an int24 tick using floor division
-  /// @param yieldWad The WAD-scaled yield value to convert
+  /// @param _yieldWad The WAD-scaled yield value to convert
   /// @return The tick as int24, floored toward negative infinity
-  function _wadToTick(int256 yieldWad) internal pure returns (int24) {
-    int256 oneWad = int256(WAD);
-    if (yieldWad >= 0) return int24(yieldWad / oneWad);
-    return int24((yieldWad - oneWad + 1) / oneWad);
+  function _wadToTick(int256 _yieldWad) internal pure returns (int24) {
+    int256 _oneWad = int256(WAD);
+    if (_yieldWad >= 0) return int24(_yieldWad / _oneWad);
+    return int24((_yieldWad - _oneWad + 1) / _oneWad);
   }
 
   /// @notice Derives the WAD-scaled yield from a discount factor price
   /// @dev Uses the formula: yield = -ln(price) / scaledTime * BIPS
-  /// @param price The discount factor price in WAD
-  /// @param scaledTime The scaled time elapsed since market start
+  /// @param _price The discount factor price in WAD
+  /// @param _scaledTime The scaled time elapsed since market start
   /// @return The yield in WAD-scaled basis points
-  function _yieldWadFromPrice(int256 price, uint256 scaledTime) internal pure returns (int256) {
-    int256 lnP = FixedPointMathLib.lnWad(price);
-    if (lnP <= 0) {
-      return int256(FixedPointMathLib.mulDiv(uint256(-lnP), BIPS * WAD, scaledTime));
+  function _yieldWadFromPrice(int256 _price, uint256 _scaledTime) internal pure returns (int256) {
+    int256 _lnP = FixedPointMathLib.lnWad(_price);
+    if (_lnP <= 0) {
+      return int256(FixedPointMathLib.mulDiv(uint256(-_lnP), BIPS * WAD, _scaledTime));
     }
-    return -int256(FixedPointMathLib.mulDiv(uint256(lnP), BIPS * WAD, scaledTime));
+    return -int256(FixedPointMathLib.mulDiv(uint256(_lnP), BIPS * WAD, _scaledTime));
   }
 
   /// @notice Derives a discount factor price from a WAD-scaled yield
   /// @dev Uses the formula: price = exp(-yield / BIPS * scaledTime)
-  /// @param yieldWad The yield in WAD-scaled basis points
-  /// @param scaledTime The scaled time elapsed since market start
+  /// @param _yieldWad The yield in WAD-scaled basis points
+  /// @param _scaledTime The scaled time elapsed since market start
   /// @return The discount factor price in WAD
-  function _priceFromYieldWad(int256 yieldWad, uint256 scaledTime) internal pure returns (int256) {
-    int256 exponentWad;
-    if (yieldWad >= 0) {
-      exponentWad = -int256(FixedPointMathLib.mulDiv(uint256(yieldWad), scaledTime, BIPS * WAD));
+  function _priceFromYieldWad(int256 _yieldWad, uint256 _scaledTime)
+    internal
+    pure
+    returns (int256)
+  {
+    int256 _exponentWad;
+    if (_yieldWad >= 0) {
+      _exponentWad = -int256(FixedPointMathLib.mulDiv(uint256(_yieldWad), _scaledTime, BIPS * WAD));
     } else {
-      exponentWad = int256(FixedPointMathLib.mulDiv(uint256(-yieldWad), scaledTime, BIPS * WAD));
+      _exponentWad = int256(FixedPointMathLib.mulDiv(uint256(-_yieldWad), _scaledTime, BIPS * WAD));
     }
-    return exponentWad.expWad();
+    return _exponentWad.expWad();
+  }
+
+  /// @dev Position IDs are hashed as keccak256(abi.encodePacked(tickUpper, tickLower, owner)).
+  function _getPositionId(address _owner, int24 _tickUpper, int24 _tickLower)
+    internal
+    pure
+    returns (bytes32)
+  {
+    return keccak256(abi.encodePacked(_tickUpper, _tickLower, _owner));
   }
 }

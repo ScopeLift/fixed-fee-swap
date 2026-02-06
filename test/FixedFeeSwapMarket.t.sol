@@ -3,7 +3,7 @@ pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 import {stdError} from "forge-std/StdError.sol";
-import {FixedFeeSwapMarket, TickInfo, BalanceDelta, PositionInfo} from "src/FixedFeeSwapMarket.sol";
+import {FixedFeeSwapMarket, TickInfo, TokenDelta, PositionInfo} from "src/FixedFeeSwapMarket.sol";
 import {FixedFeeSwapMarketHarness} from "test/harness/FixedFeeSwapMarketHarness.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
@@ -113,9 +113,9 @@ abstract contract FixedFeeSwapMarketTest is Test {
     int128 liq = int128(uint128(liquidity));
 
     if (currentTick < tickLower) {
-      expected0 = hook.exposed_getAmountPrincipleDelta(tickLower, tickUpper, liq);
+      expected0 = hook.exposed_getAmountPrincipalDelta(tickLower, tickUpper, liq);
     } else if (currentTick < tickUpper) {
-      expected0 = hook.exposed_getAmountPrincipleDelta(currentTick, tickUpper, liq);
+      expected0 = hook.exposed_getAmountPrincipalDelta(currentTick, tickUpper, liq);
       expected1 = hook.exposed_getAmountCashDelta(tickLower, currentTick, liq);
     } else {
       expected1 = hook.exposed_getAmountCashDelta(tickLower, tickUpper, liq);
