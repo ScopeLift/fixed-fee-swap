@@ -4,22 +4,27 @@ pragma solidity ^0.8.26;
 import {LPVault} from "src/LPVault.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
+import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 
 contract LPVaultHarness is LPVault {
+  using StateLibrary for IPoolManager;
+
   constructor(
     IPoolManager _poolManager,
     PoolKey memory _targetPoolKey,
     LiquidityPosition[] memory _positions,
     string memory _name,
-    string memory _symbol
-  ) LPVault(_poolManager, _targetPoolKey, _positions, _name, _symbol) {}
+    string memory _symbol,
+    uint256 _initMaxValue
+  ) LPVault(_poolManager, _targetPoolKey, _positions, _name, _symbol, _initMaxValue) {}
 
-  function computeInitialLiquidity(uint256 _amount0Max, uint256 _amount1Max)
+  function computeInitialLiquidity()
     external
     view
     returns (uint128[] memory _liquidityPerPosition, uint128 _liquidity0)
   {
-    (_liquidityPerPosition, _liquidity0) = _calculateInitialLiquidity(_amount0Max, _amount1Max);
+    (uint160 _sqrtPriceX96,,,) = POOL_MANAGER.getSlot0(targetPoolKey.toId());
+    (_liquidityPerPosition, _liquidity0) = _calculateInitialLiquidity(_sqrtPriceX96);
   }
 
   function getAmountsForLiquidity(

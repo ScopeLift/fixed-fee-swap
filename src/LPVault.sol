@@ -77,6 +77,12 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   /// @notice Total weight must equal 10,000 BIPs (100%).
   uint16 public constant BIPS = 10_000;
 
+  /// @notice Reference liquidity unit for value calculations.
+  uint256 public constant WAD = 1e18;
+
+  /// @notice Q96 fixed-point scale factor.
+  uint256 internal constant Q96 = 1 << 96;
+
   /// @notice The Uniswap v4 PoolManager.
   IPoolManager public immutable POOL_MANAGER;
 
@@ -85,6 +91,9 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
 
   /// @notice The token1 in the target pool.
   address public immutable TOKEN1;
+
+  /// @notice The maximum total value in token1 equivalent for initial liquidity.
+  uint256 public immutable INIT_MAX_VALUE;
 
   /// @notice The target pool that this vault manages liquidity for.
   PoolKey public targetPoolKey;
@@ -120,6 +129,15 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   /// @notice Thrown when attempting deposit before initialization.
   error LPVault__NotInitialized();
 
+  /// @notice Thrown when the caller has insufficient token allowance for initialization.
+  error LPVault__InsufficientAllowance();
+
+  /// @notice Thrown when INIT_MAX_VALUE constructor parameter is zero.
+  error LPVault__ZeroValue();
+
+  /// @notice Thrown when caller's amounts exceed the max value constraint.
+  error LPVault__ExceedsMaxValue();
+
   /// @notice Emitted when the pool manager is set during construction.
   /// @param poolManager The address of the Uniswap v4 pool manager.
   event PoolManagerSet(address indexed poolManager);
@@ -151,17 +169,21 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   event FeesCollected(uint256 collectedFee0, uint256 collectedFee1);
 
   /// @notice Creates a new LP Vault with fixed positions.
+  /// @dev IMPORTANT: Call initializeLiquidity() immediately after deployment to prevent
+  /// griefing attacks. The pool's current price is used for all calculations.
   /// @param _poolManager The Uniswap v4 pool manager.
   /// @param _targetPoolKey The pool where liquidity is deposited.
   /// @param _positions Array of positions with tick ranges and weights (must sum to 10,000 BIPs).
   /// @param _name The name of the vault share token.
   /// @param _symbol The symbol of the vault share token.
+  /// @param _initMaxValue Maximum total value in token1 equivalent.
   constructor(
     IPoolManager _poolManager,
     PoolKey memory _targetPoolKey,
     LiquidityPosition[] memory _positions,
     string memory _name,
-    string memory _symbol
+    string memory _symbol,
+    uint256 _initMaxValue
   )
     VaultShareToken(
       _name,
@@ -171,12 +193,15 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     )
     SafeCallback(_poolManager)
   {
+    if (_initMaxValue == 0) revert LPVault__ZeroValue();
+
     POOL_MANAGER = _poolManager;
     emit PoolManagerSet(address(_poolManager));
 
     targetPoolKey = _targetPoolKey;
     TOKEN0 = Currency.unwrap(_targetPoolKey.currency0);
     TOKEN1 = Currency.unwrap(_targetPoolKey.currency1);
+    INIT_MAX_VALUE = _initMaxValue;
 
     _initializePositions(_positions);
   }
@@ -203,8 +228,10 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   }
 
   /// @notice Initializes liquidity for all positions based on configured weights. Can only be
-  /// called once. @param _amount0Max Maximum amount of token0 willing to provide.
-  /// @param _amount1Max Maximum amount of token1 willing to provide.
+  /// called once. Uses the pool's current price and INIT_MAX_VALUE to calculate liquidity
+  /// distribution by weight.
+  /// @param _amount0Max The maximum amount of token0 the caller is willing to provide.
+  /// @param _amount1Max The maximum amount of token1 the caller is willing to provide.
   /// @return _shares The amount of vault shares minted.
   /// @return _amount0Used The actual amount of token0 used.
   /// @return _amount1Used The actual amount of token1 used.
@@ -215,11 +242,27 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   {
     if (liquidityInitialized) revert LPVault__AlreadyInitialized();
 
+    // Check allowances before proceeding
+    if (IERC20(TOKEN0).allowance(msg.sender, address(this)) < _amount0Max) {
+      revert LPVault__InsufficientAllowance();
+    }
+    if (IERC20(TOKEN1).allowance(msg.sender, address(this)) < _amount1Max) {
+      revert LPVault__InsufficientAllowance();
+    }
+
+    // Fetch current pool price for value constraint check and liquidity calculation.
+    (uint160 _sqrtPriceX96,,,) = POOL_MANAGER.getSlot0(targetPoolKey.toId());
+
+    // Check value constraint: convert amount0 to token1 value and verify total <= INIT_MAX_VALUE.
+    uint256 _amount0AsValue1 = _amount0ToValue1(_amount0Max, _sqrtPriceX96);
+    uint256 _totalValue = _amount0AsValue1 + _amount1Max;
+    if (_totalValue > INIT_MAX_VALUE) revert LPVault__ExceedsMaxValue();
+
     // Sync checkpoints before first liquidity add so pre-existing pool fees are not attributed.
     _syncFees();
 
     (uint128[] memory _liquidityPerPosition, uint128 _liquidity0) =
-      _calculateInitialLiquidity(_amount0Max, _amount1Max);
+      _calculateInitialLiquidity(_sqrtPriceX96);
 
     bytes memory _result = POOL_MANAGER.unlock(
       abi.encode(
@@ -510,53 +553,104 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     }
   }
 
-  /// @notice Calculates initial per-position liquidity based on weights and max token amounts.
-  /// @param _amount0Max Maximum amount of token0 willing to provide.
-  /// @param _amount1Max Maximum amount of token1 willing to provide.
+  /// @notice Calculates initial per-position liquidity based on weights and INIT_MAX_VALUE.
+  /// @dev Splits INIT_MAX_VALUE by weight per position and calculates liquidity from each
+  /// position's value using the pool's current price.
   /// @return _liquidityPerPosition Array of liquidity amounts for each position.
   /// @return _liquidity0 The liquidity assigned to position0.
-  function _calculateInitialLiquidity(uint256 _amount0Max, uint256 _amount1Max)
+  function _calculateInitialLiquidity(uint160 _sqrtPriceX96)
     internal
     view
     returns (uint128[] memory _liquidityPerPosition, uint128 _liquidity0)
   {
-    (uint160 _sqrtPriceX96,,,) = POOL_MANAGER.getSlot0(targetPoolKey.toId());
+    _liquidityPerPosition = new uint128[](positions.length);
 
-    uint16 _weight0 = positions[0].weight;
-    if (_weight0 == 0) revert LPVault__ZeroLiquidity();
-
-    uint256 _totalAmount0Ref;
-    uint256 _totalAmount1Ref;
-    uint256 _liquidityReference = 1e18;
     for (uint256 _i = 0; _i < positions.length; _i++) {
       LiquidityPosition memory _position = positions[_i];
-      (uint256 _amount0Ref, uint256 _amount1Ref) =
-        _getAmountsForLiquidity(_position, _sqrtPriceX96, uint128(_liquidityReference));
-      _totalAmount0Ref += _amount0Ref * _position.weight;
-      _totalAmount1Ref += _amount1Ref * _position.weight;
+
+      // Calculate value for this position based on weight
+      uint256 _positionValue = FullMath.mulDiv(INIT_MAX_VALUE, _position.weight, BIPS);
+
+      // Calculate liquidity from this position's value using current pool price
+      uint128 _liquidity = _calculateLiquidityFromValue(_position, _positionValue, _sqrtPriceX96);
+
+      _liquidityPerPosition[_i] = _liquidity;
+      if (_i == 0) _liquidity0 = _liquidity;
     }
 
-    if (_totalAmount0Ref == 0 && _totalAmount1Ref == 0) revert LPVault__ZeroLiquidity();
+    if (_liquidity0 == 0) revert LPVault__ZeroLiquidity();
+  }
 
-    uint256 _liquidity0Full = type(uint256).max;
-    if (_totalAmount0Ref > 0) {
-      _liquidity0Full =
-        FullMath.mulDiv(_amount0Max, uint256(_weight0) * _liquidityReference, _totalAmount0Ref);
-    }
-    if (_totalAmount1Ref > 0) {
-      uint256 _liquidity0ByAmount1 =
-        FullMath.mulDiv(_amount1Max, uint256(_weight0) * _liquidityReference, _totalAmount1Ref);
-      if (_liquidity0ByAmount1 < _liquidity0Full) _liquidity0Full = _liquidity0ByAmount1;
-    }
-    if (_liquidity0Full == 0) revert LPVault__ZeroLiquidity();
+  /// @notice Calculates liquidity for a position given a token1-equivalent value.
+  /// @dev This is the inverse of _getAmountsForLiquidity. Given a value in token1 terms,
+  /// it calculates how much liquidity can be added to the position.
+  /// @param _position The liquidity position.
+  /// @param _value The token1-equivalent value to convert to liquidity.
+  /// @param _sqrtPriceX96 The sqrt price to use for calculation.
+  /// @return _liquidity The calculated liquidity amount.
+  function _calculateLiquidityFromValue(
+    LiquidityPosition memory _position,
+    uint256 _value,
+    uint160 _sqrtPriceX96
+  ) internal pure returns (uint128 _liquidity) {
+    if (_value == 0) return 0;
 
-    _liquidity0 = _liquidity0Full.toUint128();
-    _liquidityPerPosition = new uint128[](positions.length);
-    _liquidityPerPosition[0] = _liquidity0;
-    for (uint256 _i = 1; _i < positions.length; _i++) {
-      _liquidityPerPosition[_i] =
-        FullMath.mulDiv(_liquidity0Full, positions[_i].weight, _weight0).toUint128();
-    }
+    // Calculate value per unit liquidity using a reference liquidity
+    (uint256 _amount0Ref, uint256 _amount1Ref) =
+      _getAmountsForLiquidity(_position, _sqrtPriceX96, uint128(WAD));
+
+    // Convert amount0 to token1 value at current price.
+    uint256 _amount0RefAsValue1 = _amount0ToValue1(_amount0Ref, _sqrtPriceX96);
+
+    // Total value per unit reference liquidity
+    uint256 _valuePerRefLiquidity = _amount0RefAsValue1 + _amount1Ref;
+
+    if (_valuePerRefLiquidity == 0) return 0;
+
+    // Calculate liquidity: liquidity = value * reference / valuePerRef
+    uint256 _liquidityFull = FullMath.mulDiv(_value, WAD, _valuePerRefLiquidity);
+
+    _liquidity = _liquidityFull.toUint128();
+  }
+
+  /// @notice Returns the maximum amounts that can be used for initialization.
+  /// @dev Uses current pool price. Values may change as price fluctuates.
+  /// @return _maxAmount0 Maximum token0 amount if only token0 is used.
+  /// @return _maxAmount1 Maximum token1 amount (equals INIT_MAX_VALUE).
+  function getMaxInitAmounts() external view returns (uint256 _maxAmount0, uint256 _maxAmount1) {
+    (uint160 _sqrtPriceX96,,,) = POOL_MANAGER.getSlot0(targetPoolKey.toId());
+
+    _maxAmount1 = INIT_MAX_VALUE;
+    // Convert max value from token1 to token0 at current price.
+    _maxAmount0 = _value1ToAmount0(INIT_MAX_VALUE, _sqrtPriceX96);
+  }
+
+  /// @notice Converts token0 amount to token1-equivalent value using current sqrt price.
+  /// @dev Uses two mulDiv steps to avoid overflow from squaring sqrt price in uint256.
+  function _amount0ToValue1(uint256 _amount0, uint160 _sqrtPriceX96)
+    internal
+    pure
+    returns (uint256 _value1)
+  {
+    if (_amount0 == 0) return 0;
+
+    uint256 _sqrtPriceX96Uint = uint256(_sqrtPriceX96);
+    uint256 _value1X96 = FullMath.mulDiv(_amount0, _sqrtPriceX96Uint, Q96);
+    _value1 = FullMath.mulDiv(_value1X96, _sqrtPriceX96Uint, Q96);
+  }
+
+  /// @notice Converts token1-equivalent value to token0 amount using current sqrt price.
+  /// @dev Uses two mulDiv steps to avoid overflow from squaring sqrt price in uint256.
+  function _value1ToAmount0(uint256 _value1, uint160 _sqrtPriceX96)
+    internal
+    pure
+    returns (uint256 _amount0)
+  {
+    if (_value1 == 0) return 0;
+
+    uint256 _sqrtPriceX96Uint = uint256(_sqrtPriceX96);
+    uint256 _amount0X96 = FullMath.mulDiv(_value1, Q96, _sqrtPriceX96Uint);
+    _amount0 = FullMath.mulDiv(_amount0X96, Q96, _sqrtPriceX96Uint);
   }
 
   /// @notice Adds liquidity to all positions using pre-calculated amounts.
