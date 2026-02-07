@@ -185,7 +185,8 @@ contract FixedFeeSwapMarket is BaseHook {
     address _token0,
     address _token1,
     uint24 _feeRate,
-    IPoolManager _manager
+    IPoolManager _manager,
+    int24 _initialTick
   ) BaseHook(_manager) {
     if (_feeRate >= FEE_DENOMINATOR) revert FixedFeeSwap__FeeRateTooHigh();
     START_TIME = uint48(block.timestamp);
@@ -193,6 +194,7 @@ contract FixedFeeSwapMarket is BaseHook {
     TOKEN0 = IERC20(_token0);
     TOKEN1 = IERC20(_token1);
     FEE_RATE = _feeRate;
+    currentTick = _initialTick;
   }
 
   // ============ Public Functions ============

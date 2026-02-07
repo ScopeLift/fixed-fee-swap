@@ -46,7 +46,7 @@ abstract contract FixedFeeSwapMarketTest is Test {
 
     // Deploy harness directly - validation is overridden to skip address checks
     hook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), FEE_RATE, IPoolManager(mockManager)
+      MARKET_LENGTH, address(token0), address(token1), FEE_RATE, IPoolManager(mockManager), 0
     );
 
     // Warp forward for realistic test conditions (prices are near-fully discounted at START_TIME)
@@ -186,14 +186,14 @@ contract Constructor is FixedFeeSwapMarketTest {
     address _mockManager = makeAddr("constructorMockManager");
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__FeeRateTooHigh.selector);
     new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), 1_000_000, IPoolManager(_mockManager)
+      MARKET_LENGTH, address(token0), address(token1), 1_000_000, IPoolManager(_mockManager), 0
     );
   }
 
   function test_MaxValidFeeRate() public {
     address _mockManager = makeAddr("constructorMockManager2");
     FixedFeeSwapMarketHarness _hook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), 999_999, IPoolManager(_mockManager)
+      MARKET_LENGTH, address(token0), address(token1), 999_999, IPoolManager(_mockManager), 0
     );
     assertEq(_hook.FEE_RATE(), 999_999);
   }
@@ -201,7 +201,7 @@ contract Constructor is FixedFeeSwapMarketTest {
   function test_ZeroFeeRate() public {
     address _mockManager = makeAddr("constructorMockManager3");
     FixedFeeSwapMarketHarness _hook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), 0, IPoolManager(_mockManager)
+      MARKET_LENGTH, address(token0), address(token1), 0, IPoolManager(_mockManager), 0
     );
     assertEq(_hook.FEE_RATE(), 0);
   }
@@ -3685,7 +3685,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     // Deploy fresh hook with no liquidity
     address mockManager = makeAddr("freshMockManager");
     FixedFeeSwapMarketHarness freshHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), FEE_RATE, IPoolManager(mockManager)
+      MARKET_LENGTH, address(token0), address(token1), FEE_RATE, IPoolManager(mockManager), 0
     );
 
     vm.warp(block.timestamp + 1 days);
@@ -3709,7 +3709,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
   function testFuzz_RevertWhen_LiquidityExhaustedMidSwap_PrincipalForCash(uint128 liq) public {
     address mockManager = makeAddr("freshMockManager2");
     FixedFeeSwapMarketHarness freshHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), FEE_RATE, IPoolManager(mockManager)
+      MARKET_LENGTH, address(token0), address(token1), FEE_RATE, IPoolManager(mockManager), 0
     );
     vm.warp(block.timestamp + 1 days);
 
@@ -3742,7 +3742,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
   function testFuzz_RevertWhen_LiquidityExhaustedMidSwap_CashForPrincipal(uint128 liq) public {
     address mockManager = makeAddr("freshMockManager3");
     FixedFeeSwapMarketHarness freshHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), FEE_RATE, IPoolManager(mockManager)
+      MARKET_LENGTH, address(token0), address(token1), FEE_RATE, IPoolManager(mockManager), 0
     );
     vm.warp(block.timestamp + 1 days);
 
@@ -3917,7 +3917,7 @@ contract LPFees is _BeforeSwap {
     // Deploy a separate hook with fees enabled
     address mockManager = makeAddr("feeMockManager");
     feeHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), TEST_FEE_RATE, IPoolManager(mockManager)
+      MARKET_LENGTH, address(token0), address(token1), TEST_FEE_RATE, IPoolManager(mockManager), 0
     );
 
     // Warp forward for realistic test conditions
@@ -3997,7 +3997,7 @@ contract LPFees is _BeforeSwap {
     vm.warp(1);
     address freshMgr = makeAddr("freshFeeMgr");
     FixedFeeSwapMarketHarness noFeeHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), 0, IPoolManager(freshMgr)
+      MARKET_LENGTH, address(token0), address(token1), 0, IPoolManager(freshMgr), 0
     );
     vm.warp(savedTimestamp); // restore original timestamp
 
@@ -4265,7 +4265,7 @@ contract LPFees is _BeforeSwap {
     vm.warp(1);
     address _freshMgr = makeAddr("fuzzFeeMgr");
     FixedFeeSwapMarketHarness _noFeeHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), 0, IPoolManager(_freshMgr)
+      MARKET_LENGTH, address(token0), address(token1), 0, IPoolManager(_freshMgr), 0
     );
     vm.warp(_savedTimestamp);
 
@@ -4348,7 +4348,7 @@ contract CollectFees is FixedFeeSwapMarketTest {
     vm.warp(1);
     address _mockManager = makeAddr("collectFeesMockManager");
     feeHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), TEST_FEE_RATE, IPoolManager(_mockManager)
+      MARKET_LENGTH, address(token0), address(token1), TEST_FEE_RATE, IPoolManager(_mockManager), 0
     );
     vm.warp(block.timestamp + 1 days);
     feePoolKey = PoolKey({
@@ -4826,7 +4826,7 @@ contract SolvencyWithFees is FixedFeeSwapMarketTest {
     // Deploy a separate hook with fees enabled
     address _mockManager = makeAddr("feeSolvencyMockManager");
     feeHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), TEST_FEE_RATE, IPoolManager(_mockManager)
+      MARKET_LENGTH, address(token0), address(token1), TEST_FEE_RATE, IPoolManager(_mockManager), 0
     );
 
     // Warp forward for realistic test conditions
