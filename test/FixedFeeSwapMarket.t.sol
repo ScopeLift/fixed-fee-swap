@@ -29,6 +29,7 @@ abstract contract FixedFeeSwapMarketTest is Test {
   // Fee rate in hundredths of a bip (3000 = 0.30%)
   // Set to 0 for existing tests to pass without fee impact
   uint24 public constant FEE_RATE = 0;
+  int24 public constant YIELD_PER_TICK = 1;
   int24 public constant NO_TICK_LIMIT = type(int24).max;
 
   address public alice = makeAddr("alice");
@@ -46,7 +47,13 @@ abstract contract FixedFeeSwapMarketTest is Test {
 
     // Deploy harness directly - validation is overridden to skip address checks
     hook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), FEE_RATE, IPoolManager(mockManager), 0
+      MARKET_LENGTH,
+      address(token0),
+      address(token1),
+      FEE_RATE,
+      YIELD_PER_TICK,
+      IPoolManager(mockManager),
+      0
     );
 
     // Warp forward for realistic test conditions (prices are near-fully discounted at START_TIME)
@@ -182,28 +189,68 @@ abstract contract FixedFeeSwapMarketTest is Test {
 }
 
 contract Constructor is FixedFeeSwapMarketTest {
-  function test_RevertWhen_FeeRateTooHigh() public {
+  function testFuzz_SetsAllConstructorArgs(
+    uint48 _marketLength,
+    uint24 _feeRate,
+    int24 _yieldPerTick,
+    int24 _initialTick,
+    address _mockManager
+  ) public {
+    uint48 _startTime = uint48(block.timestamp);
+    uint48 _maxMarketLength = type(uint48).max - _startTime;
+
+    _marketLength = uint48(bound(uint256(_marketLength), 0, uint256(_maxMarketLength)));
+    _feeRate = uint24(bound(_feeRate, 0, 999_999));
+    _yieldPerTick = int24(bound(int256(_yieldPerTick), 1, type(int24).max));
+
+    FixedFeeSwapMarketHarness _hook = new FixedFeeSwapMarketHarness(
+      _marketLength,
+      address(token0),
+      address(token1),
+      _feeRate,
+      _yieldPerTick,
+      IPoolManager(_mockManager),
+      _initialTick
+    );
+
+    assertEq(_hook.getStartTime(), _startTime, "start time");
+    assertEq(_hook.getMaturity(), _startTime + _marketLength, "maturity");
+    assertEq(_hook.getToken0(), address(token0), "token0");
+    assertEq(_hook.getToken1(), address(token1), "token1");
+    assertEq(_hook.FEE_RATE(), _feeRate, "fee rate");
+    assertEq(_hook.YIELD_PER_TICK(), _yieldPerTick, "yield per tick");
+    assertEq(address(_hook.poolManager()), _mockManager, "pool manager");
+    assertEq(_hook.getCurrentTick(), _initialTick, "initial tick");
+  }
+
+  function testFuzz_RevertIf_FeeRateTooHigh(uint24 _feeRate) public {
+    _feeRate = uint24(bound(_feeRate, 1_000_000, type(uint24).max));
     address _mockManager = makeAddr("constructorMockManager");
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__FeeRateTooHigh.selector);
     new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), 1_000_000, IPoolManager(_mockManager), 0
+      MARKET_LENGTH,
+      address(token0),
+      address(token1),
+      _feeRate,
+      YIELD_PER_TICK,
+      IPoolManager(_mockManager),
+      0
     );
   }
 
-  function test_MaxValidFeeRate() public {
-    address _mockManager = makeAddr("constructorMockManager2");
-    FixedFeeSwapMarketHarness _hook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), 999_999, IPoolManager(_mockManager), 0
+  function testFuzz_RevertIf_InvalidYieldSpacing(int24 _yieldPerTick) public {
+    _yieldPerTick = int24(bound(int256(_yieldPerTick), type(int24).min, 0));
+    address _mockManager = makeAddr("constructorMockManagerSpacing");
+    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__InvalidYieldSpacing.selector);
+    new FixedFeeSwapMarketHarness(
+      MARKET_LENGTH,
+      address(token0),
+      address(token1),
+      FEE_RATE,
+      _yieldPerTick,
+      IPoolManager(_mockManager),
+      0
     );
-    assertEq(_hook.FEE_RATE(), 999_999);
-  }
-
-  function test_ZeroFeeRate() public {
-    address _mockManager = makeAddr("constructorMockManager3");
-    FixedFeeSwapMarketHarness _hook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), 0, IPoolManager(_mockManager), 0
-    );
-    assertEq(_hook.FEE_RATE(), 0);
   }
 }
 
@@ -230,15 +277,59 @@ contract GetHookPermissions is FixedFeeSwapMarketTest {
 }
 
 contract YieldToTick is FixedFeeSwapMarketTest {
-  function testFuzz_RoundTrip(int24 _tick) public view {
-    _tick = int24(bound(int256(_tick), 0, 100_000));
-    assertEq(hook.yieldToTick(int256(_tick)), _tick, "Round trip should return same tick");
+  function _deployHookWithSpacing(int24 _yieldPerTick)
+    internal
+    returns (FixedFeeSwapMarketHarness)
+  {
+    address _mockManager = makeAddr("yieldToTickManager");
+    return new FixedFeeSwapMarketHarness(
+      MARKET_LENGTH,
+      address(token0),
+      address(token1),
+      FEE_RATE,
+      _yieldPerTick,
+      IPoolManager(_mockManager),
+      0
+    );
   }
 
-  function test_SpecificValues() public view {
-    assertEq(hook.yieldToTick(0), 0, "yieldToTick(0) should be 0");
-    assertEq(hook.yieldToTick(100), 100, "yieldToTick(100) should be 100");
-    assertEq(hook.yieldToTick(10_000), 10_000, "yieldToTick(10000) should be 10000");
+  function testFuzz_MatchesIntegerDivisionForAnySpacing(int24 _yieldPerTick, int256 _yieldBps)
+    public
+  {
+    _yieldPerTick = int24(bound(int256(_yieldPerTick), 1, type(int24).max));
+    FixedFeeSwapMarketHarness _hook = _deployHookWithSpacing(_yieldPerTick);
+
+    assertEq(
+      _hook.yieldToTick(_yieldBps),
+      int24(_yieldBps / int256(_yieldPerTick)),
+      "yieldToTick should divide by configured spacing"
+    );
+  }
+
+  function testFuzz_RoundTripForAlignedYieldAcrossSpacings(int24 _yieldPerTick, int24 _tick)
+    public
+  {
+    _yieldPerTick = int24(bound(int256(_yieldPerTick), 1, type(int24).max));
+    FixedFeeSwapMarketHarness _hook = _deployHookWithSpacing(_yieldPerTick);
+
+    int256 _alignedYield = int256(_tick) * int256(_yieldPerTick);
+    assertEq(_hook.yieldToTick(_alignedYield), _tick, "Aligned yields should round-trip exactly");
+  }
+
+  function testFuzz_MonotonicForOrderedYieldsAcrossSpacings(
+    int24 _yieldPerTick,
+    int24 _yieldA,
+    int24 _yieldB
+  ) public {
+    _yieldPerTick = int24(bound(int256(_yieldPerTick), 1, type(int24).max));
+    vm.assume(_yieldA <= _yieldB);
+    FixedFeeSwapMarketHarness _hook = _deployHookWithSpacing(_yieldPerTick);
+
+    assertLe(
+      _hook.yieldToTick(int256(_yieldA)),
+      _hook.yieldToTick(int256(_yieldB)),
+      "yieldToTick should be monotonic"
+    );
   }
 }
 
@@ -3685,7 +3776,13 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     // Deploy fresh hook with no liquidity
     address mockManager = makeAddr("freshMockManager");
     FixedFeeSwapMarketHarness freshHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), FEE_RATE, IPoolManager(mockManager), 0
+      MARKET_LENGTH,
+      address(token0),
+      address(token1),
+      FEE_RATE,
+      YIELD_PER_TICK,
+      IPoolManager(mockManager),
+      0
     );
 
     vm.warp(block.timestamp + 1 days);
@@ -3709,7 +3806,13 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
   function testFuzz_RevertWhen_LiquidityExhaustedMidSwap_PrincipalForCash(uint128 liq) public {
     address mockManager = makeAddr("freshMockManager2");
     FixedFeeSwapMarketHarness freshHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), FEE_RATE, IPoolManager(mockManager), 0
+      MARKET_LENGTH,
+      address(token0),
+      address(token1),
+      FEE_RATE,
+      YIELD_PER_TICK,
+      IPoolManager(mockManager),
+      0
     );
     vm.warp(block.timestamp + 1 days);
 
@@ -3742,7 +3845,13 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
   function testFuzz_RevertWhen_LiquidityExhaustedMidSwap_CashForPrincipal(uint128 liq) public {
     address mockManager = makeAddr("freshMockManager3");
     FixedFeeSwapMarketHarness freshHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), FEE_RATE, IPoolManager(mockManager), 0
+      MARKET_LENGTH,
+      address(token0),
+      address(token1),
+      FEE_RATE,
+      YIELD_PER_TICK,
+      IPoolManager(mockManager),
+      0
     );
     vm.warp(block.timestamp + 1 days);
 
@@ -3917,7 +4026,13 @@ contract LPFees is _BeforeSwap {
     // Deploy a separate hook with fees enabled
     address mockManager = makeAddr("feeMockManager");
     feeHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), TEST_FEE_RATE, IPoolManager(mockManager), 0
+      MARKET_LENGTH,
+      address(token0),
+      address(token1),
+      TEST_FEE_RATE,
+      YIELD_PER_TICK,
+      IPoolManager(mockManager),
+      0
     );
 
     // Warp forward for realistic test conditions
@@ -3997,7 +4112,7 @@ contract LPFees is _BeforeSwap {
     vm.warp(1);
     address freshMgr = makeAddr("freshFeeMgr");
     FixedFeeSwapMarketHarness noFeeHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), 0, IPoolManager(freshMgr), 0
+      MARKET_LENGTH, address(token0), address(token1), 0, YIELD_PER_TICK, IPoolManager(freshMgr), 0
     );
     vm.warp(savedTimestamp); // restore original timestamp
 
@@ -4265,7 +4380,7 @@ contract LPFees is _BeforeSwap {
     vm.warp(1);
     address _freshMgr = makeAddr("fuzzFeeMgr");
     FixedFeeSwapMarketHarness _noFeeHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), 0, IPoolManager(_freshMgr), 0
+      MARKET_LENGTH, address(token0), address(token1), 0, YIELD_PER_TICK, IPoolManager(_freshMgr), 0
     );
     vm.warp(_savedTimestamp);
 
@@ -4348,7 +4463,13 @@ contract CollectFees is FixedFeeSwapMarketTest {
     vm.warp(1);
     address _mockManager = makeAddr("collectFeesMockManager");
     feeHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), TEST_FEE_RATE, IPoolManager(_mockManager), 0
+      MARKET_LENGTH,
+      address(token0),
+      address(token1),
+      TEST_FEE_RATE,
+      YIELD_PER_TICK,
+      IPoolManager(_mockManager),
+      0
     );
     vm.warp(block.timestamp + 1 days);
     feePoolKey = PoolKey({
@@ -4826,7 +4947,13 @@ contract SolvencyWithFees is FixedFeeSwapMarketTest {
     // Deploy a separate hook with fees enabled
     address _mockManager = makeAddr("feeSolvencyMockManager");
     feeHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), TEST_FEE_RATE, IPoolManager(_mockManager), 0
+      MARKET_LENGTH,
+      address(token0),
+      address(token1),
+      TEST_FEE_RATE,
+      YIELD_PER_TICK,
+      IPoolManager(_mockManager),
+      0
     );
 
     // Warp forward for realistic test conditions

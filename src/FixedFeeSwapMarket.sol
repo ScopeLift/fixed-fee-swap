@@ -87,6 +87,9 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @notice Thrown when the fee rate is 100% or higher
   error FixedFeeSwap__FeeRateTooHigh();
 
+  /// @notice Thrown when yield spacing is zero or negative
+  error FixedFeeSwap__InvalidYieldSpacing();
+
   /// @notice Thrown when trying to remove more liquidity than the position holds
   error FixedFeeSwap__InsufficientPositionLiquidity();
 
@@ -137,7 +140,6 @@ contract FixedFeeSwapMarket is BaseHook {
 
   // ============ Constants ============
 
-  int24 constant YIELD_PER_TICK = 1;
   int24 constant NO_TICK_LIMIT = type(int24).max;
   uint256 constant WAD = 1e18;
   uint256 constant BIPS = 10_000;
@@ -159,6 +161,9 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @notice Fee rate in hundredths of a bip, where a value of 1 equals 0.0001%
   /// @dev 3000 = 0.30% fee, similar to Uniswap v3 medium tier
   uint24 public immutable FEE_RATE;
+
+  /// @notice Yield movement (in bps) represented by one tick step
+  int24 public immutable YIELD_PER_TICK;
 
   // ============ State Variables ============
 
@@ -185,15 +190,18 @@ contract FixedFeeSwapMarket is BaseHook {
     address _token0,
     address _token1,
     uint24 _feeRate,
+    int24 _yieldPerTick,
     IPoolManager _manager,
     int24 _initialTick
   ) BaseHook(_manager) {
     if (_feeRate >= FEE_DENOMINATOR) revert FixedFeeSwap__FeeRateTooHigh();
+    if (_yieldPerTick <= 0) revert FixedFeeSwap__InvalidYieldSpacing();
     START_TIME = uint48(block.timestamp);
     MATURITY = uint48(block.timestamp) + _lengthOfMarket;
     TOKEN0 = IERC20(_token0);
     TOKEN1 = IERC20(_token1);
     FEE_RATE = _feeRate;
+    YIELD_PER_TICK = _yieldPerTick;
     currentTick = _initialTick;
   }
 
@@ -223,8 +231,8 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @notice Converts a yield in basis points to the corresponding tick
   /// @param _yieldBps The yield rate in basis points
   /// @return The tick value representing this yield
-  function yieldToTick(int256 _yieldBps) public pure returns (int24) {
-    return int24(_yieldBps / YIELD_PER_TICK);
+  function yieldToTick(int256 _yieldBps) public view returns (int24) {
+    return int24(_yieldBps / int256(YIELD_PER_TICK));
   }
 
   /// @notice Converts a tick to its corresponding discount factor price
@@ -238,7 +246,7 @@ contract FixedFeeSwapMarket is BaseHook {
     uint256 _remaining = MATURITY - block.timestamp;
     uint256 _duration = MATURITY - START_TIME;
     uint256 _scaledTime = (_remaining * WAD) / _duration;
-    return _priceFromYieldWad(_tick * YIELD_PER_TICK * int256(WAD), _scaledTime);
+    return _priceFromYieldWad(_tickToYieldWad(_tick), _scaledTime);
   }
 
   // ============ External Functions ============
@@ -501,9 +509,11 @@ contract FixedFeeSwapMarket is BaseHook {
       int24 _nextTick;
       bool _initialized;
       {
-        int24 _searchTick = (_ctx.tickMovingLeft && currentTick != type(int24).min)
-          ? currentTick - YIELD_PER_TICK
-          : currentTick;
+        int24 _searchTick = currentTick;
+        if (_ctx.tickMovingLeft) {
+          int256 _candidate = int256(currentTick) - int256(YIELD_PER_TICK);
+          _searchTick = _candidate < type(int24).min ? type(int24).min : int24(_candidate);
+        }
         (_nextTick, _initialized) = tickBitmap.nextInitializedTickWithinOneWord(
           _searchTick, YIELD_PER_TICK, _ctx.tickMovingLeft
         );
@@ -650,17 +660,17 @@ contract FixedFeeSwapMarket is BaseHook {
     // After integer-tick snapping, currentPrice == tickToPrice(currentTick), so the yield
     // is exactly currentTick * WAD. Using _yieldWadFromPrice would introduce ~2000 wei of
     // PT error per tick crossing, accumulating to insolvency over many crossings.
-    int256 _startYieldWad = int256(currentTick) * int256(WAD);
+    int256 _startYieldWad = _tickToYieldWad(currentTick);
 
     // For PT→cash, tick increases. Use the tick limit as target if it's lower (closer) than
     // the next tick boundary.
-    int256 _targetYieldWad = int256(_nextTick) * int256(WAD);
+    int256 _targetYieldWad = _tickToYieldWad(_nextTick);
     int256 _targetPrice = tickToPrice(_nextTick);
     if (_targetPrice > _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
     if (_targetYieldWad <= _startYieldWad) revert FixedFeeSwap__InvalidTickTraversal();
     if (_tickLimit != NO_TICK_LIMIT && _tickLimit < _nextTick) {
       _nextTick = _tickLimit;
-      _targetYieldWad = int256(_tickLimit) * int256(WAD);
+      _targetYieldWad = _tickToYieldWad(_tickLimit);
       _targetPrice = _priceFromYieldWad(_targetYieldWad, _scaledTime);
     }
 
@@ -713,7 +723,7 @@ contract FixedFeeSwapMarket is BaseHook {
     // Snap to floored integer tick so swap output matches LP composition accounting.
     // Returns zero consumed/output if the tick didn't move (swap too small).
     _newTick = _wadToTick(_endYieldWad);
-    _newPrice = _priceFromYieldWad(int256(_newTick) * int256(WAD), _scaledTime);
+    _newPrice = _priceFromYieldWad(_tickToYieldWad(_newTick), _scaledTime);
 
     if (_newPrice >= _startPrice) return (0, 0, _startPrice, _wadToTick(_startYieldWad));
 
@@ -769,17 +779,17 @@ contract FixedFeeSwapMarket is BaseHook {
 
     uint256 _scaledTime = _scaledTimeRemainingWad();
     // Derive start yield directly from the integer tick (same rationale as _getCashSwapAmount).
-    int256 _startYieldWad = int256(currentTick) * int256(WAD);
+    int256 _startYieldWad = _tickToYieldWad(currentTick);
 
     // For cash→PT, tick decreases. Use the tick limit as target if it's higher (closer) than
     // the next tick boundary.
-    int256 _targetYieldWad = int256(_nextTick) * int256(WAD);
+    int256 _targetYieldWad = _tickToYieldWad(_nextTick);
     int256 _targetPrice = tickToPrice(_nextTick);
     if (_targetPrice < _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
     if (_targetYieldWad >= _startYieldWad) revert FixedFeeSwap__InvalidTickTraversal();
     if (_tickLimit != NO_TICK_LIMIT && _tickLimit > _nextTick) {
       _nextTick = _tickLimit;
-      _targetYieldWad = int256(_tickLimit) * int256(WAD);
+      _targetYieldWad = _tickToYieldWad(_tickLimit);
       _targetPrice = _priceFromYieldWad(_targetYieldWad, _scaledTime);
     }
 
@@ -836,7 +846,7 @@ contract FixedFeeSwapMarket is BaseHook {
     // Cash→PT decreases yield, so ceiling rounds in favor of the pool (less PT output, higher
     // price). Returns zero consumed/output if the tick didn't move (swap too small).
     _newTick = _wadToTickCeil(_endYieldWad);
-    int256 _snappedYieldWad = int256(_newTick) * int256(WAD);
+    int256 _snappedYieldWad = _tickToYieldWad(_newTick);
     _newPrice = _priceFromYieldWad(_snappedYieldWad, _scaledTime);
 
     // PT_out = L * (startYield - snappedYield) / BIPS using WAD precision
@@ -1139,20 +1149,25 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @notice Converts a WAD-scaled yield value to an int24 tick using floor division
   /// @param _yieldWad The WAD-scaled yield value to convert
   /// @return The tick as int24, floored toward negative infinity
-  function _wadToTick(int256 _yieldWad) internal pure returns (int24) {
-    int256 _oneWad = int256(WAD);
-    if (_yieldWad >= 0) return int24(_yieldWad / _oneWad);
-    return int24((_yieldWad - _oneWad + 1) / _oneWad);
+  function _wadToTick(int256 _yieldWad) internal view returns (int24) {
+    int256 _yieldPerTickWad = int256(YIELD_PER_TICK) * int256(WAD);
+    if (_yieldWad >= 0) return int24(_yieldWad / _yieldPerTickWad);
+    return int24((_yieldWad - _yieldPerTickWad + 1) / _yieldPerTickWad);
   }
 
   /// @notice Converts a WAD-scaled yield to an int24 tick using ceiling division
   /// @dev Rounds toward positive infinity, the opposite of _wadToTick
   /// @param _yieldWad The WAD-scaled yield value to convert
   /// @return The tick as int24, ceiled toward positive infinity
-  function _wadToTickCeil(int256 _yieldWad) internal pure returns (int24) {
-    int256 _oneWad = int256(WAD);
-    if (_yieldWad >= 0) return int24((_yieldWad + _oneWad - 1) / _oneWad);
-    return int24(_yieldWad / _oneWad);
+  function _wadToTickCeil(int256 _yieldWad) internal view returns (int24) {
+    int256 _yieldPerTickWad = int256(YIELD_PER_TICK) * int256(WAD);
+    if (_yieldWad >= 0) return int24((_yieldWad + _yieldPerTickWad - 1) / _yieldPerTickWad);
+    return int24(_yieldWad / _yieldPerTickWad);
+  }
+
+  /// @notice Converts a tick index to WAD-scaled yield using the configured yield spacing
+  function _tickToYieldWad(int256 _tick) internal view returns (int256) {
+    return _tick * int256(YIELD_PER_TICK) * int256(WAD);
   }
 
   /// @notice Derives the WAD-scaled yield from a discount factor price

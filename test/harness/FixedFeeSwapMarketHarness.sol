@@ -14,9 +14,10 @@ contract FixedFeeSwapMarketHarness is FixedFeeSwapMarket {
     address _t0,
     address _t1,
     uint24 _feeRate,
+    int24 _yieldPerTick,
     IPoolManager _mgr,
     int24 _initialTick
-  ) FixedFeeSwapMarket(_length, _t0, _t1, _feeRate, _mgr, _initialTick) {}
+  ) FixedFeeSwapMarket(_length, _t0, _t1, _feeRate, _yieldPerTick, _mgr, _initialTick) {}
 
   /// @notice Skip hook address validation for testing
   function validateHookAddress(BaseHook) internal pure override {
@@ -128,6 +129,14 @@ contract FixedFeeSwapMarketHarness is FixedFeeSwapMarket {
 
   function getStartTime() external view returns (uint48) {
     return START_TIME;
+  }
+
+  function getToken0() external view returns (address) {
+    return address(TOKEN0);
+  }
+
+  function getToken1() external view returns (address) {
+    return address(TOKEN1);
   }
 
   function getPositionInfo(bytes32 positionId)
