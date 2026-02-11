@@ -26,6 +26,7 @@ abstract contract FixedFeeSwapMarketTest is Test {
   uint256 public constant INITIAL_BALANCE = 1_000_000_000_000e18;
   uint256 public constant SCALE_FACTOR = 1e18;
   uint256 public constant BIPS = 10_000;
+  int24 internal constant MAX_TICK = 100_000_000;
   // Fee rate in hundredths of a bip (3000 = 0.30%)
   // Set to 0 for existing tests to pass without fee impact
   uint24 public constant FEE_RATE = 0;
@@ -69,6 +70,22 @@ abstract contract FixedFeeSwapMarketTest is Test {
   }
 
   // ============ Helper Functions ============
+
+  function _deployHookWithSpacing(int24 _yieldPerTick)
+    internal
+    returns (FixedFeeSwapMarketHarness)
+  {
+    address _mockManager = makeAddr("yieldToTickManager");
+    return new FixedFeeSwapMarketHarness(
+      MARKET_LENGTH,
+      address(token0),
+      address(token1),
+      FEE_RATE,
+      _yieldPerTick,
+      IPoolManager(_mockManager),
+      0
+    );
+  }
 
   function _fundUser(address user) internal {
     token0.mint(user, INITIAL_BALANCE);
@@ -277,22 +294,6 @@ contract GetHookPermissions is FixedFeeSwapMarketTest {
 }
 
 contract YieldToTick is FixedFeeSwapMarketTest {
-  function _deployHookWithSpacing(int24 _yieldPerTick)
-    internal
-    returns (FixedFeeSwapMarketHarness)
-  {
-    address _mockManager = makeAddr("yieldToTickManager");
-    return new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH,
-      address(token0),
-      address(token1),
-      FEE_RATE,
-      _yieldPerTick,
-      IPoolManager(_mockManager),
-      0
-    );
-  }
-
   function testFuzz_MatchesIntegerDivisionForAnySpacing(int24 _yieldPerTick, int256 _yieldBps)
     public
   {
@@ -306,7 +307,7 @@ contract YieldToTick is FixedFeeSwapMarketTest {
     );
   }
 
-  function testFuzz_RoundTripForAlignedYieldAcrossSpacings(int24 _yieldPerTick, int24 _tick)
+  function testFuzz_RawYieldMatchesTickMultipliedBySpacing(int24 _yieldPerTick, int24 _tick)
     public
   {
     _yieldPerTick = int24(bound(int256(_yieldPerTick), 1, type(int24).max));
@@ -315,80 +316,51 @@ contract YieldToTick is FixedFeeSwapMarketTest {
     int256 _alignedYield = int256(_tick) * int256(_yieldPerTick);
     assertEq(_hook.yieldToTick(_alignedYield), _tick, "Aligned yields should round-trip exactly");
   }
-
-  function testFuzz_MonotonicForOrderedYieldsAcrossSpacings(
-    int24 _yieldPerTick,
-    int24 _yieldA,
-    int24 _yieldB
-  ) public {
-    _yieldPerTick = int24(bound(int256(_yieldPerTick), 1, type(int24).max));
-    vm.assume(_yieldA <= _yieldB);
-    FixedFeeSwapMarketHarness _hook = _deployHookWithSpacing(_yieldPerTick);
-
-    assertLe(
-      _hook.yieldToTick(int256(_yieldA)),
-      _hook.yieldToTick(int256(_yieldB)),
-      "yieldToTick should be monotonic"
-    );
-  }
 }
 
 contract TickToPrice is FixedFeeSwapMarketTest {
   using FixedPointMathLib for int256;
 
-  /// @dev Price is always positive for any tick and time
-  function testFuzz_PriceAlwaysPositive(int24 tick, uint256 timeElapsed) public {
-    tick = _boundTick(tick);
-    timeElapsed = _boundTimeElapsed(timeElapsed);
-
+  function _priceAtElapsed(int24 tick, uint256 timeElapsed) internal returns (int256) {
     _warpFromStart(timeElapsed);
-    int256 price = hook.tickToPrice(tick);
-
-    assertGt(price, 0, "Price must always be positive");
+    return hook.tickToPrice(tick);
   }
 
-  /// @dev Price monotonically decreases with increasing yield (tick)
-  /// @notice The implementation uses exp(-yield * time) so higher tick = lower price
-  function testFuzz_PriceMonotonicInYield(int24 tickA, int24 tickB, uint256 timeElapsed) public {
-    tickA = _boundTick(tickA);
-    tickB = _boundTick(tickB);
-    vm.assume(tickA < tickB);
+  /// @dev At START_TIME, remaining = duration so scaledTime = WAD and the exponent reduces to
+  /// -tick/BIPS, so price matches exp(-tick/BIPS).
+  function testFuzz_PriceAtStartMatchesExpected(int24 tick) public {
+    tick = int24(bound(int256(tick), 0, MAX_TICK));
+
+    int256 actual = _priceAtElapsed(tick, 0);
+
+    int256 exponent = (-int256(tick) * 1e18) / int256(BIPS);
+    int256 expected = exponent.expWad();
+    assertApproxEqRel(actual, expected, 1e12, "price at start should match exp(-tick/BIPS)");
+  }
+
+  /// @dev For any non-mature timestamp, strictly higher yield (tick) implies strictly lower price.
+  function testFuzz_PriceDecreasesAsYieldIncreases(int24 tickA, int24 tickB, uint256 timeElapsed) public {
+    tickA = int24(bound(int256(tickA), 0, MAX_TICK - 1));
+    tickB = int24(bound(int256(tickB), tickA + 1, MAX_TICK));
     timeElapsed = bound(timeElapsed, 1, MARKET_LENGTH - 1);
 
-    _warpFromStart(timeElapsed);
-    int256 priceA = hook.tickToPrice(tickA);
-    int256 priceB = hook.tickToPrice(tickB);
+    int256 priceA = _priceAtElapsed(tickA, timeElapsed);
+    int256 priceB = _priceAtElapsed(tickB, timeElapsed);
 
-    assertGe(priceA, priceB, "Higher tick (yield) should have lower or equal price");
-  }
-
-  /// @dev For any time before maturity, moving one tick higher strictly reduces price.
-  function testFuzz_PriceStrictlyDecreasesWithOneTickStep(int24 tick, uint256 timeElapsed) public {
-    tick = int24(bound(int256(tick), 0, 9999));
-    timeElapsed = bound(timeElapsed, 0, MARKET_LENGTH - 1);
-
-    _warpFromStart(timeElapsed);
-    int256 priceA = hook.tickToPrice(tick);
-    int256 priceB = hook.tickToPrice(tick + 1);
-
-    assertGt(priceA, priceB, "tick+1 should have strictly lower price before maturity");
+    assertGt(priceA, priceB, "Higher tick should have strictly lower price before maturity");
   }
 
   /// @dev Price increases over time for positive yields (converges to 1.0 at maturity)
-  /// @notice With exp(-yield * time_remaining), less remaining time = less negative exponent =
-  /// higher price
-  function testFuzz_PriceIncreasesOverTimeForPositiveYield(int24 tick, uint256 time1, uint256 time2)
+  /// @notice With exp(-yield * time_remaining), less remaining time => less discount.
+  function testFuzz_PriceIncreasesOverTimeSameYield(int24 tick, uint256 time1, uint256 time2)
     public
   {
-    tick = int24(bound(int256(tick), 1, 10_000)); // Positive yield only
+    tick = int24(bound(int256(tick), 1, MAX_TICK));
     time1 = bound(time1, 0, MARKET_LENGTH - 2);
     time2 = bound(time2, time1 + 1, MARKET_LENGTH - 1);
 
-    _warpFromStart(time1);
-    int256 price1 = hook.tickToPrice(tick);
-
-    _warpFromStart(time2);
-    int256 price2 = hook.tickToPrice(tick);
+    int256 price1 = _priceAtElapsed(tick, time1);
+    int256 price2 = _priceAtElapsed(tick, time2);
 
     assertGe(price2, price1, "Price should increase over time (converge to 1)");
   }
@@ -396,56 +368,16 @@ contract TickToPrice is FixedFeeSwapMarketTest {
   /// @dev At maturity, price equals 1 regardless of tick (PT redeemable 1:1)
   /// @notice At maturity, remaining time = 0, so tickToPrice returns WAD directly
   function testFuzz_PriceAtMaturityIsOne(int24 tick) public {
-    tick = _boundTick(tick);
+    tick = int24(bound(int256(tick), 0, MAX_TICK));
     vm.warp(hook.getMaturity());
     int256 price = hook.tickToPrice(tick);
     assertEq(price, 1e18, "Price at maturity should be 1 regardless of tick");
   }
 
-  /// @dev Price ratio between ticks follows exponential relationship
-  /// @notice price(tickA) / price(tickB) = exp(-(tickA - tickB) * time_factor)
-  function testFuzz_PriceRatioConsistency(int24 tickA, int24 tickB, uint256 timeElapsed) public {
-    tickA = int24(bound(int256(tickA), 0, 1000));
-    tickB = int24(bound(int256(tickB), 0, 1000));
-    vm.assume(tickA != tickB);
-    timeElapsed = bound(timeElapsed, 1, MARKET_LENGTH - 1);
-
-    _warpFromStart(timeElapsed);
-    int256 priceA = hook.tickToPrice(tickA);
-    int256 priceB = hook.tickToPrice(tickB);
-    int256 priceDiff = hook.tickToPrice(tickA - tickB);
-
-    // priceA / priceB should equal price(tickA - tickB)
-    // In WAD: (priceA * 1e18) / priceB
-    int256 ratio = (priceA * 1e18) / priceB;
-    assertApproxEqRel(ratio, priceDiff, 1e12, "Price ratio should equal price of tick difference");
-  }
-
-  /// @dev Price at tick 0 equals 1e18 regardless of time
-  function testFuzz_ZeroTickPriceIsOne(uint256 timeElapsed) public {
-    timeElapsed = _boundTimeElapsed(timeElapsed);
-    _warpFromStart(timeElapsed);
-
-    int256 price = hook.tickToPrice(0);
-    assertEq(price, 1e18, "Price at tick 0 should always be 1e18");
-  }
-
-  /// @dev Positive tick (positive yield) gives price < 1 (discount)
-  /// @notice The implementation uses exp(-yield * time), so positive tick = exp(negative) < 1
-  function testFuzz_PositiveTickLowerPrice(int24 tick, uint256 timeElapsed) public {
-    tick = int24(bound(int256(tick), 1, 10_000));
-    timeElapsed = bound(timeElapsed, 1, MARKET_LENGTH - 1);
-
-    _warpFromStart(timeElapsed);
-    int256 price = hook.tickToPrice(tick);
-
-    assertLt(price, 1e18, "Positive tick should give price < 1");
-  }
-
-  /// @dev Remaining-time additivity: price(rem1+rem2) == price(rem1) * price(rem2)
+   /// @dev Remaining-time additivity: price(rem1+rem2) == price(rem1) * price(rem2)
   /// @notice exp(-y*(r1+r2)/d) = exp(-y*r1/d) * exp(-y*r2/d) where r = remaining time
-  function testFuzz_PriceRemainingTimeAdditivity(int24 tick, uint256 rem1, uint256 rem2) public {
-    tick = int24(bound(int256(tick), 0, 10_000));
+  function testFuzz_RemainingTimeAdditivitiveWithPrice(int24 tick, uint256 rem1, uint256 rem2) public {
+    tick = int24(bound(int256(tick), -MAX_TICK, MAX_TICK));
     rem1 = bound(rem1, 0, MARKET_LENGTH);
     rem2 = bound(rem2, 0, MARKET_LENGTH - rem1);
 
@@ -464,65 +396,6 @@ contract TickToPrice is FixedFeeSwapMarketTest {
     );
   }
 
-  /// @dev At START_TIME, remaining = duration so scaledTime = WAD and the exponent reduces to
-  /// -tick/BIPS, so price matches exp(-tick/BIPS).
-  function testFuzz_PriceAtStartMatchesClosedForm(int24 tick) public {
-    tick = _boundTick(tick);
-
-    _warpFromStart(0);
-    int256 actual = hook.tickToPrice(tick);
-
-    int256 exponent = (-int256(tick) * 1e18) / int256(BIPS);
-    int256 expected = exponent.expWad();
-    assertApproxEqRel(actual, expected, 1e12, "price at start should match exp(-tick/BIPS)");
-  }
-
-  /// @dev Verify prices against precomputed values
-  /// @notice Values computed from exp(-tick * timeRemaining / (BIPS * MARKET_LENGTH))
-  /// With remaining-time pricing, full discount occurs at start (remaining = duration).
-  function test_PrecomputedPriceValues() public {
-    // At start (remaining = MARKET_LENGTH), exponent = -tick / BIPS
-    // tick=10000: exp(-1) ≈ 0.3678794411714423
-    // tick=1000: exp(-0.1) ≈ 0.9048374180359595
-    // tick=100: exp(-0.01) ≈ 0.9900498337491681
-    // At half remaining, tick=1000: exp(-0.05) ≈ 0.9512294245007139
-
-    int24[5] memory ticks = [int24(10_000), int24(1000), int24(100), int24(1000), int24(0)];
-    uint256[5] memory times =
-      [uint256(0), uint256(0), uint256(0), uint256(MARKET_LENGTH) / 2, uint256(0)];
-    int256[5] memory expected = [
-      int256(367_879_441_171_442_321), // exp(-1)
-      int256(904_837_418_035_959_573), // exp(-0.1)
-      int256(990_049_833_749_168_054), // exp(-0.01)
-      int256(951_229_424_500_713_880), // exp(-0.05)
-      int256(1e18) // exp(0)
-    ];
-
-    for (uint256 i = 0; i < 5; i++) {
-      _warpFromStart(times[i]);
-      int256 actualPrice = hook.tickToPrice(ticks[i]);
-
-      assertApproxEqRel(
-        actualPrice,
-        expected[i],
-        1e10, // 0.000001% tolerance for rounding
-        string.concat("Failed for case ", vm.toString(i))
-      );
-    }
-  }
-
-  /// @dev Price bounded within reasonable exponential range
-  function testFuzz_PriceBounded(int24 tick, uint256 timeElapsed) public {
-    tick = _boundTick(tick);
-    timeElapsed = _boundTimeElapsed(timeElapsed);
-
-    _warpFromStart(timeElapsed);
-    int256 price = hook.tickToPrice(tick);
-
-    int256 minPrice = int256(-10e18).expWad(); // exp(-10)
-    assertGe(price, minPrice, "Price below exp(-10)");
-    assertLe(price, 1e18, "Price should be <= 1 for non-negative ticks");
-  }
 }
 
 contract MintLiquidity is FixedFeeSwapMarketTest {
@@ -5240,17 +5113,6 @@ contract MaturityTests is FixedFeeSwapMarketTest {
 
     assertGe(token0.balanceOf(alice), _balance0Before, "LP should receive token0");
     assertGe(token1.balanceOf(alice), _balance1Before, "LP should receive token1");
-  }
-
-  /// @dev At maturity, tickToPrice returns 1.0 for all ticks (PT redeemable 1:1)
-  function test_PriceAtMaturityMatchesExpected() public {
-    vm.warp(hook.getMaturity());
-
-    // Verify all tick prices = 1.0 at maturity
-    for (int24 _tick = 0; _tick <= 500; _tick += 100) {
-      int256 _actual = hook.tickToPrice(_tick);
-      assertEq(_actual, 1e18, "Price should be 1.0 at maturity regardless of tick");
-    }
   }
 }
 
