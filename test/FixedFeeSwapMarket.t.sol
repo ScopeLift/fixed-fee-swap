@@ -235,6 +235,20 @@ abstract contract FixedFeeSwapMarketTest is Test {
     return keccak256(abi.encodePacked(upper, lower, user));
   }
 
+  function _mintLiquidity(address user, int24 tickLower, int24 tickUpper, uint128 liquidity)
+    internal
+    returns (uint256 token0Used, uint256 token1Used)
+  {
+    uint256 balance0Before = token0.balanceOf(user);
+    uint256 balance1Before = token1.balanceOf(user);
+
+    vm.prank(user);
+    hook.mintLiquidity(tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max);
+
+    token0Used = balance0Before - token0.balanceOf(user);
+    token1Used = balance1Before - token1.balanceOf(user);
+  }
+
   function _getPositionId(int24 tickUpper, int24 tickLower, address owner)
     internal
     pure
@@ -466,20 +480,6 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     _resetHookWithInitialTick(500, "mintLiquidityManager");
   }
 
-  function _mintLiquidity(address user, int24 tickLower, int24 tickUpper, uint128 liquidity)
-    internal
-    returns (uint256 token0Used, uint256 token1Used)
-  {
-    uint256 balance0Before = token0.balanceOf(user);
-    uint256 balance1Before = token1.balanceOf(user);
-
-    vm.prank(user);
-    hook.mintLiquidity(tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max);
-
-    token0Used = balance0Before - token0.balanceOf(user);
-    token1Used = balance1Before - token1.balanceOf(user);
-  }
-
   function testFuzz_CreatesPositionAndUpdatesTickState(
     int24 tickLower,
     int24 tickUpper,
@@ -524,7 +524,7 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     }
   }
 
-  function testFuzz_TransfersExpectedAmountsAndConservesTotals(
+  function testFuzz_TransfersExpectedAmounts(
     int24 tickLower,
     int24 tickUpper,
     uint128 liquidity,
@@ -559,12 +559,19 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     assertEq(user1After + hook1After, total1Before, "token1 conservation");
   }
 
-  function testFuzz_UpdatesActiveLiquidity_WhenRangeIncludesCurrentTick(uint128 liquidity) public {
+  function testFuzz_UpdatesActiveLiquidityWhenRangeIncludesCurrentTick(
+    uint128 liquidity,
+    uint8 scenario
+  ) public {
     liquidity = _boundLiquidity(liquidity);
 
     _warpToMintTime();
 
-    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.InRange);
+    // Map to the two inclusive cases: InRange or LowerAtCurrent.
+    uint8 boundedScenario = uint8(bound(scenario, 0, 1));
+    RangeScenario rangeScenario =
+      boundedScenario == 0 ? RangeScenario.InRange : RangeScenario.LowerAtCurrent;
+    (int24 tickLower, int24 tickUpper) = _standardRange(rangeScenario);
     uint128 activeBefore = hook.getActiveLiquidity();
 
     vm.prank(alice);
@@ -573,16 +580,20 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     assertEq(hook.getActiveLiquidity(), activeBefore + liquidity, "active liquidity increase");
   }
 
-  function testFuzz_DoesNotUpdateActiveLiquidity_WhenRangeExcludesCurrentTick(
+  function testFuzz_DoesNotUpdateActiveLiquidityWhenRangeExcludesCurrentTick(
     uint128 liquidity,
-    bool belowCurrent
+    uint8 scenario
   ) public {
     liquidity = _boundLiquidity(liquidity);
 
     _warpToMintTime();
 
-    RangeScenario scenario = belowCurrent ? RangeScenario.BelowCurrent : RangeScenario.AboveCurrent;
-    (int24 tickLower, int24 tickUpper) = _standardRange(scenario);
+    // Map to excluded cases: BelowCurrent, AboveCurrent, UpperAtCurrent.
+    uint8 boundedScenario = uint8(bound(scenario, 0, 2));
+    RangeScenario rangeScenario = boundedScenario == 0
+      ? RangeScenario.BelowCurrent
+      : boundedScenario == 1 ? RangeScenario.AboveCurrent : RangeScenario.UpperAtCurrent;
+    (int24 tickLower, int24 tickUpper) = _standardRange(rangeScenario);
     uint128 activeBefore = hook.getActiveLiquidity();
 
     vm.prank(alice);
@@ -591,16 +602,17 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     assertEq(hook.getActiveLiquidity(), activeBefore, "active liquidity unchanged");
   }
 
-  function testFuzz_MultipleUsersMintSameRange_AccumulatesGrossAndKeepsOwnership(
+  function testFuzz_MultipleUsersMintInSameRange(
     uint128 liquidityAlice,
-    uint128 liquidityBob
+    uint128 liquidityBob,
+    uint8 scenario
   ) public {
     liquidityAlice = _boundLiquidity(liquidityAlice);
     liquidityBob = _boundLiquidity(liquidityBob);
 
     _warpToMintTime();
 
-    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.InRange);
+    (int24 tickLower, int24 tickUpper) = _standardRange(_boundScenario(scenario));
 
     vm.prank(alice);
     hook.mintLiquidity(tickLower, tickUpper, liquidityAlice, type(uint256).max, type(uint256).max);
@@ -622,32 +634,19 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     assertEq(uint128(bobLiq), liquidityBob, "bob liquidity");
   }
 
-  function testFuzz_UsesExpectedTokenSidesAcrossRangeLocations(uint128 liquidity, uint8 scenario)
+  function testFuzz_LiquidityBelowCurrentTickIsOnlyToken0(uint128 liquidity, uint8 scenario)
     public
   {
     liquidity = _boundLiquidity(liquidity);
 
     _warpToMintTime();
 
-    RangeScenario rangeScenario = _boundScenario(scenario);
+    uint8 boundedScenario = uint8(bound(scenario, 0, 1));
+    RangeScenario rangeScenario =
+      boundedScenario == 0 ? RangeScenario.BelowCurrent : RangeScenario.UpperAtCurrent;
     int24 currentTick = hook.getCurrentTick();
     (int24 tickLower, int24 tickUpper) = _rangeForScenario(currentTick, rangeScenario, 100);
     (int256 expected0, int256 expected1) = _expectedMintAmounts(tickLower, tickUpper, liquidity);
-
-    if (
-      rangeScenario == RangeScenario.BelowCurrent || rangeScenario == RangeScenario.UpperAtCurrent
-    ) {
-      assertGt(expected0, 0, "requires token0");
-      assertEq(expected1, 0, "does not require token1");
-    } else if (
-      rangeScenario == RangeScenario.AboveCurrent || rangeScenario == RangeScenario.LowerAtCurrent
-    ) {
-      assertEq(expected0, 0, "does not require token0");
-      assertGt(expected1, 0, "requires token1");
-    } else {
-      assertGt(expected0, 0, "requires token0");
-      assertGt(expected1, 0, "requires token1");
-    }
 
     uint256 balance0Before = token0.balanceOf(alice);
     uint256 balance1Before = token1.balanceOf(alice);
@@ -655,11 +654,118 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     vm.prank(alice);
     hook.mintLiquidity(tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max);
 
+    assertGt(expected0, 0, "requires token0");
+    assertEq(expected1, 0, "does not require token1");
     assertEq(int256(balance0Before - token0.balanceOf(alice)), expected0, "token0 amount");
     assertEq(int256(balance1Before - token1.balanceOf(alice)), expected1, "token1 amount");
   }
 
-  function testFuzz_TokenAmountsScaleWithLiquidity(uint128 liquidity1, uint128 liquidity2) public {
+  function testFuzz_LiquidityAboveCurrentTickIsOnlyToken1(uint128 liquidity, uint8 scenario)
+    public
+  {
+    liquidity = _boundLiquidity(liquidity);
+
+    _warpToMintTime();
+
+    uint8 boundedScenario = uint8(bound(scenario, 0, 1));
+    RangeScenario rangeScenario =
+      boundedScenario == 0 ? RangeScenario.AboveCurrent : RangeScenario.LowerAtCurrent;
+    int24 currentTick = hook.getCurrentTick();
+    (int24 tickLower, int24 tickUpper) = _rangeForScenario(currentTick, rangeScenario, 100);
+    (int256 expected0, int256 expected1) = _expectedMintAmounts(tickLower, tickUpper, liquidity);
+
+    uint256 balance0Before = token0.balanceOf(alice);
+    uint256 balance1Before = token1.balanceOf(alice);
+
+    vm.prank(alice);
+    hook.mintLiquidity(tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max);
+
+    assertEq(expected0, 0, "does not require token0");
+    assertGt(expected1, 0, "requires token1");
+    assertEq(int256(balance0Before - token0.balanceOf(alice)), expected0, "token0 amount");
+    assertEq(int256(balance1Before - token1.balanceOf(alice)), expected1, "token1 amount");
+  }
+
+  function testFuzz_CurrentTickIsInLiquidityRange(uint128 liquidity) public {
+    liquidity = _boundLiquidity(liquidity);
+
+    _warpToMintTime();
+
+    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.InRange);
+    (int256 expected0, int256 expected1) = _expectedMintAmounts(tickLower, tickUpper, liquidity);
+
+    uint256 balance0Before = token0.balanceOf(alice);
+    uint256 balance1Before = token1.balanceOf(alice);
+
+    vm.prank(alice);
+    hook.mintLiquidity(tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max);
+
+    assertGt(expected0, 0, "requires token0");
+    assertGt(expected1, 0, "requires token1");
+    assertEq(int256(balance0Before - token0.balanceOf(alice)), expected0, "token0 amount");
+    assertEq(int256(balance1Before - token1.balanceOf(alice)), expected1, "token1 amount");
+  }
+
+  function testFuzz_TokenAmountsScaleWithLiquidity_BelowOrUpperAtCurrent(
+    uint128 liquidity1,
+    uint128 liquidity2,
+    uint8 scenario
+  ) public {
+    liquidity1 = uint128(bound(liquidity1, 1e17, 1e18));
+    liquidity2 = uint128(bound(liquidity2, liquidity1 * 2, 1e20));
+
+    _warpToMintTime();
+
+    uint8 boundedScenario = uint8(bound(scenario, 0, 1));
+    RangeScenario rangeScenario =
+      boundedScenario == 0 ? RangeScenario.BelowCurrent : RangeScenario.UpperAtCurrent;
+    (int24 tickLower, int24 tickUpper) = _standardRange(rangeScenario);
+    (int256 expected0_1,) = _expectedMintAmounts(tickLower, tickUpper, liquidity1);
+    (int256 expected0_2,) = _expectedMintAmounts(tickLower, tickUpper, liquidity2);
+    assertGe(expected0_2, expected0_1, "expected token0 monotonic");
+
+    (uint256 token0Used1, uint256 token1Used1) =
+      _mintLiquidity(alice, tickLower, tickUpper, liquidity1);
+    (uint256 token0Used2, uint256 token1Used2) =
+      _mintLiquidity(bob, tickLower, tickUpper, liquidity2);
+    assertEq(int256(token0Used1), expected0_1, "token0 used liquidity1");
+    assertEq(token1Used1, 0, "zero liquidity1 token1");
+    assertEq(int256(token0Used2), expected0_2, "token0 used liquidity2");
+    assertEq(token1Used2, 0, "zero liquidity2 token1");
+    assertGt(token0Used2, token0Used1, "larger liquidity token0");
+  }
+
+  function testFuzz_AddingLiquidityAboveCurrentTickIncreasesToken1Used(
+    uint128 liquidity1,
+    uint128 liquidity2,
+    uint8 scenario
+  ) public {
+    liquidity1 = uint128(bound(liquidity1, 1e17, 1e18));
+    liquidity2 = uint128(bound(liquidity2, liquidity1 * 2, 1e20));
+
+    _warpToMintTime();
+
+    uint8 boundedScenario = uint8(bound(scenario, 0, 1));
+    RangeScenario rangeScenario =
+      boundedScenario == 0 ? RangeScenario.AboveCurrent : RangeScenario.LowerAtCurrent;
+    (int24 tickLower, int24 tickUpper) = _standardRange(rangeScenario);
+    (, int256 expected1_1) = _expectedMintAmounts(tickLower, tickUpper, liquidity1);
+    (, int256 expected1_2) = _expectedMintAmounts(tickLower, tickUpper, liquidity2);
+
+    (uint256 token0Used1, uint256 token1Used1) =
+      _mintLiquidity(alice, tickLower, tickUpper, liquidity1);
+    (uint256 token0Used2, uint256 token1Used2) =
+      _mintLiquidity(bob, tickLower, tickUpper, liquidity2);
+    assertEq(int256(token1Used1), expected1_1, "token1 used liquidity1");
+    assertEq(int256(token1Used2), expected1_2, "token1 used liquidity2");
+    assertEq(token0Used1, 0, "zero liquidity1 token0");
+    assertEq(token0Used2, 0, "zero liquidity2 token0");
+    assertGt(token1Used2, token1Used1, "larger liquidity token1");
+  }
+
+  function testFuzz_AddingLiquidityAboveCurrentTickIncreasesToken1Used(uint128 liquidity1, uint128 liquidity2)
+    public
+  {
     liquidity1 = uint128(bound(liquidity1, 1e17, 1e18));
     liquidity2 = uint128(bound(liquidity2, liquidity1 * 2, 1e20));
 
@@ -670,8 +776,6 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
       _expectedMintAmounts(tickLower, tickUpper, liquidity1);
     (int256 expected0_2, int256 expected1_2) =
       _expectedMintAmounts(tickLower, tickUpper, liquidity2);
-    assertGe(expected0_2, expected0_1, "expected token0 monotonic");
-    assertGe(expected1_2, expected1_1, "expected token1 monotonic");
 
     (uint256 token0Used1, uint256 token1Used1) =
       _mintLiquidity(alice, tickLower, tickUpper, liquidity1);
@@ -685,7 +789,7 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     assertGt(token1Used2, token1Used1, "larger liquidity token1");
   }
 
-  function testFuzz_WiderBelowCurrentRangeRequiresMoreToken0(
+  function testFuzz_AWiderLiquidityRangeBelowTheCurrentTickRequiresMoreToken1(
     uint128 liquidity,
     int24 narrowWidth,
     int24 wideWidth
@@ -707,7 +811,7 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     assertEq(token1Wide, 0, "below-range wide token1");
   }
 
-  function testFuzz_AllowsWhen_MaxTokenAmountsEqualRequired(
+  function testFuzz_MintIsSuccessfulWhenAmountsEqualSpecifiedMax(
     int24 tickLower,
     int24 tickUpper,
     uint128 liquidity
@@ -723,13 +827,17 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     hook.mintLiquidity(tickLower, tickUpper, liquidity, uint256(required0), uint256(required1));
   }
 
-  function testFuzz_MintingExistingPositionAccumulatesLiquidity(uint128 liq1, uint128 liq2) public {
+  function testFuzz_MintingToExistingPositionAccumulatesLiquidity(
+    uint128 liq1,
+    uint128 liq2,
+    uint8 scenario
+  ) public {
     liq1 = _boundLiquidity(liq1);
     liq2 = _boundLiquidity(liq2);
 
     _warpToMintTime();
 
-    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.InRange);
+    (int24 tickLower, int24 tickUpper) = _standardRange(_boundScenario(scenario));
 
     bytes32 positionId1 = _mintLiquidityAtTicks(alice, tickLower, tickUpper, liq1);
 
@@ -758,9 +866,18 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     _warpToMintTime();
 
     bytes32 positionId = _getPositionId(tickUpper, tickLower, alice);
+    (int256 expected0, int256 expected1) = _expectedMintAmounts(tickLower, tickUpper, liquidity);
 
-    vm.expectEmit(true, true, false, false, address(hook));
-    emit FixedFeeSwapMarket.LiquidityModified(positionId, alice, tickLower, tickUpper, 0, 0, 0);
+    vm.expectEmit();
+    emit FixedFeeSwapMarket.LiquidityModified(
+      positionId,
+      alice,
+      tickLower,
+      tickUpper,
+      int128(liquidity),
+      int128(expected0),
+      int128(expected1)
+    );
 
     vm.prank(alice);
     hook.mintLiquidity(tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max);
@@ -768,7 +885,7 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
 
   // ============ Revert Tests ============
 
-  function testFuzz_RevertWhen_TickRangeInvalid(int24 tickLower, int24 tickUpper, uint128 liquidity)
+  function testFuzz_RevertIf_TickRangeIsInvalid(int24 tickLower, int24 tickUpper, uint128 liquidity)
     public
   {
     liquidity = _boundLiquidity(liquidity);
@@ -780,7 +897,7 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     hook.mintLiquidity(tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max);
   }
 
-  function testFuzz_RevertWhen_MaxTokenAmountTooLow(uint128 liquidity, bool checkToken0) public {
+  function testFuzz_RevertIf_MaxTokenAmountTooLow(uint128 liquidity, bool checkToken0) public {
     liquidity = _boundLiquidity(liquidity);
 
     _warpToMintTime();
@@ -801,7 +918,7 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     );
   }
 
-  function testFuzz_RevertWhen_RequiredTokenAllowanceMissing(uint128 liquidity, bool checkToken0)
+  function testFuzz_RevertIf_NoTokenAllowance(uint128 liquidity)
     public
   {
     liquidity = _boundLiquidity(liquidity);
@@ -812,14 +929,14 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     (int24 tickLower, int24 tickUpper) = _standardRange(scenario);
 
     vm.startPrank(alice);
-    if (checkToken0) token0.approve(address(hook), 0);
-    else token1.approve(address(hook), 0);
+    token0.approve(address(hook), 0);
+    token1.approve(address(hook), 0);
     vm.expectRevert(stdError.arithmeticError);
     hook.mintLiquidity(tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max);
     vm.stopPrank();
   }
 
-  function testFuzz_RevertWhen_RequiredTokenBalanceMissing(uint128 liquidity, bool checkToken0)
+  function testFuzz_RevertIf_TokenBalanceIsTooLow(uint128 liquidity)
     public
   {
     liquidity = _boundLiquidity(liquidity);
@@ -830,8 +947,9 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     (int24 tickLower, int24 tickUpper) = _standardRange(scenario);
 
     vm.startPrank(alice);
-    if (checkToken0) token0.transfer(makeAddr("sink"), token0.balanceOf(alice));
-    else token1.transfer(makeAddr("sink"), token1.balanceOf(alice));
+    token0.transfer(makeAddr("sink"), token0.balanceOf(alice));
+    token1.transfer(makeAddr("sink"), token1.balanceOf(alice));
+
     vm.expectRevert(stdError.arithmeticError);
     hook.mintLiquidity(tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max);
     vm.stopPrank();
