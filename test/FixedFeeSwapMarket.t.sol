@@ -35,8 +35,6 @@ struct SharedWithdrawalCtx {
   uint256 upperWordAfterMint;
 }
 
-
-
 abstract contract FixedFeeSwapMarketTest is Test {
   FixedFeeSwapMarketHarness public hook;
   MockERC20 public token0;
@@ -1974,12 +1972,15 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     Amounts memory expectedAtT1;
     {
       (int256 e0, int256 e1) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
-      expectedAtT1.amount0 = uint256(e0);
-      expectedAtT1.amount1 = uint256(e1);
+      expectedAtT1.amount0 = e0;
+      expectedAtT1.amount1 = e1;
     }
     Amounts memory receivedAtT1;
-    (receivedAtT1.amount0, receivedAtT1.amount1) =
-      _decreaseLiquidity(alice, positionId, removeAmount);
+    {
+      (uint256 received0, uint256 received1) = _decreaseLiquidity(alice, positionId, removeAmount);
+      receivedAtT1.amount0 = int256(received0);
+      receivedAtT1.amount1 = int256(received1);
+    }
 
     vm.revertTo(snapshot);
 
@@ -1987,12 +1988,15 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     Amounts memory expectedAtT2;
     {
       (int256 e0, int256 e1) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
-      expectedAtT2.amount0 = uint256(e0);
-      expectedAtT2.amount1 = uint256(e1);
+      expectedAtT2.amount0 = e0;
+      expectedAtT2.amount1 = e1;
     }
     Amounts memory receivedAtT2;
-    (receivedAtT2.amount0, receivedAtT2.amount1) =
-      _decreaseLiquidity(alice, positionId, removeAmount);
+    {
+      (uint256 received0, uint256 received1) = _decreaseLiquidity(alice, positionId, removeAmount);
+      receivedAtT2.amount0 = int256(received0);
+      receivedAtT2.amount1 = int256(received1);
+    }
 
     assertEq(receivedAtT1.amount0, expectedAtT1.amount0, "t1 token0");
     assertEq(receivedAtT1.amount1, expectedAtT1.amount1, "t1 token1");
@@ -2194,10 +2198,6 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   }
 }
 
-// ============================================================================
-// BeforeSwap Tests - Direct testing of the _beforeSwap hook function
-// ============================================================================
-
 contract _BeforeSwap is FixedFeeSwapMarketTest {
   using FixedPointMathLib for int256;
 
@@ -2305,8 +2305,11 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertLt(token1.balanceOf(bob), balance1Before, "User should send TOKEN1");
   }
 
-  /// @dev Token conservation: no tokens created or destroyed (principal->cash)
-  function testFuzz_TokenConservation_PrincipalForCash(uint256 amountIn) public {
+  /// @dev Token conservation: no tokens created or destroyed in either direction.
+  function testFuzz_TokenConservation_IsMaintainedInBothDirections(
+    uint256 amountIn,
+    bool principalForCash
+  ) public {
     amountIn = _boundSwapAmount(amountIn);
 
     uint256 totalSupply0Before =
@@ -2314,7 +2317,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     uint256 totalSupply1Before =
       token1.balanceOf(alice) + token1.balanceOf(bob) + token1.balanceOf(address(hook));
 
-    _swap(bob, int256(amountIn), true, NO_TICK_LIMIT);
+    _swap(bob, int256(amountIn), principalForCash, NO_TICK_LIMIT);
 
     uint256 totalSupply0After =
       token0.balanceOf(alice) + token0.balanceOf(bob) + token0.balanceOf(address(hook));
@@ -2325,117 +2328,72 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertEq(totalSupply1After, totalSupply1Before, "TOKEN1 supply should be conserved");
   }
 
-  /// @dev Token conservation: no tokens created or destroyed (cash->principal)
-  function testFuzz_TokenConservation_CashForPrincipal(uint256 amountIn) public {
+  /// @dev Input consumed never exceeds amountSpecified in either direction.
+  function testFuzz_InputConsumed_DoesNotExceedAmountSpecified(
+    uint256 amountIn,
+    bool principalForCash
+  ) public {
     amountIn = _boundSwapAmount(amountIn);
 
-    uint256 totalSupply0Before =
-      token0.balanceOf(alice) + token0.balanceOf(bob) + token0.balanceOf(address(hook));
-    uint256 totalSupply1Before =
-      token1.balanceOf(alice) + token1.balanceOf(bob) + token1.balanceOf(address(hook));
+    uint256 balanceBefore = principalForCash ? token0.balanceOf(bob) : token1.balanceOf(bob);
 
-    _swap(bob, int256(amountIn), false, NO_TICK_LIMIT);
+    _swap(bob, int256(amountIn), principalForCash, NO_TICK_LIMIT);
 
-    uint256 totalSupply0After =
-      token0.balanceOf(alice) + token0.balanceOf(bob) + token0.balanceOf(address(hook));
-    uint256 totalSupply1After =
-      token1.balanceOf(alice) + token1.balanceOf(bob) + token1.balanceOf(address(hook));
-
-    assertEq(totalSupply0After, totalSupply0Before, "TOKEN0 supply should be conserved");
-    assertEq(totalSupply1After, totalSupply1Before, "TOKEN1 supply should be conserved");
-  }
-
-  /// @dev Input amount is consumed correctly for principal->cash
-  function testFuzz_PrincipalInputConsumed(uint256 amountIn) public {
-    amountIn = _boundSwapAmount(amountIn);
-
-    uint256 balance0Before = token0.balanceOf(bob);
-
-    _swap(bob, int256(amountIn), true, NO_TICK_LIMIT);
-
-    uint256 consumed = balance0Before - token0.balanceOf(bob);
-    assertLe(consumed, amountIn, "Consumed should not exceed amountIn");
+    uint256 balanceAfter = principalForCash ? token0.balanceOf(bob) : token1.balanceOf(bob);
+    uint256 consumed = balanceBefore - balanceAfter;
     // Sub-tick swaps may return zero due to integer-tick snapping
     vm.assume(consumed > 0);
-  }
-
-  /// @dev Input amount is consumed correctly for cash->principal
-  function testFuzz_CashInputConsumed(uint256 amountIn) public {
-    amountIn = _boundSwapAmount(amountIn);
-
-    uint256 balance1Before = token1.balanceOf(bob);
-
-    _swap(bob, int256(amountIn), false, NO_TICK_LIMIT);
-
-    uint256 consumed = balance1Before - token1.balanceOf(bob);
     assertLe(consumed, amountIn, "Consumed should not exceed amountIn");
-    // Sub-tick swaps may return zero due to integer-tick snapping
-    vm.assume(consumed > 0);
   }
 
   // ============ State Update Tests ============
 
-  /// @dev Swap updates currentTick in correct direction for principal->cash
-  function testFuzz_UpdatesCurrentTick_PrincipalForCash(uint256 amountIn) public {
+  /// @dev currentTick moves in the expected direction and by a bounded amount.
+  function testFuzz_CurrentTickMovesInExpectedDirection(uint256 amountIn, bool principalForCash)
+    public
+  {
     amountIn = _boundSwapAmount(amountIn);
+
     int24 tickBefore = hook.getCurrentTick();
     uint128 activeLiq = hook.getActiveLiquidity();
 
-    _swap(bob, int256(amountIn), true, NO_TICK_LIMIT);
+    _swap(bob, int256(amountIn), principalForCash, NO_TICK_LIMIT);
 
     int24 tickAfter = hook.getCurrentTick();
-    assertGe(tickAfter, tickBefore, "Tick should increase for principal->cash");
-
     // Magnitude bound: tick should not move more than amountIn * BIPS / activeLiquidity + 2
     int24 maxTickMove = int24(int256(amountIn * BIPS / uint256(activeLiq))) + 2;
-    assertLe(tickAfter - tickBefore, maxTickMove, "Tick should not move more than expected");
-  }
 
-  /// @dev Swap updates currentTick in correct direction for cash->principal
-  function testFuzz_UpdatesCurrentTick_CashForPrincipal(uint256 amountIn) public {
-    amountIn = _boundSwapAmount(amountIn);
+    if (principalForCash) {
+      assertGe(tickAfter, tickBefore, "Tick should increase for principal->cash");
+      assertLe(tickAfter - tickBefore, maxTickMove, "Tick should not move more than expected");
+      return;
+    }
 
-    int24 tickBefore = hook.getCurrentTick();
-    uint128 activeLiq = hook.getActiveLiquidity();
-
-    _swap(bob, int256(amountIn), false, NO_TICK_LIMIT);
-
-    int24 tickAfter = hook.getCurrentTick();
     assertLe(tickAfter, tickBefore, "Tick should decrease for cash->principal");
-
-    // Magnitude bound: tick should not move more than amountIn * BIPS / activeLiquidity + 2
-    int24 maxTickMove = int24(int256(amountIn * BIPS / uint256(activeLiq))) + 2;
     assertLe(tickBefore - tickAfter, maxTickMove, "Tick should not move more than expected");
   }
 
-  /// @dev Swap updates currentPrice for principal->cash
-  function testFuzz_UpdatesCurrentPrice_PrincipalForCash(uint256 amountIn) public {
+  /// @dev currentPrice moves in the expected direction in both directions.
+  function testFuzz_CurrentPriceMovesInExpectedDirection(uint256 amountIn, bool principalForCash)
+    public
+  {
     amountIn = _boundSwapAmount(amountIn);
 
-    // Use tick-derived price to avoid stale stored price from different timestamps
+    // Use tick-derived price to avoid stale stored price from different timestamps.
     int256 priceBefore = hook.tickToPrice(hook.getCurrentTick());
 
-    _swap(bob, int256(amountIn), true, NO_TICK_LIMIT);
+    _swap(bob, int256(amountIn), principalForCash, NO_TICK_LIMIT);
 
     int256 priceAfter = hook.getCurrentPrice();
-    assertLe(priceAfter, priceBefore, "Price should decrease for principal->cash");
-  }
-
-  /// @dev Swap updates currentPrice for cash->principal
-  function testFuzz_UpdatesCurrentPrice_CashForPrincipal(uint256 amountIn) public {
-    amountIn = _boundSwapAmount(amountIn);
-
-    // Use tick-derived price to avoid stale stored price from different timestamps
-    int256 priceBefore = hook.tickToPrice(hook.getCurrentTick());
-
-    _swap(bob, int256(amountIn), false, NO_TICK_LIMIT);
-
-    int256 priceAfter = hook.getCurrentPrice();
+    if (principalForCash) {
+      assertLe(priceAfter, priceBefore, "Price should decrease for principal->cash");
+      return;
+    }
     assertGe(priceAfter, priceBefore, "Price should increase for cash->principal");
   }
 
   /// @dev Active liquidity unchanged when not crossing ticks
-  function testFuzz_ActiveLiquidityUnchangedWithinTick(uint256 amountIn) public {
+  function testFuzz_WithinTickSwap_DoesNotUpdateActiveLiquidity(uint256 amountIn) public {
     // Use small amount to stay within current tick range
     amountIn = bound(amountIn, 1e15, 1e17);
 
@@ -2528,10 +2486,10 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     int24 nextTick = int24((int256(tickBefore) / 256 + 1) * 256 - 1);
     (uint256 principalInToBoundary,, int256 boundaryPrice, int24 stepTick) =
       hook.exposed_getCashSwapAmount(int256(1e36), priceBefore, nextTick);
-    assertEq(stepTick, nextTick, "Should step to the word boundary tick");
 
     _swap(bob, int256(principalInToBoundary), true, NO_TICK_LIMIT);
 
+    assertEq(stepTick, nextTick, "Should step to the word boundary tick");
     assertEq(hook.getCurrentTick(), nextTick, "Should land on the boundary tick");
     assertEq(hook.getCurrentPrice(), boundaryPrice, "Price should move to the boundary price");
     assertEq(hook.getActiveLiquidity(), activeBefore, "Active liquidity should be unchanged");
@@ -2553,11 +2511,11 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
     (uint256 cashInToBoundary,, int256 boundaryPrice, int24 stepTick) =
       hook.exposed_getPrincipalSwapAmount(int256(1e36), priceBefore, belowUpper);
-    assertEq(stepTick, belowUpper, "Should step to upper tick");
 
     uint256 balance1Before = token1.balanceOf(bob);
     _swap(bob, int256(cashInToBoundary), false, NO_TICK_LIMIT);
 
+    assertEq(stepTick, belowUpper, "Should step to upper tick");
     assertEq(
       balance1Before - token1.balanceOf(bob), cashInToBoundary, "Should consume cash to boundary"
     );
@@ -2586,11 +2544,11 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
     (uint256 cashInToBoundary,, int256 boundaryPrice, int24 stepTick) =
       hook.exposed_getPrincipalSwapAmount(int256(1e36), priceBefore, narrowLower);
-    assertEq(stepTick, narrowLower, "Should step to lower tick");
 
     uint256 balance1Before = token1.balanceOf(bob);
     _swap(bob, int256(cashInToBoundary), false, NO_TICK_LIMIT);
 
+    assertEq(stepTick, narrowLower, "Should step to lower tick");
     assertEq(
       balance1Before - token1.balanceOf(bob), cashInToBoundary, "Should consume cash to boundary"
     );
@@ -2605,26 +2563,33 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
   // ============ Tick Limit Tests ============
 
-  /// @dev Tick limit stops swap for principal->cash
-  function testFuzz_TickLimitStopsSwap_PrincipalForCash(uint256 amountIn) public {
+  /// @dev Tick limit can stop swaps early in either direction.
+  function testFuzz_TickLimitStopsSwapBeforeConsumingAllInput(
+    uint256 amountIn,
+    bool principalForCash
+  ) public {
     amountIn = bound(amountIn, 1e17, 1e20);
 
     int24 currentTick = hook.getCurrentTick();
-    // Set limit 10 ticks above current tick
-    int24 tickLimit = currentTick + 10;
+    int24 tickLimit = principalForCash ? currentTick + 10 : currentTick - 10;
 
-    uint256 balance0Before = token0.balanceOf(bob);
+    uint256 balanceBefore = principalForCash ? token0.balanceOf(bob) : token1.balanceOf(bob);
 
-    _swap(bob, int256(amountIn), true, tickLimit);
+    _swap(bob, int256(amountIn), principalForCash, tickLimit);
 
     // Might not consume full amountIn due to limit
-    uint256 consumed = balance0Before - token0.balanceOf(bob);
+    uint256 balanceAfter = principalForCash ? token0.balanceOf(bob) : token1.balanceOf(bob);
+    uint256 consumed = balanceBefore - balanceAfter;
     assertLe(consumed, amountIn, "Should not exceed amountIn");
 
     // Only check the limit if the swap actually produced output
     if (consumed > 0 && consumed < amountIn) {
       int24 finalTick = hook.getCurrentTick();
-      assertLe(finalTick, tickLimit, "Tick should be at or below limit");
+      if (principalForCash) {
+        assertLe(finalTick, tickLimit, "Tick should be at or below limit");
+        return;
+      }
+      assertGe(finalTick, tickLimit, "Tick should be at or above limit");
     }
   }
 
@@ -2645,7 +2610,9 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
   /// @dev If the tick limit is already satisfied at entry, the swap should be a no-op (except lazy
   /// price init).
-  function testFuzz_TickLimitAlreadyHit_PrincipalForCash_NoOp(uint256 amountIn) public {
+  function testFuzz_TickLimitAlreadySatisfied_ReturnsNoOp(uint256 amountIn, bool principalForCash)
+    public
+  {
     amountIn = _boundSwapAmount(amountIn);
     int24 tickBefore = hook.getCurrentTick();
     uint128 activeBefore = hook.getActiveLiquidity();
@@ -2656,9 +2623,8 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     uint256 hookBalance0Before = token0.balanceOf(address(hook));
     uint256 hookBalance1Before = token1.balanceOf(address(hook));
 
-    // For principal->cash we stop when `currentTick >= tickLimit`.
     (bytes4 selector, BeforeSwapDelta delta, uint24 fee) =
-      _swap(bob, int256(amountIn), true, tickBefore);
+      _swap(bob, int256(amountIn), principalForCash, tickBefore);
 
     assertEq(selector, BaseHook.beforeSwap.selector, "Selector");
     assertEq(BeforeSwapDelta.unwrap(delta), 0, "Delta");
@@ -2674,87 +2640,18 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertEq(token1.balanceOf(address(hook)), hookBalance1Before, "Hook TOKEN1 unchanged");
   }
 
-  /// @dev If the tick limit is already satisfied at entry, the swap should be a no-op (except lazy
-  /// price init).
-  function testFuzz_TickLimitAlreadyHit_CashForPrincipal_NoOp(uint256 amountIn) public {
-    amountIn = _boundSwapAmount(amountIn);
-    // Price may already be initialized from setUp's _moveTickTo
-    int24 tickBefore = hook.getCurrentTick();
-    uint128 activeBefore = hook.getActiveLiquidity();
-    int256 expectedPrice = hook.tickToPrice(tickBefore);
-
-    uint256 balance0Before = token0.balanceOf(bob);
-    uint256 balance1Before = token1.balanceOf(bob);
-    uint256 hookBalance0Before = token0.balanceOf(address(hook));
-    uint256 hookBalance1Before = token1.balanceOf(address(hook));
-
-    // For cash->principal we stop when `currentTick <= tickLimit`.
-    (bytes4 selector, BeforeSwapDelta delta, uint24 fee) =
-      _swap(bob, int256(amountIn), false, tickBefore);
-
-    assertEq(selector, BaseHook.beforeSwap.selector, "Selector");
-    assertEq(BeforeSwapDelta.unwrap(delta), 0, "Delta");
-    assertEq(fee, 0, "Fee");
-
-    assertEq(hook.getCurrentTick(), tickBefore, "Tick unchanged");
-    assertEq(hook.getActiveLiquidity(), activeBefore, "Liquidity unchanged");
-    assertEq(hook.getCurrentPrice(), expectedPrice, "Price initialized");
-
-    assertEq(token0.balanceOf(bob), balance0Before, "TOKEN0 unchanged");
-    assertEq(token1.balanceOf(bob), balance1Before, "TOKEN1 unchanged");
-    assertEq(token0.balanceOf(address(hook)), hookBalance0Before, "Hook TOKEN0 unchanged");
-    assertEq(token1.balanceOf(address(hook)), hookBalance1Before, "Hook TOKEN1 unchanged");
-  }
-
-  /// @dev NO_TICK_LIMIT allows full swap (amounts large enough to move at least 1 tick)
-  function testFuzz_NoTickLimitAllowsFullSwap(uint256 amountIn) public {
+  /// @dev NO_TICK_LIMIT allows consuming all input in both directions.
+  function testFuzz_NoTickLimitConsumesEntireInput(uint256 amountIn, bool principalForCash) public {
     // Use amounts large enough to always move a tick (2 bips covers exp/ln rounding)
     amountIn = bound(amountIn, _ptForOneBip() * 2, 100e18);
 
-    uint256 balance0Before = token0.balanceOf(bob);
+    uint256 balanceBefore = principalForCash ? token0.balanceOf(bob) : token1.balanceOf(bob);
 
-    _swap(bob, int256(amountIn), true, NO_TICK_LIMIT);
+    _swap(bob, int256(amountIn), principalForCash, NO_TICK_LIMIT);
 
-    // Should consume the full amountIn (or until liquidity exhausted)
-    uint256 consumed = balance0Before - token0.balanceOf(bob);
-    // With enough liquidity, full amount should be consumed
+    uint256 balanceAfter = principalForCash ? token0.balanceOf(bob) : token1.balanceOf(bob);
+    uint256 consumed = balanceBefore - balanceAfter;
     assertEq(consumed, amountIn, "Full amount should be consumed with no tick limit");
-  }
-
-  /// @dev NO_TICK_LIMIT allows full swap (cash->principal).
-  function testFuzz_NoTickLimitAllowsFullSwap_CashForPrincipal(uint256 amountIn) public {
-    // Use amounts large enough to always move a tick (2 bips covers exp/ln rounding)
-    amountIn = bound(amountIn, _ptForOneBip() * 2, 100e18);
-
-    uint256 balance1Before = token1.balanceOf(bob);
-
-    _swap(bob, int256(amountIn), false, NO_TICK_LIMIT);
-
-    uint256 consumed = balance1Before - token1.balanceOf(bob);
-    assertEq(consumed, amountIn, "Full amount should be consumed with no tick limit");
-  }
-
-  /// @dev Tick limit for cash->principal
-  function testFuzz_TickLimitStopsSwap_CashForPrincipal(uint256 amountIn) public {
-    amountIn = bound(amountIn, 1e17, 1e20);
-
-    int24 currentTick = hook.getCurrentTick();
-    // Set limit 10 ticks below current tick
-    int24 tickLimit = currentTick - 10;
-
-    uint256 balance1Before = token1.balanceOf(bob);
-
-    _swap(bob, int256(amountIn), false, tickLimit);
-
-    // Might not consume full amountIn due to limit
-    uint256 consumed = balance1Before - token1.balanceOf(bob);
-    assertLe(consumed, amountIn, "Should not exceed amountIn");
-
-    // Only check the limit if the swap actually produced output
-    if (consumed > 0 && consumed < amountIn) {
-      int24 finalTick = hook.getCurrentTick();
-      assertGe(finalTick, tickLimit, "Tick should be at or above limit");
-    }
   }
 
   function test_TickLimitStopsSwap_CashForPrincipal_StopsExactlyAtLimit() public {
@@ -2902,20 +2799,13 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertEq(selector, BaseHook.beforeSwap.selector, "Should return beforeSwap selector");
   }
 
-  /// @dev Returns zero delta (direct transfer model)
-  function testFuzz_ReturnsZeroDelta_PrincipalForCash(uint256 amountIn) public {
+  /// @dev Returns zero delta (direct transfer model) in both directions.
+  function testFuzz_ReturnsZeroDelta_InBothDirections(uint256 amountIn, bool principalForCash)
+    public
+  {
     amountIn = _boundSwapAmount(amountIn);
 
-    (, BeforeSwapDelta delta,) = _swap(bob, int256(amountIn), true, NO_TICK_LIMIT);
-
-    // Our hook uses direct transfers, so it returns (0, 0) delta
-    assertEq(BeforeSwapDelta.unwrap(delta), 0, "Should return zero delta");
-  }
-
-  function testFuzz_ReturnsZeroDelta_CashForPrincipal(uint256 amountIn) public {
-    amountIn = _boundSwapAmount(amountIn);
-
-    (, BeforeSwapDelta delta,) = _swap(bob, int256(amountIn), false, NO_TICK_LIMIT);
+    (, BeforeSwapDelta delta,) = _swap(bob, int256(amountIn), principalForCash, NO_TICK_LIMIT);
     assertEq(BeforeSwapDelta.unwrap(delta), 0, "Should return zero delta");
   }
 
@@ -3072,31 +2962,19 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     freshHook.exposed_beforeSwap(bob, freshPoolKey, defaultSwapParams, hookParams);
   }
 
-  /// @dev Reverts when insufficient allowance for principal->cash
-  function testFuzz_RevertWhen_InsufficientAllowance_PrincipalForCash(uint256 amountIn) public {
+  /// @dev Reverts when the input token allowance is missing in either direction.
+  function testFuzz_RevertWhen_InsufficientInputTokenAllowance(
+    uint256 amountIn,
+    bool principalForCash
+  ) public {
     // Use amounts large enough to always move a tick (2 bips covers exp/ln rounding)
     amountIn = bound(amountIn, _ptForOneBip() * 2, 100e18);
 
-    // Remove approval for token0
     vm.prank(bob);
-    token0.approve(address(hook), 0);
+    if (principalForCash) token0.approve(address(hook), 0);
+    else token1.approve(address(hook), 0);
 
-    bytes memory hookParams = _encodeHookParams(int256(amountIn), true, NO_TICK_LIMIT);
-
-    vm.expectRevert(stdError.arithmeticError);
-    hook.exposed_beforeSwap(bob, poolKey, defaultSwapParams, hookParams);
-  }
-
-  /// @dev Reverts when insufficient allowance for cash->principal
-  function testFuzz_RevertWhen_InsufficientAllowance_CashForPrincipal(uint256 amountIn) public {
-    // Use amounts large enough to always move a tick (2 bips covers exp/ln rounding)
-    amountIn = bound(amountIn, _ptForOneBip() * 2, 100e18);
-
-    // Remove approval for token1
-    vm.prank(bob);
-    token1.approve(address(hook), 0);
-
-    bytes memory hookParams = _encodeHookParams(int256(amountIn), false, NO_TICK_LIMIT);
+    bytes memory hookParams = _encodeHookParams(int256(amountIn), principalForCash, NO_TICK_LIMIT);
 
     vm.expectRevert(stdError.arithmeticError);
     hook.exposed_beforeSwap(bob, poolKey, defaultSwapParams, hookParams);
@@ -3120,75 +2998,47 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
   // ============ Sub-Bip Swaps Are No-Ops ============
 
-  /// @dev A sub-bip PT→cash swap is a no-op (no tokens transferred, no revert).
-  function test_SubBipSwapIsNoOp_PrincipalForCash() public {
+  /// @dev A sub-bip swap is a no-op in either direction.
+  function testFuzz_SubBipSwapIsNoOp(bool principalForCash) public {
     _warpFromStart(MARKET_LENGTH / 2);
     _initializePrice();
 
     uint256 balance0Before = token0.balanceOf(bob);
     uint256 balance1Before = token1.balanceOf(bob);
 
-    _swap(bob, 1, true, NO_TICK_LIMIT);
+    _swap(bob, 1, principalForCash, NO_TICK_LIMIT);
 
-    assertEq(token0.balanceOf(bob), balance0Before, "No PT consumed");
-    assertEq(token1.balanceOf(bob), balance1Before, "No cash received");
-  }
-
-  /// @dev A sub-bip cash→PT swap is a no-op (no tokens transferred, no revert).
-  function test_SubBipSwapIsNoOp_CashForPrincipal() public {
-    _warpFromStart(MARKET_LENGTH / 2);
-    _initializePrice();
-
-    uint256 balance0Before = token0.balanceOf(bob);
-    uint256 balance1Before = token1.balanceOf(bob);
-
-    _swap(bob, 1, false, NO_TICK_LIMIT);
-
-    assertEq(token0.balanceOf(bob), balance0Before, "No PT received");
-    assertEq(token1.balanceOf(bob), balance1Before, "No cash consumed");
+    assertEq(token0.balanceOf(bob), balance0Before, "No TOKEN0 transfer");
+    assertEq(token1.balanceOf(bob), balance1Before, "No TOKEN1 transfer");
   }
 
   // ============ Swap Event Tests ============
 
-  function test_EmitsSwap_PrincipalForCash() public {
-    uint256 _amountIn = 1e18;
-    uint256 _balance0Before = token0.balanceOf(bob);
-    uint256 _balance1Before = token1.balanceOf(bob);
+  function testFuzz_EmitsSwap_InBothDirections(bool principalForCash) public {
+    uint256 amountIn = 1e18;
+    uint256 balance0Before = token0.balanceOf(bob);
+    uint256 balance1Before = token1.balanceOf(bob);
 
-    _swap(bob, int256(_amountIn), true, NO_TICK_LIMIT);
+    _swap(bob, int256(amountIn), principalForCash, NO_TICK_LIMIT);
 
-    uint256 _consumed = _balance0Before - token0.balanceOf(bob);
-    uint256 _received = token1.balanceOf(bob) - _balance1Before;
+    uint256 consumed;
+    uint256 received;
+    if (principalForCash) {
+      consumed = balance0Before - token0.balanceOf(bob);
+      received = token1.balanceOf(bob) - balance1Before;
+      token0.mint(bob, consumed);
+      deal(address(token1), bob, balance1Before);
+    } else {
+      received = token0.balanceOf(bob) - balance0Before;
+      consumed = balance1Before - token1.balanceOf(bob);
+      token1.mint(bob, consumed);
+      deal(address(token0), bob, balance0Before);
+    }
 
-    // Re-do with event check now that we know the amounts
-    // Restore bob's balances
-    token0.mint(bob, _consumed);
-    deal(address(token1), bob, _balance1Before);
-
+    // Re-run once we know exact consumed/received amounts to assert event payload.
     vm.expectEmit(true, false, false, true, address(hook));
-    emit FixedFeeSwapMarket.Swap(bob, true, _consumed, _received);
-
-    _swap(bob, int256(_amountIn), true, NO_TICK_LIMIT);
-  }
-
-  function test_EmitsSwap_CashForPrincipal() public {
-    uint256 _amountIn = 1e18;
-    uint256 _balance0Before = token0.balanceOf(bob);
-    uint256 _balance1Before = token1.balanceOf(bob);
-
-    _swap(bob, int256(_amountIn), false, NO_TICK_LIMIT);
-
-    uint256 _received = token0.balanceOf(bob) - _balance0Before;
-    uint256 _consumed = _balance1Before - token1.balanceOf(bob);
-
-    // Re-do with event check now that we know the amounts
-    token1.mint(bob, _consumed);
-    deal(address(token0), bob, _balance0Before);
-
-    vm.expectEmit(true, false, false, true, address(hook));
-    emit FixedFeeSwapMarket.Swap(bob, false, _consumed, _received);
-
-    _swap(bob, int256(_amountIn), false, NO_TICK_LIMIT);
+    emit FixedFeeSwapMarket.Swap(bob, principalForCash, consumed, received);
+    _swap(bob, int256(amountIn), principalForCash, NO_TICK_LIMIT);
   }
 }
 
