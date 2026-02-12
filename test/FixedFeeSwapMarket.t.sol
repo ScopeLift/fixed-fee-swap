@@ -16,6 +16,27 @@ import {Currency} from "v4-core/types/Currency.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
 import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
 
+struct Amounts {
+  int256 amount0;
+  int256 amount1;
+}
+
+struct SharedWithdrawalCtx {
+  uint128 aliceLiquidity;
+  uint128 bobLiquidity;
+  int24 tickLower;
+  int24 tickUpper;
+  bytes32 alicePositionId;
+  int16 lowerWord;
+  uint8 lowerBit;
+  int16 upperWord;
+  uint8 upperBit;
+  uint256 lowerWordAfterMint;
+  uint256 upperWordAfterMint;
+}
+
+
+
 abstract contract FixedFeeSwapMarketTest is Test {
   FixedFeeSwapMarketHarness public hook;
   MockERC20 public token0;
@@ -263,7 +284,24 @@ abstract contract FixedFeeSwapMarketTest is Test {
     token1Used = int256(balance1Before - token1.balanceOf(user));
   }
 
+  function _decreaseAllLiquidity(address user, bytes32 positionId, uint128 liquidity) internal {
+    vm.prank(user);
+    hook.decreaseLiquidity(positionId, -int128(liquidity), 0, 0);
+  }
 
+  function _decreaseLiquidity(address user, bytes32 positionId, uint128 removeAmount)
+    internal
+    returns (uint256 token0Received, uint256 token1Received)
+  {
+    uint256 balance0Before = token0.balanceOf(user);
+    uint256 balance1Before = token1.balanceOf(user);
+
+    vm.prank(user);
+    hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
+
+    token0Received = token0.balanceOf(user) - balance0Before;
+    token1Received = token1.balanceOf(user) - balance1Before;
+  }
 
   function _getPositionId(int24 tickUpper, int24 tickLower, address owner)
     internal
@@ -970,11 +1008,6 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
 }
 
 contract IncreaseLiquidity is FixedFeeSwapMarketTest {
-  struct Amounts {
-    int256 amount0;
-    int256 amount1;
-  }
-
   function setUp() public virtual override {
     super.setUp();
     _resetHookWithInitialTick(500, "increaseLiquidityManager");
@@ -1281,7 +1314,7 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
     assertEq(upperGross, expectedTotal, "upper gross");
   }
 
- function testFuzz_EmitsLiquidityModified(uint128 initialLiquidity, uint128 additionalLiquidity)
+  function testFuzz_EmitsLiquidityModified(uint128 initialLiquidity, uint128 additionalLiquidity)
     public
   {
     initialLiquidity = _boundLiquidity(initialLiquidity);
@@ -1328,7 +1361,6 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
     assertEq(uint128(totalLiquidity), initialLiquidity + additionalLiquidity, "liquidity increased");
   }
 
-
   function test_RevertIf_PositionNotFound() public {
     bytes32 missingPositionId = keccak256("missing position");
 
@@ -1365,10 +1397,10 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
     bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
     (int256 required0,) = _expectedMintAmounts(tickLower, tickUpper, additionalLiquidity);
 
-    required0 = uint256(required0);
+    uint256 required0U = uint256(required0);
     vm.prank(alice);
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__InvalidLiquidityAmount.selector);
-    hook.increaseLiquidity(positionId, additionalLiquidity, required0 - 1, type(uint256).max);
+    hook.increaseLiquidity(positionId, additionalLiquidity, required0U - 1, type(uint256).max);
   }
 
   function testFuzz_RevertIf_MaxToken1AmountIsTooLow(
@@ -1383,10 +1415,10 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
     bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
     (, int256 required1) = _expectedMintAmounts(tickLower, tickUpper, additionalLiquidity);
 
-    required1 = uint256(required1);
+    uint256 required1U = uint256(required1);
     vm.prank(alice);
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__InvalidLiquidityAmount.selector);
-    hook.increaseLiquidity(positionId, additionalLiquidity, type(uint256).max, required1 - 1);
+    hook.increaseLiquidity(positionId, additionalLiquidity, type(uint256).max, required1U - 1);
   }
 
   function testFuzz_RevertIf_Token0AllowanceMissing(
@@ -1460,151 +1492,50 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
     hook.increaseLiquidity(positionId, additionalLiquidity, type(uint256).max, type(uint256).max);
     vm.stopPrank();
   }
- }
+}
 
 contract DecreaseLiquidity is FixedFeeSwapMarketTest {
-  struct Amounts {
-    uint256 amount0;
-    uint256 amount1;
-  }
-
   function setUp() public virtual override {
     super.setUp();
     _moveTickTo(500);
   }
 
-  struct SharedWithdrawalCtx {
-    uint128 aliceLiquidity;
-    uint128 bobLiquidity;
-    int24 tickLower;
-    int24 tickUpper;
-    bytes32 alicePositionId;
-    int16 lowerWord;
-    uint8 lowerBit;
-    int16 upperWord;
-    uint8 upperBit;
-    uint256 lowerWordAfterMint;
-    uint256 upperWordAfterMint;
-  }
-
-  function _decreaseAllLiquidity(address user, bytes32 positionId, uint128 liquidity) internal {
-    vm.prank(user);
-    hook.decreaseLiquidity(positionId, -int128(liquidity), 0, 0);
-  }
-
-  function _decreaseLiquidity(address user, bytes32 positionId, uint128 removeAmount)
-    internal
-    returns (uint256 token0Received, uint256 token1Received)
-  {
-    uint256 balance0Before = token0.balanceOf(user);
-    uint256 balance1Before = token1.balanceOf(user);
-
-    vm.prank(user);
-    hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
-
-    token0Received = token0.balanceOf(user) - balance0Before;
-    token1Received = token1.balanceOf(user) - balance1Before;
-  }
-
   // ============ Position Update Tests ============
 
-  /// @dev Decreasing removes liquidity from position
-  function testFuzz_RemovesFromPosition(uint128 initialLiquidity, uint128 removeAmount) public {
-    initialLiquidity = _boundLiquidity(initialLiquidity);
-    removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
-
-    _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickLower = currentTick - 100;
-    int24 tickUpper = currentTick + 100;
-
-    bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
-
-    vm.prank(alice);
-    hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
-
-    (,,, int128 remainingLiquidity) = hook.getPositionInfo(positionId);
-    assertEq(
-      uint128(remainingLiquidity),
-      initialLiquidity - removeAmount,
-      "Position liquidity should decrease"
-    );
-  }
-
-  /// @dev Decreasing does not change position ownership or ticks
-  function testFuzz_OwnerUnchangedAfterDecrease(uint128 initialLiquidity, uint128 removeAmount)
+  /// @dev Decreasing updates the position and both tick accounting dimensions consistently.
+  function testFuzz_UpdatesPositionAndTickState(uint128 initialLiquidity, uint128 removeAmount)
     public
   {
     initialLiquidity = _boundLiquidity(initialLiquidity);
     removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
 
     _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickLower = currentTick - 100;
-    int24 tickUpper = currentTick + 100;
-
-    bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
-
-    (address ownerBefore, int24 lowerBefore, int24 upperBefore,) = hook.getPositionInfo(positionId);
-
-    vm.prank(alice);
-    hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
-
-    (address ownerAfter, int24 lowerAfter, int24 upperAfter,) = hook.getPositionInfo(positionId);
-    assertEq(ownerAfter, ownerBefore, "Owner should not change");
-    assertEq(lowerAfter, lowerBefore, "tickLower should not change");
-    assertEq(upperAfter, upperBefore, "tickUpper should not change");
-  }
-
-  /// @dev Decreasing updates tick liquidity gross
-  function testFuzz_UpdatesTickLiquidityGross(uint128 initialLiquidity, uint128 removeAmount)
-    public
-  {
-    initialLiquidity = _boundLiquidity(initialLiquidity);
-    removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
-
-    _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickLower = currentTick - 100;
-    int24 tickUpper = currentTick + 100;
+    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.InRange);
 
     bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
 
     vm.prank(alice);
     hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
 
-    (uint128 lowerGross,) = hook.getTickInfo(tickLower);
-    (uint128 upperGross,) = hook.getTickInfo(tickUpper);
+    uint128 expectedRemaining = initialLiquidity - removeAmount;
 
-    assertEq(
-      lowerGross, initialLiquidity - removeAmount, "Lower tick liquidityGross should decrease"
-    );
-    assertEq(
-      upperGross, initialLiquidity - removeAmount, "Upper tick liquidityGross should decrease"
-    );
-  }
+    {
+      (address owner, int24 lower, int24 upper, int128 remainingLiquidity) =
+        hook.getPositionInfo(positionId);
+      assertEq(owner, alice, "owner");
+      assertEq(lower, tickLower, "tickLower");
+      assertEq(upper, tickUpper, "tickUpper");
+      assertEq(uint128(remainingLiquidity), expectedRemaining, "position liquidity");
+    }
 
-  /// @dev Decreasing updates tick liquidity net correctly
-  function testFuzz_UpdatesTickLiquidityNet(uint128 initialLiquidity, uint128 removeAmount) public {
-    initialLiquidity = _boundLiquidity(initialLiquidity);
-    removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
-
-    _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickLower = currentTick - 100;
-    int24 tickUpper = currentTick + 100;
-
-    bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
-
-    vm.prank(alice);
-    hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
-
-    (, int128 lowerNet) = hook.getTickInfo(tickLower);
-    (, int128 upperNet) = hook.getTickInfo(tickUpper);
-
-    int128 expectedRemaining = int128(initialLiquidity) - int128(removeAmount);
-    assertEq(lowerNet, expectedRemaining, "Lower tick liquidityNet should decrease");
-    assertEq(upperNet, -expectedRemaining, "Upper tick liquidityNet should decrease (negative)");
+    {
+      (uint128 lowerGross, int128 lowerNet) = hook.getTickInfo(tickLower);
+      (uint128 upperGross, int128 upperNet) = hook.getTickInfo(tickUpper);
+      assertEq(lowerGross, expectedRemaining, "lower gross");
+      assertEq(upperGross, expectedRemaining, "upper gross");
+      assertEq(lowerNet, int128(expectedRemaining), "lower net");
+      assertEq(upperNet, -int128(expectedRemaining), "upper net");
+    }
   }
 
   /// @dev Full withdrawal clears tick bitmap bits
@@ -1763,79 +1694,8 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
   // ============ Token Transfer Tests ============
 
-  /// @dev Decreasing returns correct token amounts to user
-  function testFuzz_ReturnsCorrectAmounts(uint128 initialLiquidity, uint128 removeAmount) public {
-    initialLiquidity = _boundLiquidity(initialLiquidity);
-    removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
-
-    _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickLower = currentTick - 100;
-    int24 tickUpper = currentTick + 100;
-
-    bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
-
-    (int256 expected0, int256 expected1) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
-
-    uint256 balance0Before = token0.balanceOf(alice);
-    uint256 balance1Before = token1.balanceOf(alice);
-    uint256 hookBalance0Before = token0.balanceOf(address(hook));
-    uint256 hookBalance1Before = token1.balanceOf(address(hook));
-
-    vm.prank(alice);
-    hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
-
-    assertEq(
-      int256(token0.balanceOf(alice) - balance0Before),
-      expected0,
-      "User token0 received should match expected"
-    );
-    assertEq(
-      int256(token1.balanceOf(alice) - balance1Before),
-      expected1,
-      "User token1 received should match expected"
-    );
-    assertEq(
-      int256(hookBalance0Before - token0.balanceOf(address(hook))),
-      expected0,
-      "Hook token0 debited should match expected"
-    );
-    assertEq(
-      int256(hookBalance1Before - token1.balanceOf(address(hook))),
-      expected1,
-      "Hook token1 debited should match expected"
-    );
-  }
-
-  /// @dev Token conservation: total supply unchanged after decrease
-  function testFuzz_TokenConservation(uint128 initialLiquidity, uint128 removeAmount) public {
-    initialLiquidity = _boundLiquidity(initialLiquidity);
-    removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
-
-    _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickLower = currentTick - 100;
-    int24 tickUpper = currentTick + 100;
-
-    bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
-
-    uint256 total0Before = token0.balanceOf(alice) + token0.balanceOf(address(hook));
-    uint256 total1Before = token1.balanceOf(alice) + token1.balanceOf(address(hook));
-
-    vm.prank(alice);
-    hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
-
-    uint256 total0After = token0.balanceOf(alice) + token0.balanceOf(address(hook));
-    uint256 total1After = token1.balanceOf(alice) + token1.balanceOf(address(hook));
-
-    assertEq(total0After, total0Before, "Token0 total should be conserved");
-    assertEq(total1After, total1Before, "Token1 total should be conserved");
-  }
-
-  // ============ Active Liquidity Tests ============
-
-  /// @dev Decreasing updates active liquidity when position spans current tick
-  function testFuzz_UpdatesActiveLiquidityWhenInRange(
+  /// @dev Decrease transfers expected token amounts and preserves token conservation.
+  function testFuzz_TransfersExpectedAmountsAndConservesTotals(
     uint128 initialLiquidity,
     uint128 removeAmount
   ) public {
@@ -1843,31 +1703,47 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
 
     _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickLower = currentTick - 100;
-    int24 tickUpper = currentTick + 100;
+    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.InRange);
 
     bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
-    uint128 activeBefore = hook.getActiveLiquidity();
+
+    (int256 expected0, int256 expected1) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
+
+    uint256 user0Before = token0.balanceOf(alice);
+    uint256 user1Before = token1.balanceOf(alice);
+    uint256 hook0Before = token0.balanceOf(address(hook));
+    uint256 hook1Before = token1.balanceOf(address(hook));
+    uint256 total0Before = user0Before + hook0Before;
+    uint256 total1Before = user1Before + hook1Before;
 
     vm.prank(alice);
     hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
 
-    uint128 activeAfter = hook.getActiveLiquidity();
-    assertEq(activeAfter, activeBefore - removeAmount, "Active liquidity should decrease");
+    uint256 user0After = token0.balanceOf(alice);
+    uint256 user1After = token1.balanceOf(alice);
+    uint256 hook0After = token0.balanceOf(address(hook));
+    uint256 hook1After = token1.balanceOf(address(hook));
+
+    assertEq(int256(user0After - user0Before), expected0, "user token0 received");
+    assertEq(int256(user1After - user1Before), expected1, "user token1 received");
+    assertEq(int256(hook0Before - hook0After), expected0, "hook token0 debited");
+    assertEq(int256(hook1Before - hook1After), expected1, "hook token1 debited");
+    assertEq(user0After + hook0After, total0Before, "token0 conservation");
+    assertEq(user1After + hook1After, total1Before, "token1 conservation");
   }
 
-  /// @dev Decreasing does not update active liquidity when position is below current tick
-  function testFuzz_NoActiveLiquidityUpdateWhenBelow(uint128 initialLiquidity, uint128 removeAmount)
-    public
-  {
+  // ============ Active Liquidity Tests ============
+
+  /// @dev In-range decreases reduce active liquidity by the removed amount.
+  function testFuzz_InRangeDecreaseUpdatesActiveLiquidity(
+    uint128 initialLiquidity,
+    uint128 removeAmount
+  ) public {
     initialLiquidity = _boundLiquidity(initialLiquidity);
     removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
 
     _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickUpper = currentTick - 100;
-    int24 tickLower = tickUpper - 100;
+    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.InRange);
 
     bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
     uint128 activeBefore = hook.getActiveLiquidity();
@@ -1875,23 +1751,23 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     vm.prank(alice);
     hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
 
-    uint128 activeAfter = hook.getActiveLiquidity();
-    assertEq(
-      activeAfter, activeBefore, "Active liquidity should not change for below-range position"
-    );
+    assertEq(hook.getActiveLiquidity(), activeBefore - removeAmount, "active liquidity decrease");
   }
 
-  /// @dev Decreasing does not update active liquidity when position is above current tick
-  function testFuzz_NoActiveLiquidityUpdateWhenAbove(uint128 initialLiquidity, uint128 removeAmount)
-    public
-  {
+  /// @dev Out-of-range decreases do not change active liquidity.
+  function testFuzz_OutOfRangeDecreaseDoesNotUpdateActiveLiquidity(
+    uint128 initialLiquidity,
+    uint128 removeAmount,
+    uint8 scenario
+  ) public {
     initialLiquidity = _boundLiquidity(initialLiquidity);
     removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
 
     _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickLower = currentTick + 100;
-    int24 tickUpper = tickLower + 100;
+    uint8 boundedScenario = uint8(bound(scenario, 0, 1));
+    RangeScenario rangeScenario =
+      boundedScenario == 0 ? RangeScenario.BelowCurrent : RangeScenario.AboveCurrent;
+    (int24 tickLower, int24 tickUpper) = _standardRange(rangeScenario);
 
     bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
     uint128 activeBefore = hook.getActiveLiquidity();
@@ -1899,16 +1775,13 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     vm.prank(alice);
     hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
 
-    uint128 activeAfter = hook.getActiveLiquidity();
-    assertEq(
-      activeAfter, activeBefore, "Active liquidity should not change for above-range position"
-    );
+    assertEq(hook.getActiveLiquidity(), activeBefore, "active liquidity unchanged");
   }
 
   // ============ Multiple Operations Tests ============
 
-  /// @dev Multiple decreases accumulate correctly
-  function testFuzz_MultipleDecreasesAccumulate(
+  /// @dev Multiple decreases on one position add up to the same final state.
+  function testFuzz_MultipleDecreasesAccumulateLiquidity(
     uint128 initialLiquidity,
     uint128 decrease1,
     uint128 decrease2
@@ -1921,9 +1794,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     decrease2 = uint128(bound(decrease2, 1e17, maxDecrease));
 
     _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickLower = currentTick - 100;
-    int24 tickUpper = currentTick + 100;
+    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.InRange);
 
     bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
 
@@ -1954,9 +1825,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     deltaAmount = uint128(bound(deltaAmount, 1e17, baseAmount / 2));
 
     _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickLower = currentTick - 100;
-    int24 tickUpper = currentTick + 100;
+    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.InRange);
 
     bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, baseAmount);
 
@@ -1968,26 +1837,24 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     hook.increaseLiquidity(positionId, deltaAmount, type(uint256).max, type(uint256).max);
     vm.stopPrank();
 
-    // Balances should be unchanged (decrease gives tokens, increase takes them back)
-    assertEq(token0.balanceOf(alice), balance0Before, "Token0 should be symmetric");
-    assertEq(token1.balanceOf(alice), balance1Before, "Token1 should be symmetric");
-
-    // Liquidity should be back to original
     (,,, int128 finalLiquidity) = hook.getPositionInfo(positionId);
-    assertEq(uint128(finalLiquidity), baseAmount, "Liquidity should return to original");
+    assertEq(token0.balanceOf(alice), balance0Before, "token0 symmetric");
+    assertEq(token1.balanceOf(alice), balance1Before, "token1 symmetric");
+    assertEq(uint128(finalLiquidity), baseAmount, "liquidity restored");
   }
 
-  /// @dev Different users decreasing their own positions at same ticks
-  function testFuzz_MultipleUsersCanDecrease(uint128 aliceInitial, uint128 aliceDecrease) public {
+  /// @dev Different users can decrease independent positions in the same range.
+  function testFuzz_MultipleUsersDecreaseIndependentPositions(
+    uint128 aliceInitial,
+    uint128 aliceDecrease
+  ) public {
     aliceInitial = _boundLiquidity(aliceInitial);
     aliceDecrease = uint128(bound(aliceDecrease, 1e17, aliceInitial));
     uint128 bobInitial = 1e18;
     uint128 bobDecrease = 5e17;
 
     _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickLower = currentTick - 100;
-    int24 tickUpper = currentTick + 100;
+    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.InRange);
 
     bytes32 alicePositionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, aliceInitial);
     bytes32 bobPositionId = _mintLiquidityAtTicks(bob, tickLower, tickUpper, bobInitial);
@@ -2011,21 +1878,20 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
   // ============ Token Amount Tests Based on Position ============
 
-  /// @dev Position below current tick: decrease returns only token0 (principal)
-  function testFuzz_BelowRangeOnlyToken0(uint128 initialLiquidity, uint128 removeAmount) public {
+  /// @dev Below-current positions return only token0 on decrease.
+  function testFuzz_BelowCurrentRangeDecreaseReturnsOnlyToken0(
+    uint128 initialLiquidity,
+    uint128 removeAmount
+  ) public {
     initialLiquidity = _boundLiquidity(initialLiquidity);
     removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
 
     _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickUpper = currentTick - 100;
-    int24 tickLower = tickUpper - 100;
+    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.BelowCurrent);
 
     bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
 
     (int256 expected0, int256 expected1) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
-    assertGt(expected0, 0, "Below-range decrease should return token0");
-    assertEq(expected1, 0, "Below-range decrease should not return token1");
 
     uint256 balance0Before = token0.balanceOf(alice);
     uint256 balance1Before = token1.balanceOf(alice);
@@ -2033,33 +1899,26 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     vm.prank(alice);
     hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
 
-    assertEq(
-      int256(token0.balanceOf(alice) - balance0Before),
-      expected0,
-      "Token0 received should match expected"
-    );
-    assertEq(
-      int256(token1.balanceOf(alice) - balance1Before),
-      expected1,
-      "Token1 received should match expected"
-    );
+    assertGt(expected0, 0, "expected token0");
+    assertEq(expected1, 0, "expected token1");
+    assertEq(int256(token0.balanceOf(alice) - balance0Before), expected0, "token0 received");
+    assertEq(int256(token1.balanceOf(alice) - balance1Before), expected1, "token1 received");
   }
 
-  /// @dev Position above current tick: decrease returns only token1 (cash)
-  function testFuzz_AboveRangeOnlyToken1(uint128 initialLiquidity, uint128 removeAmount) public {
+  /// @dev Above-current positions return only token1 on decrease.
+  function testFuzz_AboveCurrentRangeDecreaseReturnsOnlyToken1(
+    uint128 initialLiquidity,
+    uint128 removeAmount
+  ) public {
     initialLiquidity = _boundLiquidity(initialLiquidity);
     removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
 
     _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickLower = currentTick + 100;
-    int24 tickUpper = tickLower + 100;
+    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.AboveCurrent);
 
     bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
 
     (int256 expected0, int256 expected1) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
-    assertEq(expected0, 0, "Above-range decrease should not return token0");
-    assertGt(expected1, 0, "Above-range decrease should return token1");
 
     uint256 balance0Before = token0.balanceOf(alice);
     uint256 balance1Before = token1.balanceOf(alice);
@@ -2067,113 +1926,94 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     vm.prank(alice);
     hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
 
-    assertEq(
-      int256(token0.balanceOf(alice) - balance0Before),
-      expected0,
-      "Token0 received should match expected"
-    );
-    assertEq(
-      int256(token1.balanceOf(alice) - balance1Before),
-      expected1,
-      "Token1 received should match expected"
-    );
+    assertEq(expected0, 0, "expected token0");
+    assertGt(expected1, 0, "expected token1");
+    assertEq(int256(token0.balanceOf(alice) - balance0Before), expected0, "token0 received");
+    assertEq(int256(token1.balanceOf(alice) - balance1Before), expected1, "token1 received");
   }
 
-  /// @dev Position spanning current tick: decrease returns both tokens
-  function testFuzz_InRangeBothTokens(uint128 initialLiquidity, uint128 removeAmount) public {
-    initialLiquidity = _boundLiquidity(initialLiquidity);
-    removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
-
-    _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickLower = currentTick - 100;
-    int24 tickUpper = currentTick + 100;
-
-    bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
-
-    (int256 expected0, int256 expected1) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
-    assertGt(expected0, 0, "In-range decrease should return token0");
-    assertGt(expected1, 0, "In-range decrease should return token1");
-
-    uint256 balance0Before = token0.balanceOf(alice);
-    uint256 balance1Before = token1.balanceOf(alice);
-
-    vm.prank(alice);
-    hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
-
-    assertEq(
-      int256(token0.balanceOf(alice) - balance0Before),
-      expected0,
-      "Token0 received should match expected"
-    );
-    assertEq(
-      int256(token1.balanceOf(alice) - balance1Before),
-      expected1,
-      "Token1 received should match expected"
-    );
-  }
-
-  /// @dev Cash returned for in-range decreases changes over time
-  function test_DecreaseCashReturnedChangesWithTime() public {
-    uint128 initialLiquidity = 1e24;
-    uint128 removeAmount = 5e23;
-
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickLower = currentTick - 200;
-    int24 tickUpper = currentTick + 200;
-
-    _warpFromStart(1);
-    bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
-    uint256 snapshot = vm.snapshot();
-
-    // Decrease at time t1
-    _warpFromStart(1);
-    Amounts memory expected_t1;
-    {
-      (int256 e0, int256 e1) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
-      expected_t1.amount0 = uint256(e0);
-      expected_t1.amount1 = uint256(e1);
-    }
-    Amounts memory received_t1;
-    (received_t1.amount0, received_t1.amount1) = _decreaseLiquidity(alice, positionId, removeAmount);
-    assertEq(received_t1.amount0, expected_t1.amount0, "Token0 at t1 should match expected");
-    assertEq(received_t1.amount1, expected_t1.amount1, "Token1 at t1 should match expected");
-
-    vm.revertTo(snapshot);
-
-    // Decrease at time t2
-    _warpFromStart(30 days);
-    Amounts memory expected_t2;
-    {
-      (int256 e0, int256 e1) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
-      expected_t2.amount0 = uint256(e0);
-      expected_t2.amount1 = uint256(e1);
-    }
-    Amounts memory received_t2;
-    (received_t2.amount0, received_t2.amount1) = _decreaseLiquidity(alice, positionId, removeAmount);
-    assertEq(received_t2.amount0, expected_t2.amount0, "Token0 at t2 should match expected");
-    assertEq(received_t2.amount1, expected_t2.amount1, "Token1 at t2 should match expected");
-
-    // Principal should be same, cash should differ
-    assertEq(
-      expected_t2.amount0, expected_t1.amount0, "Principal returned should be time-invariant"
-    );
-    assertNotEq(expected_t2.amount1, expected_t1.amount1, "Cash returned should change with time");
-  }
-
-  // ============ Slippage Tests ============
-
-  /// @dev Allows decrease when slippage exactly met
-  function testFuzz_AllowsWhen_SlippageExactlyMet(uint128 initialLiquidity, uint128 removeAmount)
+  /// @dev In-range positions return both tokens on decrease.
+  function testFuzz_InRangeDecreaseReturnsBothTokens(uint128 initialLiquidity, uint128 removeAmount)
     public
   {
     initialLiquidity = _boundLiquidity(initialLiquidity);
     removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
 
     _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickLower = currentTick - 100;
-    int24 tickUpper = currentTick + 100;
+    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.InRange);
+
+    bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
+
+    (int256 expected0, int256 expected1) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
+
+    uint256 balance0Before = token0.balanceOf(alice);
+    uint256 balance1Before = token1.balanceOf(alice);
+
+    vm.prank(alice);
+    hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
+
+    assertGt(expected0, 0, "expected token0");
+    assertGt(expected1, 0, "expected token1");
+    assertEq(int256(token0.balanceOf(alice) - balance0Before), expected0, "token0 received");
+    assertEq(int256(token1.balanceOf(alice) - balance1Before), expected1, "token1 received");
+  }
+
+  /// @dev For the same in-range burn size, token0 stays constant while token1 changes with time.
+  function test_DecreaseCashReturnedChangesWithTime_ForInRangePosition() public {
+    uint128 initialLiquidity = 1e24;
+    uint128 removeAmount = 5e23;
+
+    (int24 tickLower, int24 tickUpper) =
+      _rangeForScenario(hook.getCurrentTick(), RangeScenario.InRange, 200);
+
+    _warpFromStart(1);
+    bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
+    uint256 snapshot = vm.snapshot();
+
+    _warpFromStart(1);
+    Amounts memory expectedAtT1;
+    {
+      (int256 e0, int256 e1) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
+      expectedAtT1.amount0 = uint256(e0);
+      expectedAtT1.amount1 = uint256(e1);
+    }
+    Amounts memory receivedAtT1;
+    (receivedAtT1.amount0, receivedAtT1.amount1) =
+      _decreaseLiquidity(alice, positionId, removeAmount);
+
+    vm.revertTo(snapshot);
+
+    _warpFromStart(30 days);
+    Amounts memory expectedAtT2;
+    {
+      (int256 e0, int256 e1) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
+      expectedAtT2.amount0 = uint256(e0);
+      expectedAtT2.amount1 = uint256(e1);
+    }
+    Amounts memory receivedAtT2;
+    (receivedAtT2.amount0, receivedAtT2.amount1) =
+      _decreaseLiquidity(alice, positionId, removeAmount);
+
+    assertEq(receivedAtT1.amount0, expectedAtT1.amount0, "t1 token0");
+    assertEq(receivedAtT1.amount1, expectedAtT1.amount1, "t1 token1");
+    assertEq(receivedAtT2.amount0, expectedAtT2.amount0, "t2 token0");
+    assertEq(receivedAtT2.amount1, expectedAtT2.amount1, "t2 token1");
+    assertEq(expectedAtT2.amount0, expectedAtT1.amount0, "principal invariant");
+    assertNotEq(expectedAtT2.amount1, expectedAtT1.amount1, "cash changes over time");
+  }
+
+  // ============ Slippage Tests ============
+
+  /// @dev Decrease succeeds when min amounts equal the exact returned amounts.
+  function testFuzz_AllowsWhen_MinTokenAmountsEqualReturnedAmounts(
+    uint128 initialLiquidity,
+    uint128 removeAmount
+  ) public {
+    initialLiquidity = _boundLiquidity(initialLiquidity);
+    removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
+
+    _warpToMintTime();
+    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.InRange);
 
     bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
 
@@ -2184,11 +2024,8 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
       positionId, -int128(removeAmount), uint256(expected0), uint256(expected1)
     );
 
-    // If we get here without reverting, the test passes
     (,,, int128 remainingLiquidity) = hook.getPositionInfo(positionId);
-    assertEq(
-      uint128(remainingLiquidity), initialLiquidity - removeAmount, "Liquidity should be decreased"
-    );
+    assertEq(uint128(remainingLiquidity), initialLiquidity - removeAmount, "liquidity decreased");
   }
 
   // ============ Revert Tests ============
@@ -2210,9 +2047,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
 
     _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickLower = currentTick - 100;
-    int24 tickUpper = currentTick + 100;
+    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.InRange);
     bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
 
     vm.prank(bob);
@@ -2220,8 +2055,8 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
   }
 
-  /// @dev Reverts when token0 amount is below min (below-range position)
-  function testFuzz_RevertWhen_Token0SlippageExceeded(
+  /// @dev Reverts when min token0 exceeds what a below-current decrease can return.
+  function testFuzz_RevertWhen_BelowCurrentToken0SlippageExceeded(
     uint128 initialLiquidity,
     uint128 removeAmount
   ) public {
@@ -2229,23 +2064,19 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
 
     _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickUpper = currentTick - 100;
-    int24 tickLower = tickUpper - 100;
+    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.BelowCurrent);
 
     bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
 
-    (int256 expected0, int256 expected1) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
-    assertGt(expected0, 0, "Expected token0 to be returned");
-    assertEq(expected1, 0, "Expected token1 not to be returned");
+    (int256 expected0,) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
 
     vm.prank(alice);
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__InvalidLiquidityAmount.selector);
     hook.decreaseLiquidity(positionId, -int128(removeAmount), uint256(expected0) + 1, 0);
   }
 
-  /// @dev Reverts when token1 amount is below min (above-range position)
-  function testFuzz_RevertWhen_Token1SlippageExceeded(
+  /// @dev Reverts when min token1 exceeds what an above-current decrease can return.
+  function testFuzz_RevertWhen_AboveCurrentToken1SlippageExceeded(
     uint128 initialLiquidity,
     uint128 removeAmount
   ) public {
@@ -2253,15 +2084,11 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
 
     _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickLower = currentTick + 100;
-    int24 tickUpper = tickLower + 100;
+    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.AboveCurrent);
 
     bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
 
-    (int256 expected0, int256 expected1) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
-    assertEq(expected0, 0, "Expected token0 not to be returned");
-    assertGt(expected1, 0, "Expected token1 to be returned");
+    (, int256 expected1) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
 
     vm.prank(alice);
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__InvalidLiquidityAmount.selector);
@@ -2277,15 +2104,11 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
 
     _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickLower = currentTick - 100;
-    int24 tickUpper = currentTick + 100;
+    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.InRange);
 
     bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
 
-    (int256 expected0, int256 expected1) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
-    assertGt(expected0, 0, "Expected token0 to be returned");
-    assertGt(expected1, 0, "Expected token1 to be returned");
+    (int256 expected0,) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
 
     vm.prank(alice);
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__InvalidLiquidityAmount.selector);
@@ -2301,15 +2124,11 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
 
     _warpToMintTime();
-    int24 currentTick = hook.getCurrentTick();
-    int24 tickLower = currentTick - 100;
-    int24 tickUpper = currentTick + 100;
+    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.InRange);
 
     bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
 
-    (int256 expected0, int256 expected1) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
-    assertGt(expected0, 0, "Expected token0 to be returned");
-    assertGt(expected1, 0, "Expected token1 to be returned");
+    (, int256 expected1) = _expectedMintAmounts(tickLower, tickUpper, removeAmount);
 
     vm.prank(alice);
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__InvalidLiquidityAmount.selector);
@@ -2318,67 +2137,60 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
   // ============ Fuzzed Time Tests ============
 
-  /// @dev Decreasing liquidity at different times produces valid results with conservation
-  function testFuzz_DecreaseAtDifferentTimes(
-    uint128 _initialLiquidity,
-    uint128 _removeAmount,
-    uint256 _timeElapsed
+  /// @dev Decrease at any valid time preserves conservation and updates liquidity.
+  function testFuzz_DecreaseMaintainsConservationAtAnyTime(
+    uint128 initialLiquidity,
+    uint128 removeAmount,
+    uint256 timeElapsed
   ) public {
-    _initialLiquidity = _boundLiquidity(_initialLiquidity);
-    _removeAmount = uint128(bound(_removeAmount, 1e17, _initialLiquidity));
-    _timeElapsed = bound(_timeElapsed, 1, MARKET_LENGTH - 1);
-    _warpFromStart(_timeElapsed);
+    initialLiquidity = _boundLiquidity(initialLiquidity);
+    removeAmount = uint128(bound(removeAmount, 1e17, initialLiquidity));
+    timeElapsed = bound(timeElapsed, 1, MARKET_LENGTH - 1);
+    _warpFromStart(timeElapsed);
 
-    int24 _currentTick = hook.getCurrentTick();
-    int24 _tickLower = _currentTick - 100;
-    int24 _tickUpper = _currentTick + 100;
+    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.InRange);
+    bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, initialLiquidity);
 
-    bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, _initialLiquidity);
-
-    uint256 _total0Before = token0.balanceOf(alice) + token0.balanceOf(address(hook));
-    uint256 _total1Before = token1.balanceOf(alice) + token1.balanceOf(address(hook));
+    uint256 total0Before = token0.balanceOf(alice) + token0.balanceOf(address(hook));
+    uint256 total1Before = token1.balanceOf(alice) + token1.balanceOf(address(hook));
 
     vm.prank(alice);
-    hook.decreaseLiquidity(_positionId, -int128(_removeAmount), 0, 0);
+    hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
 
-    (,,, int128 _remainingLiq) = hook.getPositionInfo(_positionId);
-    assertEq(uint128(_remainingLiq), _initialLiquidity - _removeAmount, "Liquidity should decrease");
+    (,,, int128 remainingLiquidity) = hook.getPositionInfo(positionId);
+    uint256 total0After = token0.balanceOf(alice) + token0.balanceOf(address(hook));
+    uint256 total1After = token1.balanceOf(alice) + token1.balanceOf(address(hook));
 
-    uint256 _total0After = token0.balanceOf(alice) + token0.balanceOf(address(hook));
-    uint256 _total1After = token1.balanceOf(alice) + token1.balanceOf(address(hook));
-    assertEq(_total0After, _total0Before, "Token0 conserved");
-    assertEq(_total1After, _total1Before, "Token1 conserved");
+    assertEq(uint128(remainingLiquidity), initialLiquidity - removeAmount, "liquidity decrease");
+    assertEq(total0After, total0Before, "token0 conservation");
+    assertEq(total1After, total1Before, "token1 conservation");
   }
 
-  function test_EmitsLiquidityModified() public {
+  function test_EmitsLiquidityModified_OnDecrease() public {
     _warpToMintTime();
-    int24 _currentTick = hook.getCurrentTick();
-    int24 _tickLower = _currentTick - 100;
-    int24 _tickUpper = _currentTick + 100;
-    uint128 _liquidity = 1e20;
+    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.InRange);
+    uint128 liquidity = 1e20;
 
-    bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, _liquidity);
+    bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, liquidity);
 
-    uint128 _removeAmount = 5e19;
+    uint128 removeAmount = 5e19;
 
     vm.expectEmit(true, true, false, false, address(hook));
-    emit FixedFeeSwapMarket.LiquidityModified(_positionId, alice, _tickLower, _tickUpper, 0, 0, 0);
+    emit FixedFeeSwapMarket.LiquidityModified(positionId, alice, tickLower, tickUpper, 0, 0, 0);
 
     vm.prank(alice);
-    hook.decreaseLiquidity(_positionId, -int128(_removeAmount), 0, 0);
+    hook.decreaseLiquidity(positionId, -int128(removeAmount), 0, 0);
   }
 
-  function test_RevertWhen_LiquidityDeltaIsZero() public {
+  function test_RevertWhen_LiquidityDeltaIsZero_OnDecrease() public {
     _warpToMintTime();
-    int24 _currentTick = hook.getCurrentTick();
-    int24 _tickLower = _currentTick - 100;
-    int24 _tickUpper = _currentTick + 100;
+    (int24 tickLower, int24 tickUpper) = _standardRange(RangeScenario.InRange);
 
-    bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, 1e20);
+    bytes32 positionId = _mintLiquidityAtTicks(alice, tickLower, tickUpper, 1e20);
 
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__LiquidityDeltaMustBeNegative.selector);
     vm.prank(alice);
-    hook.decreaseLiquidity(_positionId, 0, 0, 0);
+    hook.decreaseLiquidity(positionId, 0, 0, 0);
   }
 }
 
