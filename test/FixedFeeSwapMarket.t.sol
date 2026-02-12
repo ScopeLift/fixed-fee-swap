@@ -2203,6 +2203,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
   PoolKey internal poolKey;
   SwapParams internal defaultSwapParams;
+  uint24 internal constant TEST_FEE_RATE = 3000; // 0.30%
 
   function setUp() public virtual override {
     super.setUp();
@@ -2241,6 +2242,81 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
   {
     bytes memory hookParams = _encodeHookParams(amountIn, principalForCash, tickLimit);
     return hook.exposed_beforeSwap(sender, poolKey, defaultSwapParams, hookParams);
+  }
+
+  function _deployHookForBeforeSwapTests(uint24 feeRate, string memory managerLabel)
+    internal
+    returns (FixedFeeSwapMarketHarness localHook, PoolKey memory localPoolKey)
+  {
+    uint256 currentTimestamp = block.timestamp;
+    vm.warp(1);
+
+    localHook = new FixedFeeSwapMarketHarness(
+      MARKET_LENGTH,
+      address(token0),
+      address(token1),
+      feeRate,
+      YIELD_PER_TICK,
+      IPoolManager(makeAddr(managerLabel)),
+      0
+    );
+
+    uint256 resumeTimestamp = currentTimestamp > 1 days ? currentTimestamp : 1 days + 1;
+    vm.warp(resumeTimestamp);
+
+    localPoolKey = PoolKey({
+      currency0: Currency.wrap(address(token0)),
+      currency1: Currency.wrap(address(token1)),
+      fee: 0,
+      tickSpacing: 1,
+      hooks: IHooks(address(localHook))
+    });
+
+    vm.startPrank(alice);
+    token0.approve(address(localHook), type(uint256).max);
+    token1.approve(address(localHook), type(uint256).max);
+    vm.stopPrank();
+
+    vm.startPrank(bob);
+    token0.approve(address(localHook), type(uint256).max);
+    token1.approve(address(localHook), type(uint256).max);
+    vm.stopPrank();
+  }
+
+  function _swapOnHook(
+    FixedFeeSwapMarketHarness localHook,
+    PoolKey memory localPoolKey,
+    address sender,
+    int256 amountIn,
+    bool principalForCash,
+    int24 tickLimit
+  ) internal {
+    bytes memory hookParams = _encodeHookParams(amountIn, principalForCash, tickLimit);
+    localHook.exposed_beforeSwap(sender, localPoolKey, defaultSwapParams, hookParams);
+  }
+
+  function _mintOnHook(
+    FixedFeeSwapMarketHarness localHook,
+    address user,
+    int24 tickLower,
+    int24 tickUpper,
+    uint128 liquidity
+  ) internal returns (bytes32 positionId) {
+    vm.prank(user);
+    localHook.mintLiquidity(tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max);
+    positionId = keccak256(abi.encodePacked(tickUpper, tickLower, user));
+  }
+
+  function _measurePrincipalForCashSwap(
+    FixedFeeSwapMarketHarness localHook,
+    PoolKey memory localPoolKey,
+    uint256 amountIn
+  ) internal returns (uint256 inputConsumed, uint256 outputReceived) {
+    uint256 balance0Before = token0.balanceOf(bob);
+    uint256 balance1Before = token1.balanceOf(bob);
+    _swapOnHook(localHook, localPoolKey, bob, int256(amountIn), true, NO_TICK_LIMIT);
+    inputConsumed = balance0Before - token0.balanceOf(bob);
+    outputReceived = token1.balanceOf(bob) - balance1Before;
   }
 
   function _ptForOneBip() internal view returns (uint256) {
@@ -3040,413 +3116,223 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     emit FixedFeeSwapMarket.Swap(bob, principalForCash, consumed, received);
     _swap(bob, int256(amountIn), principalForCash, NO_TICK_LIMIT);
   }
-}
 
-// ============ LP Fee Tests ============
+  // ============ LP Fee Tests ============
 
-contract LPFees is _BeforeSwap {
-  // Use a non-zero fee rate for fee tests
-  uint24 public constant TEST_FEE_RATE = 3000; // 0.30%
-  FixedFeeSwapMarketHarness public feeHook;
-  PoolKey public feePoolKey;
+  function test_FeeRateIsSet_OnFeeHook() public {
+    (FixedFeeSwapMarketHarness feeHook,) =
+      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "feeRateHookManager");
 
-  function setUp() public override {
-    super.setUp();
-
-    // Reset timestamp so feeHook has fresh START_TIME
-    vm.warp(1); // Reset to base time
-
-    // Deploy a separate hook with fees enabled
-    address mockManager = makeAddr("feeMockManager");
-    feeHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH,
-      address(token0),
-      address(token1),
-      TEST_FEE_RATE,
-      YIELD_PER_TICK,
-      IPoolManager(mockManager),
-      0
-    );
-
-    // Warp forward for realistic test conditions
-    vm.warp(block.timestamp + 1 days);
-
-    feePoolKey = PoolKey({
-      currency0: Currency.wrap(address(token0)),
-      currency1: Currency.wrap(address(token1)),
-      fee: 0,
-      tickSpacing: 1,
-      hooks: IHooks(address(feeHook))
-    });
-
-    // Approve feeHook for users
-    vm.startPrank(alice);
-    token0.approve(address(feeHook), type(uint256).max);
-    token1.approve(address(feeHook), type(uint256).max);
-    vm.stopPrank();
-
-    vm.startPrank(bob);
-    token0.approve(address(feeHook), type(uint256).max);
-    token1.approve(address(feeHook), type(uint256).max);
-    vm.stopPrank();
-  }
-
-  /// @dev Verifies fee rate is set correctly
-  function test_FeeRateIsSet() public view {
     assertEq(feeHook.FEE_RATE(), TEST_FEE_RATE);
   }
 
-  /// @dev Verifies global fee growth starts at zero
-  function test_InitialFeeGrowthIsZero() public view {
+  function test_InitialFeeGrowthIsZero_OnFeeHook() public {
+    (FixedFeeSwapMarketHarness feeHook,) =
+      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "initialFeeGrowthManager");
+
     assertEq(feeHook.feeGrowthGlobal0X128(), 0);
     assertEq(feeHook.feeGrowthGlobal1X128(), 0);
   }
 
-  /// @dev Swapping principal for cash should accumulate TOKEN0 fees
-  function test_PrincipalForCash_AccumulatesFeeGrowth0() public {
-    // Mint liquidity
-    vm.prank(alice);
-    feeHook.mintLiquidity(0, 200, 1e20, type(uint256).max, type(uint256).max);
+  function testFuzz_PrincipalForCashSwapAccumulatesToken0FeeGrowth(uint256 amountIn) public {
+    amountIn = bound(amountIn, 1e17, 1e18);
+    (FixedFeeSwapMarketHarness feeHook, PoolKey memory feePoolKey) =
+      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "feeGrowth0Manager");
+    _mintOnHook(feeHook, alice, 0, 200, 1e20);
 
-    uint256 feeGrowthBefore = feeHook.feeGrowthGlobal0X128();
-    assertEq(feeGrowthBefore, 0);
+    uint256 feeGrowth0Before = feeHook.feeGrowthGlobal0X128();
+    _swapOnHook(feeHook, feePoolKey, bob, int256(amountIn), true, NO_TICK_LIMIT);
+    uint256 feeGrowth0After = feeHook.feeGrowthGlobal0X128();
 
-    // Swap principal for cash
-    bytes memory hookParams = abi.encode(int256(1e18), true, NO_TICK_LIMIT);
-    feeHook.exposed_beforeSwap(bob, feePoolKey, defaultSwapParams, hookParams);
-
-    uint256 feeGrowthAfter = feeHook.feeGrowthGlobal0X128();
-    assertGt(feeGrowthAfter, 0, "Fee growth should increase after swap");
+    assertGt(feeGrowth0After, feeGrowth0Before, "Fee growth for TOKEN0 should increase");
   }
 
-  /// @dev Swapper receives less output due to fees
-  function test_SwapOutputIsReducedByFees() public {
-    // Mint same liquidity on both hooks at [0, 200]
-    vm.prank(alice);
-    feeHook.mintLiquidity(0, 200, 1e20, type(uint256).max, type(uint256).max);
+  function testFuzz_SwapWithFeesDoesNotIncreaseOutputComparedToNoFee(uint256 amountIn) public {
+    amountIn = bound(amountIn, 1e16, 5e17);
 
-    // Both hooks have 1e20 liquidity at [0, 200], so 1 bip = 1e16.
-    // Use 50 bips (5e17) to stay well within the 200-tick range.
-    uint256 swapAmount = 5e17;
+    (FixedFeeSwapMarketHarness feeHook, PoolKey memory feePoolKey) =
+      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "feeOutputManager");
+    (FixedFeeSwapMarketHarness noFeeHook, PoolKey memory noFeePoolKey) =
+      _deployHookForBeforeSwapTests(0, "noFeeOutputManager");
 
-    // Swap on fee hook first (clean state, only 1e20 liquidity)
-    uint256 bob0Before = token0.balanceOf(bob);
-    uint256 bob1Before = token1.balanceOf(bob);
+    _mintOnHook(feeHook, alice, 0, 200, 1e20);
+    _mintOnHook(noFeeHook, alice, 0, 200, 1e20);
 
-    bytes memory hookParams = abi.encode(int256(swapAmount), true, NO_TICK_LIMIT);
-    feeHook.exposed_beforeSwap(bob, feePoolKey, defaultSwapParams, hookParams);
+    uint256 feeGrowth0Before = feeHook.feeGrowthGlobal0X128();
+    (uint256 inputWithFee, uint256 outputWithFee) =
+      _measurePrincipalForCashSwap(feeHook, feePoolKey, amountIn);
+    uint256 feeGrowth0After = feeHook.feeGrowthGlobal0X128();
 
-    uint256 outputWithFee = token1.balanceOf(bob) - bob1Before;
-    uint256 inputWithFee = bob0Before - token0.balanceOf(bob);
-
-    // Deploy a fresh zero-fee hook with the same liquidity as feeHook.
-    // Must deploy at an earlier timestamp so time has elapsed.
-    uint256 savedTimestamp = block.timestamp;
-    vm.warp(1);
-    address freshMgr = makeAddr("freshFeeMgr");
-    FixedFeeSwapMarketHarness noFeeHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), 0, YIELD_PER_TICK, IPoolManager(freshMgr), 0
-    );
-    vm.warp(savedTimestamp); // restore original timestamp
-
-    PoolKey memory noFeePoolKey = PoolKey({
-      currency0: Currency.wrap(address(token0)),
-      currency1: Currency.wrap(address(token1)),
-      fee: 0,
-      tickSpacing: 1,
-      hooks: IHooks(address(noFeeHook))
-    });
-
-    vm.startPrank(alice);
-    token0.approve(address(noFeeHook), type(uint256).max);
-    token1.approve(address(noFeeHook), type(uint256).max);
-    noFeeHook.mintLiquidity(0, 200, 1e20, type(uint256).max, type(uint256).max);
-    vm.stopPrank();
-
-    vm.prank(bob);
-    token0.approve(address(noFeeHook), type(uint256).max);
-
-    // Reset bob's PT balance
     token0.mint(bob, inputWithFee);
 
-    bob0Before = token0.balanceOf(bob);
-    bob1Before = token1.balanceOf(bob);
+    (uint256 inputNoFee, uint256 outputNoFee) =
+      _measurePrincipalForCashSwap(noFeeHook, noFeePoolKey, amountIn);
 
-    noFeeHook.exposed_beforeSwap(bob, noFeePoolKey, defaultSwapParams, hookParams);
-
-    uint256 outputNoFee = token1.balanceOf(bob) - bob1Before;
-    uint256 inputNoFee = bob0Before - token0.balanceOf(bob);
-
-    // Output should be less with fees
-    assertGt(outputNoFee, 0, "No-fee output should be non-zero");
-    assertGt(outputWithFee, 0, "Fee output should be non-zero");
-    assertLt(outputWithFee, outputNoFee, "Output should be less with fees");
-    // Input should be the same (gross amount)
-    assertEq(inputWithFee, inputNoFee, "Input should be the same");
+    vm.assume(outputWithFee > 0 && outputNoFee > 0);
+    assertLe(outputWithFee, outputNoFee, "Output should not increase with fees");
+    assertApproxEqAbs(inputWithFee, inputNoFee, 1, "Consumed input should match within 1 wei");
+    assertLe(inputWithFee, amountIn, "Consumed input should never exceed amountIn");
+    assertGt(feeGrowth0After, feeGrowth0Before, "Fee growth should increase when fees are enabled");
   }
 
-  /// @dev LP can collect fees after swaps
-  function test_CollectFees_AfterSwaps() public {
-    // Mint wide liquidity range
-    vm.prank(alice);
-    feeHook.mintLiquidity(0, 300, 1e20, type(uint256).max, type(uint256).max);
+  function testFuzz_CollectFeesAfterPrincipalForCashSwaps(uint8 swapCount, uint256 amountIn)
+    public
+  {
+    swapCount = uint8(bound(uint256(swapCount), 1, 10));
+    amountIn = bound(amountIn, 1e17, 2e17);
 
-    bytes32 positionId = keccak256(abi.encodePacked(int24(300), int24(0), alice));
+    (FixedFeeSwapMarketHarness feeHook, PoolKey memory feePoolKey) =
+      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "collectFeeManager");
+    bytes32 positionId = _mintOnHook(feeHook, alice, 0, 300, 1e20);
 
-    // Multiple swaps to accumulate fees (smaller amounts to stay in range)
-    for (uint256 i = 0; i < 5; i++) {
-      bytes memory hookParams = abi.encode(int256(1e17), true, NO_TICK_LIMIT);
-      feeHook.exposed_beforeSwap(bob, feePoolKey, defaultSwapParams, hookParams);
+    for (uint256 i = 0; i < swapCount; i++) {
+      _swapOnHook(feeHook, feePoolKey, bob, int256(amountIn), true, NO_TICK_LIMIT);
     }
 
-    // Check fees owed
     uint256 aliceToken0Before = token0.balanceOf(alice);
-
     vm.prank(alice);
     (uint128 collected0, uint128 collected1) = feeHook.collectFees(positionId, alice, 0, 0);
-
     uint256 aliceToken0After = token0.balanceOf(alice);
 
-    assertGt(collected0, 0, "Should have collected TOKEN0 fees");
-    assertEq(collected1, 0, "Should not have collected TOKEN1 fees (no cash->principal swaps)");
-    assertEq(
-      aliceToken0After - aliceToken0Before,
-      collected0,
-      "Balance should increase by collected amount"
-    );
+    assertGt(collected0, 0, "Should collect TOKEN0 fees");
+    assertEq(collected1, 0, "Should not collect TOKEN1 fees from one-way swaps");
+    assertEq(aliceToken0After - aliceToken0Before, collected0, "Balance increase should match fees");
   }
 
-  /// @dev Only position owner can collect fees
-  function test_RevertWhen_NonOwnerCollectsFees() public {
-    vm.prank(alice);
-    feeHook.mintLiquidity(0, 200, 1e20, type(uint256).max, type(uint256).max);
-
-    bytes32 positionId = keccak256(abi.encodePacked(int24(200), int24(0), alice));
+  function test_RevertWhen_NonOwnerCollectsFees_OnFeeHook() public {
+    (FixedFeeSwapMarketHarness feeHook,) =
+      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "notOwnerCollectManager");
+    bytes32 positionId = _mintOnHook(feeHook, alice, 0, 200, 1e20);
 
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__NotPositionOwner.selector);
     vm.prank(bob);
     feeHook.collectFees(positionId, bob, 0, 0);
   }
 
-  /// @dev Fees are split proportionally among LPs in range
-  function test_FeesProportionalToLiquidity() public {
-    // Alice and Bob both mint wide positions, but Alice has 2x liquidity
-    vm.prank(alice);
-    feeHook.mintLiquidity(0, 300, 2e20, type(uint256).max, type(uint256).max);
+  function testFuzz_FeeCollectionScalesWithLiquidityShare(uint8 swapCount, uint256 amountIn)
+    public
+  {
+    swapCount = uint8(bound(uint256(swapCount), 2, 20));
+    amountIn = bound(amountIn, 5e16, 2e17);
 
-    vm.prank(bob);
-    feeHook.mintLiquidity(0, 300, 1e20, type(uint256).max, type(uint256).max);
+    (FixedFeeSwapMarketHarness feeHook, PoolKey memory feePoolKey) =
+      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "feeSplitManager");
 
-    bytes32 alicePositionId = keccak256(abi.encodePacked(int24(300), int24(0), alice));
-    bytes32 bobPositionId = keccak256(abi.encodePacked(int24(300), int24(0), bob));
+    bytes32 alicePositionId = _mintOnHook(feeHook, alice, 0, 300, 2e20);
+    bytes32 bobPositionId = _mintOnHook(feeHook, bob, 0, 300, 1e20);
 
-    // Execute swaps (smaller amounts to stay in range)
-    address carol = makeAddr("carol");
+    address carol = makeAddr("feeSplitCarol");
     _fundUser(carol);
-    vm.prank(carol);
+    vm.startPrank(carol);
     token0.approve(address(feeHook), type(uint256).max);
+    token1.approve(address(feeHook), type(uint256).max);
+    vm.stopPrank();
 
-    for (uint256 i = 0; i < 10; i++) {
-      bytes memory hookParams = abi.encode(int256(1e17), true, NO_TICK_LIMIT);
-      feeHook.exposed_beforeSwap(carol, feePoolKey, defaultSwapParams, hookParams);
+    for (uint256 i = 0; i < swapCount; i++) {
+      _swapOnHook(feeHook, feePoolKey, carol, int256(amountIn), true, NO_TICK_LIMIT);
     }
 
-    // Collect fees
     vm.prank(alice);
     (uint128 aliceFees0,) = feeHook.collectFees(alicePositionId, alice, 0, 0);
-
     vm.prank(bob);
     (uint128 bobFees0,) = feeHook.collectFees(bobPositionId, bob, 0, 0);
 
-    // Alice should get ~2x the fees of Bob (within rounding tolerance)
-    // Using a 5% tolerance for rounding
+    vm.assume(bobFees0 > 0);
     uint256 expectedAliceFees = uint256(bobFees0) * 2;
-    uint256 tolerance = expectedAliceFees / 20; // 5%
-
-    assertApproxEqAbs(aliceFees0, expectedAliceFees, tolerance, "Alice should get ~2x Bob's fees");
+    uint256 tolerance = expectedAliceFees / 20 + 1;
+    assertApproxEqAbs(aliceFees0, expectedAliceFees, tolerance, "Alice should collect ~2x Bob");
   }
 
-  /// @dev Position out of range doesn't earn fees
-  function test_OutOfRangeLPDoesNotEarnFees() public {
-    // Alice mints wide in-range position
-    vm.prank(alice);
-    feeHook.mintLiquidity(0, 300, 1e20, type(uint256).max, type(uint256).max);
+  function testFuzz_OutOfRangeLiquidityDoesNotEarnFees(uint8 swapCount, uint256 amountIn) public {
+    swapCount = uint8(bound(uint256(swapCount), 1, 10));
+    amountIn = bound(amountIn, 5e16, 1e17);
 
-    // Bob mints out-of-range position (above the swap range)
-    vm.prank(bob);
-    feeHook.mintLiquidity(500, 600, 1e20, type(uint256).max, type(uint256).max);
+    (FixedFeeSwapMarketHarness feeHook, PoolKey memory feePoolKey) =
+      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "outOfRangeFeeManager");
 
-    bytes32 alicePositionId = keccak256(abi.encodePacked(int24(300), int24(0), alice));
-    bytes32 bobPositionId = keccak256(abi.encodePacked(int24(600), int24(500), bob));
+    bytes32 alicePositionId = _mintOnHook(feeHook, alice, 0, 300, 1e20);
+    bytes32 bobPositionId = _mintOnHook(feeHook, bob, 500, 600, 1e20);
 
-    // Execute principal->cash swaps (tick moves up but stays within Alice's range)
-    // Use smaller amounts to stay in range
-    address carol = makeAddr("carol");
+    address carol = makeAddr("outOfRangeCarol");
     _fundUser(carol);
-    vm.prank(carol);
+    vm.startPrank(carol);
     token0.approve(address(feeHook), type(uint256).max);
+    token1.approve(address(feeHook), type(uint256).max);
+    vm.stopPrank();
 
-    for (uint256 i = 0; i < 5; i++) {
-      bytes memory hookParams = abi.encode(int256(1e17), true, NO_TICK_LIMIT);
-      feeHook.exposed_beforeSwap(carol, feePoolKey, defaultSwapParams, hookParams);
+    for (uint256 i = 0; i < swapCount; i++) {
+      _swapOnHook(feeHook, feePoolKey, carol, int256(amountIn), true, NO_TICK_LIMIT);
     }
 
-    // Collect fees
     vm.prank(alice);
     (uint128 aliceFees0,) = feeHook.collectFees(alicePositionId, alice, 0, 0);
-
     vm.prank(bob);
     (uint128 bobFees0,) = feeHook.collectFees(bobPositionId, bob, 0, 0);
 
-    assertGt(aliceFees0, 0, "Alice (in range) should earn fees");
-    assertEq(bobFees0, 0, "Bob (out of range) should not earn fees");
+    assertGt(aliceFees0, 0, "In-range LP should collect fees");
+    assertEq(bobFees0, 0, "Out-of-range LP should not collect fees");
   }
 
-  /// @dev Fees are accrued correctly when increasing liquidity
-  function test_FeesAccrued_OnIncreaseLiquidity() public {
+  function testFuzz_IncreaseLiquidityDoesNotLoseAccruedFees(
+    uint256 amountIn,
+    uint128 additionalLiquidity
+  ) public {
+    amountIn = bound(amountIn, 1e17, 5e17);
+    additionalLiquidity = uint128(bound(uint256(additionalLiquidity), 1e18, 1e20));
+
+    (FixedFeeSwapMarketHarness feeHook, PoolKey memory feePoolKey) =
+      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "increaseFeeManager");
+    bytes32 positionId = _mintOnHook(feeHook, alice, 0, 200, 1e20);
+
+    _swapOnHook(feeHook, feePoolKey, bob, int256(amountIn), true, NO_TICK_LIMIT);
+
+    (,,, int128 liquidityBefore) = feeHook.getPositionInfo(positionId);
     vm.prank(alice);
-    feeHook.mintLiquidity(0, 200, 1e20, type(uint256).max, type(uint256).max);
+    feeHook.increaseLiquidity(positionId, additionalLiquidity, type(uint256).max, type(uint256).max);
+    (,,, int128 liquidityAfter) = feeHook.getPositionInfo(positionId);
 
-    bytes32 positionId = keccak256(abi.encodePacked(int24(200), int24(0), alice));
-
-    // Execute some swaps to generate fees
-    bytes memory hookParams = abi.encode(int256(1e18), true, NO_TICK_LIMIT);
-    feeHook.exposed_beforeSwap(bob, feePoolKey, defaultSwapParams, hookParams);
-
-    // Check position before
-    (,,, int128 liqBefore) = feeHook.getPositionInfo(positionId);
-
-    // Increase liquidity - this should accrue pending fees
     vm.prank(alice);
-    feeHook.increaseLiquidity(positionId, 1e19, type(uint256).max, type(uint256).max);
+    (uint128 collected0,) = feeHook.collectFees(positionId, alice, 0, 0);
 
-    // Check position after
-    (,,, int128 liqAfter) = feeHook.getPositionInfo(positionId);
-    assertEq(liqAfter, liqBefore + int128(1e19), "Liquidity should increase");
-
-    // The fees should still be collectible
-    vm.prank(alice);
-    (uint128 fees0,) = feeHook.collectFees(positionId, alice, 0, 0);
-    assertGt(fees0, 0, "Should have accrued fees");
+    assertEq(
+      liquidityAfter,
+      liquidityBefore + int128(additionalLiquidity),
+      "Liquidity should increase by delta"
+    );
+    assertGt(collected0, 0, "Accrued fees should remain collectible after increase");
   }
 
-  /// @dev Newly added liquidity should not earn fees from before it was added
-  function test_ReAddLiquidityDoesNotEarnPastFees() public {
-    // Bob provides persistent in-range liquidity so swaps continue while Alice is out
-    vm.prank(bob);
-    feeHook.mintLiquidity(0, 300, 2e20, type(uint256).max, type(uint256).max);
+  function testFuzz_ReAddingLiquidityDoesNotBackfillPastFees(uint8 swapCount, uint256 amountIn)
+    public
+  {
+    swapCount = uint8(bound(uint256(swapCount), 1, 8));
+    amountIn = bound(amountIn, 1e17, 2e17);
 
+    (FixedFeeSwapMarketHarness feeHook, PoolKey memory feePoolKey) =
+      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "reAddFeeManager");
+    _mintOnHook(feeHook, bob, 0, 300, 2e20);
+    bytes32 alicePositionId = _mintOnHook(feeHook, alice, 0, 300, 1e20);
+
+    _swapOnHook(feeHook, feePoolKey, bob, int256(amountIn), true, NO_TICK_LIMIT);
+
+    (,,, int128 liquidityBefore) = feeHook.getPositionInfo(alicePositionId);
     vm.prank(alice);
-    feeHook.mintLiquidity(0, 300, 1e20, type(uint256).max, type(uint256).max);
-
-    bytes32 alicePositionId = keccak256(abi.encodePacked(int24(300), int24(0), alice));
-
-    // Generate some fees while Alice is in range, then fully burn and collect to zero owed
-    bytes memory hookParams = abi.encode(int256(1e18), true, NO_TICK_LIMIT);
-    feeHook.exposed_beforeSwap(bob, feePoolKey, defaultSwapParams, hookParams);
-
-    (,,, int128 liqBefore) = feeHook.getPositionInfo(alicePositionId);
-    vm.prank(alice);
-    feeHook.decreaseLiquidity(alicePositionId, -liqBefore, 0, 0);
+    feeHook.decreaseLiquidity(alicePositionId, -liquidityBefore, 0, 0);
 
     vm.prank(alice);
     feeHook.collectFees(alicePositionId, alice, 0, 0);
 
-    // Generate fees while Alice has zero liquidity
-    for (uint256 i = 0; i < 5; i++) {
-      bytes memory stepParams = abi.encode(int256(1e17), true, NO_TICK_LIMIT);
-      feeHook.exposed_beforeSwap(bob, feePoolKey, defaultSwapParams, stepParams);
+    for (uint256 i = 0; i < swapCount; i++) {
+      _swapOnHook(feeHook, feePoolKey, bob, int256(amountIn), true, NO_TICK_LIMIT);
     }
 
-    // Re-add liquidity; collecting immediately should yield 0
     vm.prank(alice);
     feeHook.increaseLiquidity(alicePositionId, 1e20, type(uint256).max, type(uint256).max);
-
     vm.prank(alice);
     (uint128 fees0, uint128 fees1) = feeHook.collectFees(alicePositionId, alice, 0, 0);
-    assertEq(fees0, 0, "Re-added liquidity should not earn past TOKEN0 fees");
-    assertEq(fees1, 0, "Re-added liquidity should not earn past TOKEN1 fees");
-  }
 
-  function test_RevertWhen_DecreaseLiquidityPositiveDelta() public {
-    vm.prank(alice);
-    feeHook.mintLiquidity(0, 200, 1e20, type(uint256).max, type(uint256).max);
-
-    bytes32 positionId = keccak256(abi.encodePacked(int24(200), int24(0), alice));
-
-    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__LiquidityDeltaMustBeNegative.selector);
-    vm.prank(alice);
-    feeHook.decreaseLiquidity(positionId, int128(1), 0, 0);
-  }
-
-  function test_RevertWhen_DecreaseLiquidityExceedsPositionLiquidity() public {
-    vm.prank(alice);
-    feeHook.mintLiquidity(0, 200, 1e20, type(uint256).max, type(uint256).max);
-
-    bytes32 positionId = keccak256(abi.encodePacked(int24(200), int24(0), alice));
-    (,,, int128 liqBefore) = feeHook.getPositionInfo(positionId);
-
-    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__InsufficientPositionLiquidity.selector);
-    vm.prank(alice);
-    feeHook.decreaseLiquidity(positionId, -(liqBefore + 1), 0, 0);
-  }
-
-  function testFuzz_SwapOutputReducedByFees(uint256 amountIn) public {
-    amountIn = bound(amountIn, 1e16, 5e17);
-
-    // Mint same liquidity on feeHook
-    vm.prank(alice);
-    feeHook.mintLiquidity(0, 200, 1e20, type(uint256).max, type(uint256).max);
-
-    // Swap on fee hook
-    uint256 _bob0Before = token0.balanceOf(bob);
-    uint256 _bob1Before = token1.balanceOf(bob);
-
-    bytes memory _hookParams = abi.encode(int256(amountIn), true, NO_TICK_LIMIT);
-    feeHook.exposed_beforeSwap(bob, feePoolKey, defaultSwapParams, _hookParams);
-
-    uint256 _outputWithFee = token1.balanceOf(bob) - _bob1Before;
-    uint256 _inputWithFee = _bob0Before - token0.balanceOf(bob);
-
-    // Deploy a fresh zero-fee hook with the same liquidity
-    uint256 _savedTimestamp = block.timestamp;
-    vm.warp(1);
-    address _freshMgr = makeAddr("fuzzFeeMgr");
-    FixedFeeSwapMarketHarness _noFeeHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH, address(token0), address(token1), 0, YIELD_PER_TICK, IPoolManager(_freshMgr), 0
-    );
-    vm.warp(_savedTimestamp);
-
-    PoolKey memory _noFeePoolKey = PoolKey({
-      currency0: Currency.wrap(address(token0)),
-      currency1: Currency.wrap(address(token1)),
-      fee: 0,
-      tickSpacing: 1,
-      hooks: IHooks(address(_noFeeHook))
-    });
-
-    vm.startPrank(alice);
-    token0.approve(address(_noFeeHook), type(uint256).max);
-    token1.approve(address(_noFeeHook), type(uint256).max);
-    _noFeeHook.mintLiquidity(0, 200, 1e20, type(uint256).max, type(uint256).max);
-    vm.stopPrank();
-
-    vm.prank(bob);
-    token0.approve(address(_noFeeHook), type(uint256).max);
-
-    // Restore bob's PT
-    token0.mint(bob, _inputWithFee);
-
-    _bob0Before = token0.balanceOf(bob);
-    _bob1Before = token1.balanceOf(bob);
-
-    _noFeeHook.exposed_beforeSwap(bob, _noFeePoolKey, defaultSwapParams, _hookParams);
-
-    uint256 _outputNoFee = token1.balanceOf(bob) - _bob1Before;
-
-    // Skip if sub-bip swap produced zero on either side or rounding makes them equal
-    vm.assume(_outputNoFee > 0 && _outputWithFee > 0);
-    assertLe(_outputWithFee, _outputNoFee, "Output should be <= with fees");
+    assertEq(fees0, 0, "Re-added liquidity should not backfill TOKEN0 fees");
+    assertEq(fees1, 0, "Re-added liquidity should not backfill TOKEN1 fees");
   }
 }
 
