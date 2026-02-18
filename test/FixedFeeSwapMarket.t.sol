@@ -39,6 +39,8 @@ abstract contract FixedFeeSwapMarketTest is Test {
   FixedFeeSwapMarketHarness public hook;
   MockERC20 public token0;
   MockERC20 public token1;
+  PoolKey internal poolKey;
+  SwapParams internal defaultSwapParams;
 
   uint48 public constant MARKET_LENGTH = 365 days;
   // Large balance to support very large fuzzed liquidity ranges without incidental ERC20 reverts.
@@ -49,6 +51,7 @@ abstract contract FixedFeeSwapMarketTest is Test {
   // Fee rate in hundredths of a bip (3000 = 0.30%)
   // Set to 0 for existing tests to pass without fee impact
   uint24 public constant FEE_RATE = 0;
+  uint24 internal constant LP_FEE_RATE = 3000; // 0.30%
   int24 public constant YIELD_PER_TICK = 1;
   int24 public constant NO_TICK_LIMIT = type(int24).max;
 
@@ -327,6 +330,129 @@ abstract contract FixedFeeSwapMarketTest is Test {
       SwapParams({zeroForOne: true, amountSpecified: -1e18, sqrtPriceLimitX96: 0});
     bytes memory _hookParams = abi.encode(int256(100e22), true, _target);
     hook.exposed_beforeSwap(bob, _poolKey, _swapParams, _hookParams);
+  }
+
+  function _encodeHookParams(int256 amountIn, bool principalForCash, int24 tickLimit)
+    internal
+    pure
+    returns (bytes memory)
+  {
+    return abi.encode(amountIn, principalForCash, tickLimit);
+  }
+
+  function _swap(address sender, int256 amountIn, bool principalForCash, int24 tickLimit)
+    internal
+    returns (bytes4, BeforeSwapDelta, uint24)
+  {
+    bytes memory hookParams = _encodeHookParams(amountIn, principalForCash, tickLimit);
+    return hook.exposed_beforeSwap(sender, poolKey, defaultSwapParams, hookParams);
+  }
+
+  function _deployHookForBeforeSwapTests(uint24 feeRate, string memory managerLabel)
+    internal
+    returns (FixedFeeSwapMarketHarness localHook, PoolKey memory localPoolKey)
+  {
+    uint256 currentTimestamp = block.timestamp;
+    vm.warp(1);
+
+    localHook = new FixedFeeSwapMarketHarness(
+      MARKET_LENGTH,
+      address(token0),
+      address(token1),
+      feeRate,
+      YIELD_PER_TICK,
+      IPoolManager(makeAddr(managerLabel)),
+      0
+    );
+
+    uint256 resumeTimestamp = currentTimestamp > 1 days ? currentTimestamp : 1 days + 1;
+    vm.warp(resumeTimestamp);
+
+    localPoolKey = PoolKey({
+      currency0: Currency.wrap(address(token0)),
+      currency1: Currency.wrap(address(token1)),
+      fee: 0,
+      tickSpacing: 1,
+      hooks: IHooks(address(localHook))
+    });
+
+    vm.startPrank(alice);
+    token0.approve(address(localHook), type(uint256).max);
+    token1.approve(address(localHook), type(uint256).max);
+    vm.stopPrank();
+
+    vm.startPrank(bob);
+    token0.approve(address(localHook), type(uint256).max);
+    token1.approve(address(localHook), type(uint256).max);
+    vm.stopPrank();
+  }
+
+  function _swapOnHook(
+    FixedFeeSwapMarketHarness localHook,
+    PoolKey memory localPoolKey,
+    address sender,
+    int256 amountIn,
+    bool principalForCash,
+    int24 tickLimit
+  ) internal {
+    bytes memory hookParams = _encodeHookParams(amountIn, principalForCash, tickLimit);
+    localHook.exposed_beforeSwap(sender, localPoolKey, defaultSwapParams, hookParams);
+  }
+
+  function _mintOnHook(
+    FixedFeeSwapMarketHarness localHook,
+    address user,
+    int24 tickLower,
+    int24 tickUpper,
+    uint128 liquidity
+  ) internal returns (bytes32 positionId) {
+    vm.prank(user);
+    localHook.mintLiquidity(tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max);
+    positionId = keccak256(abi.encodePacked(tickUpper, tickLower, user));
+  }
+
+  function _measurePrincipalForCashSwap(
+    FixedFeeSwapMarketHarness localHook,
+    PoolKey memory localPoolKey,
+    uint256 amountIn
+  ) internal returns (uint256 inputConsumed, uint256 outputReceived) {
+    uint256 balance0Before = token0.balanceOf(bob);
+    uint256 balance1Before = token1.balanceOf(bob);
+    _swapOnHook(localHook, localPoolKey, bob, int256(amountIn), true, NO_TICK_LIMIT);
+    inputConsumed = balance0Before - token0.balanceOf(bob);
+    outputReceived = token1.balanceOf(bob) - balance1Before;
+  }
+
+  function _ptForOneBip() internal view returns (uint256) {
+    return uint256(hook.getActiveLiquidity()) / BIPS;
+  }
+
+  function _initializePrice() internal returns (int256) {
+    if (hook.getCurrentPrice() != 0) return hook.getCurrentPrice();
+
+    _swap(bob, 1, true, hook.getCurrentTick());
+
+    int256 price = hook.getCurrentPrice();
+    assertTrue(price > 0, "Price must be initialized");
+    return price;
+  }
+
+  /// @notice Upper bound on tick movement for a given swap input and active liquidity.
+  /// @dev Each tick consumes ~activeLiquidity/BIPS of input, so ticks ≈ amountIn * BIPS / activeLiquidity.
+  ///      +1 for Solidity integer division truncation, +1 for the swap's tick snapping to integers.
+  function _maxTickMove(uint256 amountIn, uint128 activeLiquidity) internal pure returns (int24) {
+    return int24(int256(amountIn * BIPS / uint256(activeLiquidity))) + 2;
+  }
+
+  function _assertApproxEqRelBps(uint256 a, uint256 b, uint256 toleranceBps, string memory err)
+    internal
+    pure
+  {
+    if (a == 0 && b == 0) return;
+    uint256 diff = a > b ? a - b : b - a;
+    uint256 maxVal = a > b ? a : b;
+    uint256 maxDiff = (maxVal * toleranceBps) / BIPS;
+    assertTrue(diff <= maxDiff, err);
   }
 }
 
@@ -1507,11 +1633,8 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
   function setUp() public virtual override {
     super.setUp();
+    defaultSwapParams = SwapParams({zeroForOne: true, amountSpecified: -1e18, sqrtPriceLimitX96: 0});
     _moveTickTo(500);
-  }
-
-  function _defaultSwapParams() internal pure returns (SwapParams memory) {
-    return SwapParams({zeroForOne: true, amountSpecified: -1e18, sqrtPriceLimitX96: 0});
   }
 
   function _poolKeyForHook(FixedFeeSwapMarketHarness localHook)
@@ -1572,30 +1695,6 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     vm.warp(localHook.getStartTime() + timeElapsed);
   }
 
-  function _mintLiquidityAtTicksOnHook(
-    FixedFeeSwapMarketHarness localHook,
-    address user,
-    int24 tickLower,
-    int24 tickUpper,
-    uint128 liquidity
-  ) internal returns (bytes32 positionId) {
-    vm.prank(user);
-    localHook.mintLiquidity(tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max);
-    positionId = keccak256(abi.encodePacked(tickUpper, tickLower, user));
-  }
-
-  function _swapOnHook(
-    FixedFeeSwapMarketHarness localHook,
-    PoolKey memory localPoolKey,
-    address sender,
-    int256 amountIn,
-    bool principalForCash,
-    int24 tickLimit
-  ) internal {
-    bytes memory hookParams = abi.encode(amountIn, principalForCash, tickLimit);
-    localHook.exposed_beforeSwap(sender, localPoolKey, _defaultSwapParams(), hookParams);
-  }
-
   function _trySwapOnHook(
     FixedFeeSwapMarketHarness localHook,
     PoolKey memory localPoolKey,
@@ -1604,8 +1703,8 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     bool principalForCash,
     int24 tickLimit
   ) internal returns (bool) {
-    bytes memory hookParams = abi.encode(amountIn, principalForCash, tickLimit);
-    try localHook.exposed_beforeSwap(sender, localPoolKey, _defaultSwapParams(), hookParams) {
+    bytes memory hookParams = _encodeHookParams(amountIn, principalForCash, tickLimit);
+    try localHook.exposed_beforeSwap(sender, localPoolKey, defaultSwapParams, hookParams) {
       return true;
     } catch {
       return false;
@@ -2331,7 +2430,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
     _warpFromHookStart(localHook, 1);
     bytes32 positionId =
-      _mintLiquidityAtTicksOnHook(localHook, alice, tickLower, tickUpper, liquidity);
+      _mintOnHook(localHook, alice, tickLower, tickUpper, liquidity);
 
     _warpFromHookStart(localHook, timeElapsed);
 
@@ -2368,7 +2467,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
     _warpFromHookStart(localHook, 1);
     bytes32 positionId =
-      _mintLiquidityAtTicksOnHook(localHook, alice, tickLower, tickUpper, liquidity);
+      _mintOnHook(localHook, alice, tickLower, tickUpper, liquidity);
 
     _warpFromHookStart(localHook, timeElapsed);
 
@@ -2410,9 +2509,9 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
     _warpFromHookStart(localHook, 1);
     bytes32 positionId1 =
-      _mintLiquidityAtTicksOnHook(localHook, alice, tickLower1, tickUpper1, liquidity1);
+      _mintOnHook(localHook, alice, tickLower1, tickUpper1, liquidity1);
     bytes32 positionId2 =
-      _mintLiquidityAtTicksOnHook(localHook, charlie, tickLower2, tickUpper2, liquidity2);
+      _mintOnHook(localHook, charlie, tickLower2, tickUpper2, liquidity2);
 
     _warpFromHookStart(localHook, timeElapsed);
 
@@ -2448,7 +2547,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
     _warpFromHookStart(localHook, 1);
     bytes32 positionId =
-      _mintLiquidityAtTicksOnHook(localHook, alice, tickLower, tickUpper, liquidity);
+      _mintOnHook(localHook, alice, tickLower, tickUpper, liquidity);
 
     _warpFromHookStart(localHook, timeElapsed);
 
@@ -2488,7 +2587,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
     _warpFromHookStart(localHook, 1);
     bytes32 positionId =
-      _mintLiquidityAtTicksOnHook(localHook, alice, tickLower, tickUpper, liquidity);
+      _mintOnHook(localHook, alice, tickLower, tickUpper, liquidity);
 
     _warpFromHookStart(localHook, timeElapsed);
 
@@ -2532,7 +2631,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
     _warpFromHookStart(localHook, 1);
     bytes32 positionId =
-      _mintLiquidityAtTicksOnHook(localHook, alice, tickLower, tickUpper, liquidity);
+      _mintOnHook(localHook, alice, tickLower, tickUpper, liquidity);
 
     _warpFromHookStart(localHook, timeElapsed);
 
@@ -2576,7 +2675,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
     _warpFromHookStart(localHook, 1);
     bytes32 positionId =
-      _mintLiquidityAtTicksOnHook(localHook, alice, tickLower, tickUpper, liquidity);
+      _mintOnHook(localHook, alice, tickLower, tickUpper, liquidity);
 
     _warpFromHookStart(localHook, swapTime);
     bool swapped =
@@ -2613,7 +2712,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
     _warpFromHookStart(feeHook, 1);
     bytes32 positionId =
-      _mintLiquidityAtTicksOnHook(feeHook, alice, tickLower, tickUpper, liquidity);
+      _mintOnHook(feeHook, alice, tickLower, tickUpper, liquidity);
 
     _warpFromHookStart(feeHook, timeElapsed);
 
@@ -2651,7 +2750,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
     _warpFromHookStart(feeHook, 1);
     bytes32 positionId =
-      _mintLiquidityAtTicksOnHook(feeHook, alice, tickLower, tickUpper, liquidity);
+      _mintOnHook(feeHook, alice, tickLower, tickUpper, liquidity);
 
     _warpFromHookStart(feeHook, timeElapsed);
 
@@ -2694,9 +2793,9 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
     _warpFromHookStart(feeHook, 1);
     bytes32 positionId1 =
-      _mintLiquidityAtTicksOnHook(feeHook, alice, tickLower1, tickUpper1, liquidity1);
+      _mintOnHook(feeHook, alice, tickLower1, tickUpper1, liquidity1);
     bytes32 positionId2 =
-      _mintLiquidityAtTicksOnHook(feeHook, charlie, tickLower2, tickUpper2, liquidity2);
+      _mintOnHook(feeHook, charlie, tickLower2, tickUpper2, liquidity2);
 
     _warpFromHookStart(feeHook, timeElapsed);
 
@@ -2727,7 +2826,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
     _warpFromHookStart(feeHook, 1);
     bytes32 positionId =
-      _mintLiquidityAtTicksOnHook(feeHook, alice, tickLower, tickUpper, liquidity);
+      _mintOnHook(feeHook, alice, tickLower, tickUpper, liquidity);
 
     _warpFromHookStart(feeHook, timeElapsed);
 
@@ -2751,7 +2850,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
       _deployHookForSolvency(0, "maturityWithdraw");
 
     _warpFromHookStart(localHook, 1);
-    bytes32 positionId = _mintLiquidityAtTicksOnHook(localHook, alice, 0, 500, 1e22);
+    bytes32 positionId = _mintOnHook(localHook, alice, 0, 500, 1e22);
 
     _warpFromHookStart(localHook, MARKET_LENGTH / 2);
     _swapOnHook(localHook, localPoolKey, bob, int256(1e18), true, NO_TICK_LIMIT);
@@ -2769,12 +2868,6 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 }
 
 contract _BeforeSwap is FixedFeeSwapMarketTest {
-  using FixedPointMathLib for int256;
-
-  PoolKey internal poolKey;
-  SwapParams internal defaultSwapParams;
-  uint24 internal constant TEST_FEE_RATE = 3000; // 0.30%
-
   function setUp() public virtual override {
     super.setUp();
 
@@ -2796,128 +2889,10 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     _mintLiquidityAtTicks(alice, 0, 2000, 1e22);
   }
 
-  // ============ Helper Functions ============
-
-  function _encodeHookParams(int256 amountIn, bool principalForCash, int24 tickLimit)
-    internal
-    pure
-    returns (bytes memory)
-  {
-    return abi.encode(amountIn, principalForCash, tickLimit);
-  }
-
-  function _swap(address sender, int256 amountIn, bool principalForCash, int24 tickLimit)
-    internal
-    returns (bytes4, BeforeSwapDelta, uint24)
-  {
-    bytes memory hookParams = _encodeHookParams(amountIn, principalForCash, tickLimit);
-    return hook.exposed_beforeSwap(sender, poolKey, defaultSwapParams, hookParams);
-  }
-
-  function _deployHookForBeforeSwapTests(uint24 feeRate, string memory managerLabel)
-    internal
-    returns (FixedFeeSwapMarketHarness localHook, PoolKey memory localPoolKey)
-  {
-    uint256 currentTimestamp = block.timestamp;
-    vm.warp(1);
-
-    localHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH,
-      address(token0),
-      address(token1),
-      feeRate,
-      YIELD_PER_TICK,
-      IPoolManager(makeAddr(managerLabel)),
-      0
-    );
-
-    uint256 resumeTimestamp = currentTimestamp > 1 days ? currentTimestamp : 1 days + 1;
-    vm.warp(resumeTimestamp);
-
-    localPoolKey = PoolKey({
-      currency0: Currency.wrap(address(token0)),
-      currency1: Currency.wrap(address(token1)),
-      fee: 0,
-      tickSpacing: 1,
-      hooks: IHooks(address(localHook))
-    });
-
-    vm.startPrank(alice);
-    token0.approve(address(localHook), type(uint256).max);
-    token1.approve(address(localHook), type(uint256).max);
-    vm.stopPrank();
-
-    vm.startPrank(bob);
-    token0.approve(address(localHook), type(uint256).max);
-    token1.approve(address(localHook), type(uint256).max);
-    vm.stopPrank();
-  }
-
-  function _swapOnHook(
-    FixedFeeSwapMarketHarness localHook,
-    PoolKey memory localPoolKey,
-    address sender,
-    int256 amountIn,
-    bool principalForCash,
-    int24 tickLimit
-  ) internal {
-    bytes memory hookParams = _encodeHookParams(amountIn, principalForCash, tickLimit);
-    localHook.exposed_beforeSwap(sender, localPoolKey, defaultSwapParams, hookParams);
-  }
-
-  function _mintOnHook(
-    FixedFeeSwapMarketHarness localHook,
-    address user,
-    int24 tickLower,
-    int24 tickUpper,
-    uint128 liquidity
-  ) internal returns (bytes32 positionId) {
-    vm.prank(user);
-    localHook.mintLiquidity(tickLower, tickUpper, liquidity, type(uint256).max, type(uint256).max);
-    positionId = keccak256(abi.encodePacked(tickUpper, tickLower, user));
-  }
-
-  function _measurePrincipalForCashSwap(
-    FixedFeeSwapMarketHarness localHook,
-    PoolKey memory localPoolKey,
-    uint256 amountIn
-  ) internal returns (uint256 inputConsumed, uint256 outputReceived) {
-    uint256 balance0Before = token0.balanceOf(bob);
-    uint256 balance1Before = token1.balanceOf(bob);
-    _swapOnHook(localHook, localPoolKey, bob, int256(amountIn), true, NO_TICK_LIMIT);
-    inputConsumed = balance0Before - token0.balanceOf(bob);
-    outputReceived = token1.balanceOf(bob) - balance1Before;
-  }
-
-  function _ptForOneBip() internal view returns (uint256) {
-    return uint256(hook.getActiveLiquidity()) / BIPS;
-  }
-
-  function _initializePrice() internal returns (int256) {
-    if (hook.getCurrentPrice() != 0) return hook.getCurrentPrice();
-
-    _swap(bob, 1, true, hook.getCurrentTick());
-
-    int256 price = hook.getCurrentPrice();
-    assertTrue(price > 0, "Price must be initialized");
-    return price;
-  }
-
-  function _assertApproxEqRelBps(uint256 a, uint256 b, uint256 toleranceBps, string memory err)
-    internal
-    pure
-  {
-    if (a == 0 && b == 0) return;
-    uint256 diff = a > b ? a - b : b - a;
-    uint256 maxVal = a > b ? a : b;
-    uint256 maxDiff = (maxVal * toleranceBps) / BIPS;
-    assertTrue(diff <= maxDiff, err);
-  }
-
   // ============ Token Transfer Tests ============
 
   /// @dev Principal for cash: user sends TOKEN0, receives TOKEN1
-  function testFuzz_PrincipalForCash_TransfersCorrectTokens(uint256 amountIn) public {
+  function testFuzz_PrincipalForCashSwapTransfersCorrectTokens(uint256 amountIn) public {
     amountIn = _boundSwapAmount(amountIn);
 
     uint256 balance0Before = token0.balanceOf(bob);
@@ -2931,115 +2906,101 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     uint256 consumed = balance0Before - token0.balanceOf(bob);
     vm.assume(consumed > 0);
 
-    assertGt(token1.balanceOf(bob), balance1Before, "User should receive TOKEN1");
-    assertGt(token0.balanceOf(address(hook)), hookBalance0Before, "Hook should receive TOKEN0");
-    assertLe(token1.balanceOf(address(hook)), hookBalance1Before, "Hook should send TOKEN1 or same");
+    uint256 received = token1.balanceOf(bob) - balance1Before;
+    uint256 hookGained0 = token0.balanceOf(address(hook)) - hookBalance0Before;
+    uint256 hookLost1 = hookBalance1Before - token1.balanceOf(address(hook));
+
+    // User sends token0, receives token1
+    assertGt(received, 0, "User should receive TOKEN1");
+    assertLe(consumed, amountIn, "Consumed should not exceed amountIn");
+
+    // Token conservation: what the user sends is what the hook receives and vice versa
+    assertEq(consumed, hookGained0, "Hook TOKEN0 gain should equal user TOKEN0 spent");
+    assertEq(received, hookLost1, "Hook TOKEN1 loss should equal user TOKEN1 received");
   }
 
   /// @dev Cash for principal: user sends TOKEN1, receives TOKEN0
-  function testFuzz_CashForPrincipal_TransfersCorrectTokens(uint256 amountIn) public {
+  function testFuzz_CashForPrincipalSwapTransfersCorrectTokens(uint256 amountIn) public {
     amountIn = _boundSwapAmount(amountIn);
 
     uint256 balance0Before = token0.balanceOf(bob);
     uint256 balance1Before = token1.balanceOf(bob);
+    uint256 hookBalance0Before = token0.balanceOf(address(hook));
+    uint256 hookBalance1Before = token1.balanceOf(address(hook));
 
     _swap(bob, int256(amountIn), false, NO_TICK_LIMIT);
 
     // Sub-tick swaps may produce zero output; skip those runs
-    vm.assume(token0.balanceOf(bob) > balance0Before);
+    uint256 received = token0.balanceOf(bob) - balance0Before;
+    vm.assume(received > 0);
 
-    assertLt(token1.balanceOf(bob), balance1Before, "User should send TOKEN1");
-  }
+    uint256 consumed = balance1Before - token1.balanceOf(bob);
+    uint256 hookGained1 = token1.balanceOf(address(hook)) - hookBalance1Before;
+    uint256 hookLost0 = hookBalance0Before - token0.balanceOf(address(hook));
 
-  /// @dev Token conservation: no tokens created or destroyed in either direction.
-  function testFuzz_TokenConservation_IsMaintainedInBothDirections(
-    uint256 amountIn,
-    bool principalForCash
-  ) public {
-    amountIn = _boundSwapAmount(amountIn);
-
-    uint256 totalSupply0Before =
-      token0.balanceOf(alice) + token0.balanceOf(bob) + token0.balanceOf(address(hook));
-    uint256 totalSupply1Before =
-      token1.balanceOf(alice) + token1.balanceOf(bob) + token1.balanceOf(address(hook));
-
-    _swap(bob, int256(amountIn), principalForCash, NO_TICK_LIMIT);
-
-    uint256 totalSupply0After =
-      token0.balanceOf(alice) + token0.balanceOf(bob) + token0.balanceOf(address(hook));
-    uint256 totalSupply1After =
-      token1.balanceOf(alice) + token1.balanceOf(bob) + token1.balanceOf(address(hook));
-
-    assertEq(totalSupply0After, totalSupply0Before, "TOKEN0 supply should be conserved");
-    assertEq(totalSupply1After, totalSupply1Before, "TOKEN1 supply should be conserved");
-  }
-
-  /// @dev Input consumed never exceeds amountSpecified in either direction.
-  function testFuzz_InputConsumed_DoesNotExceedAmountSpecified(
-    uint256 amountIn,
-    bool principalForCash
-  ) public {
-    amountIn = _boundSwapAmount(amountIn);
-
-    uint256 balanceBefore = principalForCash ? token0.balanceOf(bob) : token1.balanceOf(bob);
-
-    _swap(bob, int256(amountIn), principalForCash, NO_TICK_LIMIT);
-
-    uint256 balanceAfter = principalForCash ? token0.balanceOf(bob) : token1.balanceOf(bob);
-    uint256 consumed = balanceBefore - balanceAfter;
-    // Sub-tick swaps may return zero due to integer-tick snapping
-    vm.assume(consumed > 0);
+    // User sends token1, receives token0
+    assertGt(consumed, 0, "User should send TOKEN1");
     assertLe(consumed, amountIn, "Consumed should not exceed amountIn");
+
+    // Token conservation: what the user sends is what the hook receives and vice versa
+    assertEq(consumed, hookGained1, "Hook TOKEN1 gain should equal user TOKEN1 spent");
+    assertEq(received, hookLost0, "Hook TOKEN0 loss should equal user TOKEN0 received");
+  }
+
+  /// @dev Zero-output swaps are no-ops: no balances change for user or hook.
+  function testFuzz_SmallAmountInCausesNoOpSwap(uint256 amountIn, bool principalForCash) public {
+    amountIn = _boundSwapAmount(amountIn);
+
+    uint256 balance0Before = token0.balanceOf(bob);
+    uint256 balance1Before = token1.balanceOf(bob);
+    uint256 hookBalance0Before = token0.balanceOf(address(hook));
+    uint256 hookBalance1Before = token1.balanceOf(address(hook));
+
+    _swap(bob, int256(amountIn), principalForCash, NO_TICK_LIMIT);
+
+    uint256 outputToken = principalForCash ? token1.balanceOf(bob) - balance1Before : token0.balanceOf(bob) - balance0Before;
+    vm.assume(outputToken == 0);
+
+    assertEq(token0.balanceOf(bob), balance0Before, "User TOKEN0 should be unchanged");
+    assertEq(token1.balanceOf(bob), balance1Before, "User TOKEN1 should be unchanged");
+    assertEq(token0.balanceOf(address(hook)), hookBalance0Before, "Hook TOKEN0 should be unchanged");
+    assertEq(token1.balanceOf(address(hook)), hookBalance1Before, "Hook TOKEN1 should be unchanged");
   }
 
   // ============ State Update Tests ============
 
-  /// @dev currentTick moves in the expected direction and by a bounded amount.
-  function testFuzz_CurrentTickMovesInExpectedDirection(uint256 amountIn, bool principalForCash)
-    public
-  {
+  function testFuzz_PrincipalForCashSwapIncreasesCurrentTick(uint256 amountIn) public {
     amountIn = _boundSwapAmount(amountIn);
 
     int24 tickBefore = hook.getCurrentTick();
     uint128 activeLiq = hook.getActiveLiquidity();
 
-    _swap(bob, int256(amountIn), principalForCash, NO_TICK_LIMIT);
+    _swap(bob, int256(amountIn), true, NO_TICK_LIMIT);
 
     int24 tickAfter = hook.getCurrentTick();
-    // Magnitude bound: tick should not move more than amountIn * BIPS / activeLiquidity + 2
-    int24 maxTickMove = int24(int256(amountIn * BIPS / uint256(activeLiq))) + 2;
+    int24 maxTickMove = _maxTickMove(amountIn, activeLiq);
 
-    if (principalForCash) {
-      assertGe(tickAfter, tickBefore, "Tick should increase for principal->cash");
-      assertLe(tickAfter - tickBefore, maxTickMove, "Tick should not move more than expected");
-      return;
-    }
+    assertGe(tickAfter, tickBefore, "Tick should increase for principal->cash");
+    assertLe(tickAfter - tickBefore, maxTickMove, "Tick should not move more than expected");
+  }
+
+  function testFuzz_CashForPrincipalSwapDecreasesCurrentTick(uint256 amountIn) public {
+    amountIn = _boundSwapAmount(amountIn);
+
+    int24 tickBefore = hook.getCurrentTick();
+    uint128 activeLiq = hook.getActiveLiquidity();
+
+    _swap(bob, int256(amountIn), false, NO_TICK_LIMIT);
+
+    int24 tickAfter = hook.getCurrentTick();
+    int24 maxTickMove = _maxTickMove(amountIn, activeLiq);
 
     assertLe(tickAfter, tickBefore, "Tick should decrease for cash->principal");
     assertLe(tickBefore - tickAfter, maxTickMove, "Tick should not move more than expected");
   }
 
-  /// @dev currentPrice moves in the expected direction in both directions.
-  function testFuzz_CurrentPriceMovesInExpectedDirection(uint256 amountIn, bool principalForCash)
-    public
-  {
-    amountIn = _boundSwapAmount(amountIn);
-
-    // Use tick-derived price to avoid stale stored price from different timestamps.
-    int256 priceBefore = hook.tickToPrice(hook.getCurrentTick());
-
-    _swap(bob, int256(amountIn), principalForCash, NO_TICK_LIMIT);
-
-    int256 priceAfter = hook.getCurrentPrice();
-    if (principalForCash) {
-      assertLe(priceAfter, priceBefore, "Price should decrease for principal->cash");
-      return;
-    }
-    assertGe(priceAfter, priceBefore, "Price should increase for cash->principal");
-  }
-
   /// @dev Active liquidity unchanged when not crossing ticks
-  function testFuzz_WithinTickSwap_DoesNotUpdateActiveLiquidity(uint256 amountIn) public {
+  function testFuzz_WithinTickSwapDoesNotUpdateActiveLiquidity(uint256 amountIn) public {
     // Use small amount to stay within current tick range
     amountIn = bound(amountIn, 1e15, 1e17);
 
@@ -3053,65 +3014,84 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertEq(activeAfter, activeBefore, "Active liquidity unchanged within tick");
   }
 
-  // Within-tick sub-bip tests removed: with integer-tick snapping, sub-bip swaps
-  // produce zero output by design. This is correct AMM behavior — the small surplus
-  // stays in the contract as a rounding buffer for solvency.
-
   // ============ Tick Crossing Tests ============
 
-  /// @dev Crossing tick updates active liquidity
-  function test_CrossingTickUpdatesActiveLiquidity() public {
-    // Setup: narrow position that we'll cross out of
-    uint128 narrowLiquidity = 1e21;
+  function testFuzz_PrincipalForCashSwapCrossingLpUpperTickAndDecreasesActiveLiquidity(uint128 narrowLiquidity)
+    public
+  {
+    narrowLiquidity = uint128(bound(uint256(narrowLiquidity), 1e18, 1e22));
     int24 currentTick = hook.getCurrentTick();
-    _mintLiquidityAtTicks(alice, currentTick - 10, currentTick + 10, narrowLiquidity);
+    int24 narrowUpper = currentTick + 10;
+    _mintLiquidityAtTicks(alice, currentTick - 10, narrowUpper, narrowLiquidity);
 
     uint128 activeBefore = hook.getActiveLiquidity();
-    uint256 swapAmount = uint256(activeBefore) * 11 / BIPS; // > 10 ticks worth of principal
-    _swap(bob, int256(swapAmount), true, NO_TICK_LIMIT);
+    int256 priceBefore = hook.tickToPrice(currentTick);
 
-    assertGe(int256(hook.getCurrentTick()), int256(currentTick + 10), "Should cross upper tick");
-    assertLt(
-      uint256(hook.getActiveLiquidity()), uint256(activeBefore), "Active liquidity should decrease"
+    (uint256 principalInToBoundary,, int256 boundaryPrice, int24 stepTick) =
+      hook.exposed_getCashSwapAmount(int256(1e36), priceBefore, narrowUpper);
+
+    _swap(bob, int256(principalInToBoundary), true, NO_TICK_LIMIT);
+
+    assertEq(stepTick, narrowUpper, "Should step to upper tick");
+    assertEq(hook.getCurrentTick(), narrowUpper, "Should land on the upper tick");
+    assertEq(hook.getCurrentPrice(), boundaryPrice, "Price should move to boundary price");
+    assertEq(
+      uint256(hook.getActiveLiquidity()),
+      uint256(activeBefore) - uint256(narrowLiquidity),
+      "Active liquidity should decrease by narrow position's liquidity"
     );
   }
 
-  /// @dev Multiple positions at different tick ranges
-  function test_MultipleTickCrossings() public {
-    // Setup positions at multiple tick ranges
+  function testFuzz_PrincipalForCashSwapCrossingIntoLpPositionIncreasesActiveLiquidity(uint128 aboveLiquidity)
+    public
+  {
+    aboveLiquidity = uint128(bound(uint256(aboveLiquidity), 1e18, 1e22));
     int24 currentTick = hook.getCurrentTick();
-    _mintLiquidityAtTicks(alice, 0, currentTick, 1e20);
-    _mintLiquidityAtTicks(alice, currentTick, currentTick + 200, 1e20);
-    _mintLiquidityAtTicks(alice, currentTick + 200, currentTick + 300, 1e20);
+    int24 aboveLower = currentTick + 50;
+    _mintLiquidityAtTicks(alice, aboveLower, currentTick + 150, aboveLiquidity);
 
-    int24 tickBefore = hook.getCurrentTick();
+    uint128 activeBefore = hook.getActiveLiquidity();
+    int256 priceBefore = hook.tickToPrice(currentTick);
 
-    // Move far enough to cross multiple initialized ticks in this word.
-    uint256 swapAmount = uint256(hook.getActiveLiquidity()) * 400 / BIPS;
+    (uint256 principalInToBoundary,, int256 boundaryPrice, int24 stepTick) =
+      hook.exposed_getCashSwapAmount(int256(1e36), priceBefore, aboveLower);
+
+    _swap(bob, int256(principalInToBoundary), true, NO_TICK_LIMIT);
+
+    assertEq(stepTick, aboveLower, "Should step to lower tick of above position");
+    assertEq(hook.getCurrentTick(), aboveLower, "Should land on the lower tick");
+    assertEq(hook.getCurrentPrice(), boundaryPrice, "Price should move to boundary price");
+    assertEq(
+      uint256(hook.getActiveLiquidity()),
+      uint256(activeBefore) + uint256(aboveLiquidity),
+      "Active liquidity should increase by above position's liquidity"
+    );
+  }
+
+  function testFuzz_PrincipalForCashWithMultipleTickCrossings(uint128 posLiquidity) public {
+    posLiquidity = uint128(bound(uint256(posLiquidity), 1e18, 1e22));
+    int24 currentTick = hook.getCurrentTick();
+
+    // Two adjacent positions: A at [current, current+100], B at [current+100, current+200]
+    // A's lower tick == currentTick so A is already in-range at mint time
+    _mintLiquidityAtTicks(alice, currentTick, currentTick + 100, posLiquidity);
+    _mintLiquidityAtTicks(alice, currentTick + 100, currentTick + 200, posLiquidity);
+
+    uint128 activeBefore = hook.getActiveLiquidity();
+
+    // Need > 200 ticks of movement; use 300 to comfortably overshoot
+    uint256 swapAmount = uint256(activeBefore) * 300 / BIPS;
     _swap(bob, int256(swapAmount), true, NO_TICK_LIMIT);
 
     int24 tickAfter = hook.getCurrentTick();
-    assertGt(int256(tickAfter), int256(tickBefore), "Tick should increase");
-    assertGe(int256(tickAfter), int256(currentTick + 200), "Should cross upper positions");
-  }
-
-  /// @dev Swap into position from below increases active liquidity
-  function test_CrossingIntoPositionIncreasesLiquidity() public {
-    // Create position above current tick
-    int24 currentTick = hook.getCurrentTick();
-    _mintLiquidityAtTicks(alice, currentTick + 50, currentTick + 150, 1e20);
-
-    uint128 activeBefore = hook.getActiveLiquidity();
-
-    // Cross into the position by crossing its lower tick.
-    uint256 swapAmount = uint256(activeBefore) * 60 / BIPS;
-    _swap(bob, int256(swapAmount), true, NO_TICK_LIMIT);
-
-    assertGe(
-      int256(hook.getCurrentTick()), int256(currentTick + 50), "Should cross into the new position"
-    );
-    assertGt(
-      uint256(hook.getActiveLiquidity()), uint256(activeBefore), "Active liquidity should increase"
+    assertGe(tickAfter, currentTick + 200, "Should cross both upper ticks");
+    // Crossing currentTick+100: upper of A (-posLiq), lower of B (+posLiq) → net 0
+    // Crossing currentTick+200: upper of B (-posLiq) → net -posLiq
+    // Total change from activeBefore: -posLiquidity
+    assertEq(
+      uint256(hook.getActiveLiquidity()),
+      uint256(activeBefore) - uint256(posLiquidity),
+      "Active liquidity should decrease by one position's liquidity"
     );
   }
 
@@ -3692,14 +3672,14 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
   function test_FeeRateIsSet_OnFeeHook() public {
     (FixedFeeSwapMarketHarness feeHook,) =
-      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "feeRateHookManager");
+      _deployHookForBeforeSwapTests(LP_FEE_RATE, "feeRateHookManager");
 
-    assertEq(feeHook.FEE_RATE(), TEST_FEE_RATE);
+    assertEq(feeHook.FEE_RATE(), LP_FEE_RATE);
   }
 
   function test_InitialFeeGrowthIsZero_OnFeeHook() public {
     (FixedFeeSwapMarketHarness feeHook,) =
-      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "initialFeeGrowthManager");
+      _deployHookForBeforeSwapTests(LP_FEE_RATE, "initialFeeGrowthManager");
 
     assertEq(feeHook.feeGrowthGlobal0X128(), 0);
     assertEq(feeHook.feeGrowthGlobal1X128(), 0);
@@ -3708,7 +3688,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
   function testFuzz_PrincipalForCashSwapAccumulatesToken0FeeGrowth(uint256 amountIn) public {
     amountIn = bound(amountIn, 1e17, 1e18);
     (FixedFeeSwapMarketHarness feeHook, PoolKey memory feePoolKey) =
-      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "feeGrowth0Manager");
+      _deployHookForBeforeSwapTests(LP_FEE_RATE, "feeGrowth0Manager");
     _mintOnHook(feeHook, alice, 0, 200, 1e20);
 
     uint256 feeGrowth0Before = feeHook.feeGrowthGlobal0X128();
@@ -3722,7 +3702,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     amountIn = bound(amountIn, 1e16, 5e17);
 
     (FixedFeeSwapMarketHarness feeHook, PoolKey memory feePoolKey) =
-      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "feeOutputManager");
+      _deployHookForBeforeSwapTests(LP_FEE_RATE, "feeOutputManager");
     (FixedFeeSwapMarketHarness noFeeHook, PoolKey memory noFeePoolKey) =
       _deployHookForBeforeSwapTests(0, "noFeeOutputManager");
 
@@ -3753,7 +3733,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     amountIn = bound(amountIn, 1e17, 2e17);
 
     (FixedFeeSwapMarketHarness feeHook, PoolKey memory feePoolKey) =
-      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "collectFeeManager");
+      _deployHookForBeforeSwapTests(LP_FEE_RATE, "collectFeeManager");
     bytes32 positionId = _mintOnHook(feeHook, alice, 0, 300, 1e20);
 
     for (uint256 i = 0; i < swapCount; i++) {
@@ -3772,7 +3752,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
   function test_RevertWhen_NonOwnerCollectsFees_OnFeeHook() public {
     (FixedFeeSwapMarketHarness feeHook,) =
-      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "notOwnerCollectManager");
+      _deployHookForBeforeSwapTests(LP_FEE_RATE, "notOwnerCollectManager");
     bytes32 positionId = _mintOnHook(feeHook, alice, 0, 200, 1e20);
 
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__NotPositionOwner.selector);
@@ -3787,7 +3767,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     amountIn = bound(amountIn, 5e16, 2e17);
 
     (FixedFeeSwapMarketHarness feeHook, PoolKey memory feePoolKey) =
-      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "feeSplitManager");
+      _deployHookForBeforeSwapTests(LP_FEE_RATE, "feeSplitManager");
 
     bytes32 alicePositionId = _mintOnHook(feeHook, alice, 0, 300, 2e20);
     bytes32 bobPositionId = _mintOnHook(feeHook, bob, 0, 300, 1e20);
@@ -3819,7 +3799,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     amountIn = bound(amountIn, 5e16, 1e17);
 
     (FixedFeeSwapMarketHarness feeHook, PoolKey memory feePoolKey) =
-      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "outOfRangeFeeManager");
+      _deployHookForBeforeSwapTests(LP_FEE_RATE, "outOfRangeFeeManager");
 
     bytes32 alicePositionId = _mintOnHook(feeHook, alice, 0, 300, 1e20);
     bytes32 bobPositionId = _mintOnHook(feeHook, bob, 500, 600, 1e20);
@@ -3852,7 +3832,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     additionalLiquidity = uint128(bound(uint256(additionalLiquidity), 1e18, 1e20));
 
     (FixedFeeSwapMarketHarness feeHook, PoolKey memory feePoolKey) =
-      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "increaseFeeManager");
+      _deployHookForBeforeSwapTests(LP_FEE_RATE, "increaseFeeManager");
     bytes32 positionId = _mintOnHook(feeHook, alice, 0, 200, 1e20);
 
     _swapOnHook(feeHook, feePoolKey, bob, int256(amountIn), true, NO_TICK_LIMIT);
@@ -3880,7 +3860,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     amountIn = bound(amountIn, 1e17, 2e17);
 
     (FixedFeeSwapMarketHarness feeHook, PoolKey memory feePoolKey) =
-      _deployHookForBeforeSwapTests(TEST_FEE_RATE, "reAddFeeManager");
+      _deployHookForBeforeSwapTests(LP_FEE_RATE, "reAddFeeManager");
     _mintOnHook(feeHook, bob, 0, 300, 2e20);
     bytes32 alicePositionId = _mintOnHook(feeHook, alice, 0, 300, 1e20);
 
@@ -3943,10 +3923,8 @@ contract _BeforeRemoveLiquidity is FixedFeeSwapMarketTest {
 }
 
 contract CollectFees is FixedFeeSwapMarketTest {
-  uint24 public constant TEST_FEE_RATE = 3000;
   FixedFeeSwapMarketHarness public feeHook;
   PoolKey internal feePoolKey;
-  SwapParams internal defaultSwapParams;
 
   function setUp() public override {
     super.setUp();
@@ -3956,7 +3934,7 @@ contract CollectFees is FixedFeeSwapMarketTest {
       MARKET_LENGTH,
       address(token0),
       address(token1),
-      TEST_FEE_RATE,
+      LP_FEE_RATE,
       YIELD_PER_TICK,
       IPoolManager(_mockManager),
       0
@@ -4113,9 +4091,6 @@ contract CollectFees is FixedFeeSwapMarketTest {
 // ============================================================================
 
 contract LiquidityGap is FixedFeeSwapMarketTest {
-  PoolKey internal poolKey;
-  SwapParams internal defaultSwapParams;
-
   function setUp() public override {
     super.setUp();
     poolKey = PoolKey({
@@ -4126,13 +4101,6 @@ contract LiquidityGap is FixedFeeSwapMarketTest {
       hooks: IHooks(address(hook))
     });
     defaultSwapParams = SwapParams({zeroForOne: true, amountSpecified: -1e18, sqrtPriceLimitX96: 0});
-  }
-
-  function _swap(address _sender, int256 _amountIn, bool _principalForCash, int24 _tickLimit)
-    internal
-  {
-    bytes memory _hookParams = abi.encode(_amountIn, _principalForCash, _tickLimit);
-    hook.exposed_beforeSwap(_sender, poolKey, defaultSwapParams, _hookParams);
   }
 
   /// @dev Swap PT->Cash across contiguous positions: A at [0, 100], B at [100, 300]
