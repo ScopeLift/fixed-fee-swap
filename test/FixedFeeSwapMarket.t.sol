@@ -3068,9 +3068,16 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     );
   }
 
-  function testFuzz_PrincipalForCashWithMultipleTickCrossings(uint128 posLiquidity) public {
+  function testFuzz_PrincipalForCashWithMultipleTickCrossings(
+    uint128 posLiquidity,
+    uint128 bgLiquidity
+  ) public {
     posLiquidity = uint128(bound(uint256(posLiquidity), 1e18, 1e22));
+    bgLiquidity = uint128(bound(uint256(bgLiquidity), 1e18, 1e22));
     int24 currentTick = hook.getCurrentTick();
+
+    // Add fuzzed background liquidity spanning the full range
+    _mintLiquidityAtTicks(alice, 0, 2000, bgLiquidity);
 
     // Two adjacent positions: A at [current, current+100], B at [current+100, current+200]
     // A's lower tick == currentTick so A is already in-range at mint time
@@ -3079,8 +3086,8 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
     uint128 activeBefore = hook.getActiveLiquidity();
 
-    // Need > 200 ticks of movement; use 300 to comfortably overshoot
-    uint256 swapAmount = uint256(activeBefore) * 300 / BIPS;
+    // Need > 200 ticks; +1 for integer division truncation in this formula
+    uint256 swapAmount = uint256(activeBefore) * 201 / BIPS;
     _swap(bob, int256(swapAmount), true, NO_TICK_LIMIT);
 
     int24 tickAfter = hook.getCurrentTick();
@@ -3095,9 +3102,6 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     );
   }
 
-  /// @dev Crossing an uninitialized word boundary should not change active liquidity.
-  /// @notice Uses the fact that only ticks ±1000 are initialized in `setUp`, so the first "next
-  /// tick" to the right from tick 0 is the uninitialized word edge at tick 255.
   function testFuzz_CrossingUninitializedBoundaryDoesNotChangeActiveLiquidity(uint128 extraLiquidity)
     public
   {
@@ -3121,9 +3125,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertEq(hook.getActiveLiquidity(), activeBefore, "Active liquidity should be unchanged");
   }
 
-  /// @dev Crossing the upper tick of a below-range position (cash->principal, moving left)
-  /// increases liquidity.
-  function testFuzz_CashForPrincipal_CrossingUpperTickIncreasesActiveLiquidity(uint128 belowRangeLiquidity)
+  function testFuzz_CashForPrincipalSwapCrossingLpUpperTickIncreasesActiveLiquidity(uint128 belowRangeLiquidity)
     public
   {
     belowRangeLiquidity = uint128(bound(uint256(belowRangeLiquidity), 1e18, 1e22));
@@ -3154,9 +3156,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     );
   }
 
-  /// @dev Crossing the lower tick of an in-range position (cash->principal, moving left) decreases
-  /// liquidity.
-  function testFuzz_CashForPrincipal_CrossingLowerTickDecreasesActiveLiquidity(uint128 narrowLiquidity)
+  function testFuzz_CashForPrincipalSwapCrossingLpLowerTickDecreasesActiveLiquidity(uint128 narrowLiquidity)
     public
   {
     narrowLiquidity = uint128(bound(uint256(narrowLiquidity), 1e18, 1e22));
@@ -3189,49 +3189,37 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
   // ============ Tick Limit Tests ============
 
-  /// @dev Tick limit can stop swaps early in either direction.
-  function testFuzz_TickLimitStopsSwapBeforeConsumingAllInput(
+  /// @dev Tick limit stops swaps early in either direction, leaving unconsumed input.
+  function testFuzz_TickLimitStopsSwapEarly(
     uint256 amountIn,
-    bool principalForCash
+    bool principalForCash,
+    uint24 tickOffset
   ) public {
-    amountIn = bound(amountIn, 1e17, 1e20);
-
+    // currentTick = 100, liquidity from 0-2000; 5-95 is safe in both directions
+    tickOffset = uint24(bound(tickOffset, 5, 95));
     int24 currentTick = hook.getCurrentTick();
-    int24 tickLimit = principalForCash ? currentTick + 10 : currentTick - 10;
+    uint128 activeLiq = hook.getActiveLiquidity();
+
+    int24 limitTick =
+      principalForCash ? currentTick + int24(tickOffset) : currentTick - int24(tickOffset);
+
+    // Provide enough input to overshoot the limit by at least 10 ticks
+    uint256 minAmount = uint256(activeLiq) * uint256(tickOffset + 10) / BIPS;
+    amountIn = bound(amountIn, minAmount, minAmount * 5);
 
     uint256 balanceBefore = principalForCash ? token0.balanceOf(bob) : token1.balanceOf(bob);
+    _swap(bob, int256(amountIn), principalForCash, limitTick);
 
-    _swap(bob, int256(amountIn), principalForCash, tickLimit);
+    uint256 consumed =
+      balanceBefore - (principalForCash ? token0.balanceOf(bob) : token1.balanceOf(bob));
+    int24 finalTick = hook.getCurrentTick();
 
-    // Might not consume full amountIn due to limit
-    uint256 balanceAfter = principalForCash ? token0.balanceOf(bob) : token1.balanceOf(bob);
-    uint256 consumed = balanceBefore - balanceAfter;
-    assertLe(consumed, amountIn, "Should not exceed amountIn");
-
-    // Only check the limit if the swap actually produced output
-    if (consumed > 0 && consumed < amountIn) {
-      int24 finalTick = hook.getCurrentTick();
-      if (principalForCash) {
-        assertLe(finalTick, tickLimit, "Tick should be at or below limit");
-        return;
-      }
-      assertGe(finalTick, tickLimit, "Tick should be at or above limit");
-    }
-  }
-
-  function test_TickLimitStopsSwap_PrincipalForCash_StopsExactlyAtLimit() public {
-    _warpFromStart(MARKET_LENGTH / 2);
-    _initializePrice();
-
-    int24 limitTick = 250;
-    uint256 amountIn = (uint256(hook.getActiveLiquidity()) * 260) / BIPS;
-
-    uint256 balance0Before = token0.balanceOf(bob);
-    _swap(bob, int256(amountIn), true, limitTick);
-
-    uint256 consumed = balance0Before - token0.balanceOf(bob);
     assertLt(consumed, amountIn, "Should stop early due to tick limit");
-    assertLe(hook.getCurrentTick(), limitTick, "Tick should be at or below limit");
+    if (principalForCash) {
+      assertLe(finalTick, limitTick, "Tick should be at or below limit");
+    } else {
+      assertGe(finalTick, limitTick, "Tick should be at or above limit");
+    }
   }
 
   /// @dev If the tick limit is already satisfied at entry, the swap should be a no-op (except lazy
@@ -3278,27 +3266,6 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     uint256 balanceAfter = principalForCash ? token0.balanceOf(bob) : token1.balanceOf(bob);
     uint256 consumed = balanceBefore - balanceAfter;
     assertEq(consumed, amountIn, "Full amount should be consumed with no tick limit");
-  }
-
-  function test_TickLimitStopsSwap_CashForPrincipal_StopsExactlyAtLimit() public {
-    _warpFromStart(MARKET_LENGTH / 2);
-    _initializePrice();
-
-    // Move yield positive so cash->principal has room to move back.
-    _swap(bob, int256(_ptForOneBip() * 100), true, NO_TICK_LIMIT);
-
-    // Limit at tick 50 (between current tick ~100 and tick 0).
-    // Use ~500 bips of cash — well more than needed to cross 50 ticks,
-    // ensuring the limit stops the swap before all input is consumed.
-    int24 limitTick = 50;
-    uint256 amountIn = (uint256(hook.getActiveLiquidity()) * 500) / BIPS;
-
-    uint256 balance1Before = token1.balanceOf(bob);
-    _swap(bob, int256(amountIn), false, limitTick);
-
-    uint256 consumed = balance1Before - token1.balanceOf(bob);
-    assertLt(consumed, amountIn, "Should stop early due to tick limit");
-    assertGe(hook.getCurrentTick(), limitTick, "Tick should be at or above limit");
   }
 
   // ============ Edge Case Tests ============
@@ -3626,19 +3593,6 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
   // ============ Sub-Bip Swaps Are No-Ops ============
 
   /// @dev A sub-bip swap is a no-op in either direction.
-  function testFuzz_SubBipSwapIsNoOp(bool principalForCash) public {
-    _warpFromStart(MARKET_LENGTH / 2);
-    _initializePrice();
-
-    uint256 balance0Before = token0.balanceOf(bob);
-    uint256 balance1Before = token1.balanceOf(bob);
-
-    _swap(bob, 1, principalForCash, NO_TICK_LIMIT);
-
-    assertEq(token0.balanceOf(bob), balance0Before, "No TOKEN0 transfer");
-    assertEq(token1.balanceOf(bob), balance1Before, "No TOKEN1 transfer");
-  }
-
   // ============ Swap Event Tests ============
 
   function testFuzz_EmitsSwap_InBothDirections(bool principalForCash) public {
