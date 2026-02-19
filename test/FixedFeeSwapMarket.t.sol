@@ -444,6 +444,12 @@ abstract contract FixedFeeSwapMarketTest is Test {
     return int24(int256(amountIn * BIPS / uint256(activeLiquidity))) + 2;
   }
 
+  /// @notice Minimum input required to move the tick by a given number of ticks.
+  /// @dev Inverse of `_maxTickMove`. Each tick consumes ~activeLiquidity/BIPS of input.
+  function _minInputForTicks(uint24 ticks) internal view returns (uint256) {
+    return _ptForOneBip() * uint256(ticks);
+  }
+
   function _assertApproxEqRelBps(uint256 a, uint256 b, uint256 toleranceBps, string memory err)
     internal
     pure
@@ -3189,48 +3195,69 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
   // ============ Tick Limit Tests ============
 
-  /// @dev Tick limit stops swaps early in either direction, leaving unconsumed input.
-  function testFuzz_TickLimitStopsSwapEarly(
-    uint256 amountIn,
-    bool principalForCash,
-    uint24 tickOffset
-  ) public {
-    // currentTick = 100, liquidity from 0-2000; 5-95 is safe in both directions
+  function testFuzz_PrincipalForCashSwapHitsTickLimitAndStopsEarly(uint256 amountIn, uint24 tickOffset)
+    public
+  {
     tickOffset = uint24(bound(tickOffset, 5, 95));
     int24 currentTick = hook.getCurrentTick();
-    uint128 activeLiq = hook.getActiveLiquidity();
+    int24 limitTick = currentTick + int24(tickOffset);
 
-    int24 limitTick =
-      principalForCash ? currentTick + int24(tickOffset) : currentTick - int24(tickOffset);
-
-    // Provide enough input to overshoot the limit by at least 10 ticks
-    uint256 minAmount = uint256(activeLiq) * uint256(tickOffset + 10) / BIPS;
+    uint256 minAmount = _minInputForTicks(tickOffset + 10);
     amountIn = bound(amountIn, minAmount, minAmount * 5);
 
-    uint256 balanceBefore = principalForCash ? token0.balanceOf(bob) : token1.balanceOf(bob);
-    _swap(bob, int256(amountIn), principalForCash, limitTick);
+    uint256 balance0Before = token0.balanceOf(bob);
+    uint256 balance1Before = token1.balanceOf(bob);
+    uint256 hookBalance0Before = token0.balanceOf(address(hook));
+    uint256 hookBalance1Before = token1.balanceOf(address(hook));
 
-    uint256 consumed =
-      balanceBefore - (principalForCash ? token0.balanceOf(bob) : token1.balanceOf(bob));
-    int24 finalTick = hook.getCurrentTick();
+    _swap(bob, int256(amountIn), true, limitTick);
+
+    uint256 consumed = balance0Before - token0.balanceOf(bob);
+    uint256 received = token1.balanceOf(bob) - balance1Before;
+    uint256 hookGained0 = token0.balanceOf(address(hook)) - hookBalance0Before;
+    uint256 hookLost1 = hookBalance1Before - token1.balanceOf(address(hook));
 
     assertLt(consumed, amountIn, "Should stop early due to tick limit");
-    if (principalForCash) {
-      assertLe(finalTick, limitTick, "Tick should be at or below limit");
-    } else {
-      assertGe(finalTick, limitTick, "Tick should be at or above limit");
-    }
+    assertEq(hook.getCurrentTick(), limitTick, "Tick should stop exactly at limit");
+    assertEq(consumed, hookGained0, "Hook TOKEN0 gain should equal user TOKEN0 spent");
+    assertEq(received, hookLost1, "Hook TOKEN1 loss should equal user TOKEN1 received");
   }
 
-  /// @dev If the tick limit is already satisfied at entry, the swap should be a no-op (except lazy
-  /// price init).
-  function testFuzz_TickLimitAlreadySatisfied_ReturnsNoOp(uint256 amountIn, bool principalForCash)
+  function testFuzz_CashForPrincipalSwapHitsTickLimitStopsEarly(uint256 amountIn, uint24 tickOffset)
+    public
+  {
+    tickOffset = uint24(bound(tickOffset, 5, 95));
+    int24 currentTick = hook.getCurrentTick();
+    int24 limitTick = currentTick - int24(tickOffset);
+
+    uint256 minAmount = _minInputForTicks(tickOffset + 10);
+    amountIn = bound(amountIn, minAmount, minAmount * 5);
+
+    uint256 balance0Before = token0.balanceOf(bob);
+    uint256 balance1Before = token1.balanceOf(bob);
+    uint256 hookBalance0Before = token0.balanceOf(address(hook));
+    uint256 hookBalance1Before = token1.balanceOf(address(hook));
+
+    _swap(bob, int256(amountIn), false, limitTick);
+
+    uint256 consumed = balance1Before - token1.balanceOf(bob);
+    uint256 received = token0.balanceOf(bob) - balance0Before;
+    uint256 hookGained1 = token1.balanceOf(address(hook)) - hookBalance1Before;
+    uint256 hookLost0 = hookBalance0Before - token0.balanceOf(address(hook));
+
+    assertLt(consumed, amountIn, "Should stop early due to tick limit");
+    assertEq(hook.getCurrentTick(), limitTick, "Tick should stop exactly at limit");
+    assertEq(consumed, hookGained1, "Hook TOKEN1 gain should equal user TOKEN1 spent");
+    assertEq(received, hookLost0, "Hook TOKEN0 loss should equal user TOKEN0 received");
+  }
+
+  function testFuzz_UsingTheCurrentTickAsTheLimitIsANoOp(uint256 amountIn, bool principalForCash)
     public
   {
     amountIn = _boundSwapAmount(amountIn);
-    int24 tickBefore = hook.getCurrentTick();
+    int24 currentTick = hook.getCurrentTick();
     uint128 activeBefore = hook.getActiveLiquidity();
-    int256 expectedPrice = hook.tickToPrice(tickBefore);
+    int256 expectedPrice = hook.tickToPrice(currentTick);
 
     uint256 balance0Before = token0.balanceOf(bob);
     uint256 balance1Before = token1.balanceOf(bob);
@@ -3238,13 +3265,13 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     uint256 hookBalance1Before = token1.balanceOf(address(hook));
 
     (bytes4 selector, BeforeSwapDelta delta, uint24 fee) =
-      _swap(bob, int256(amountIn), principalForCash, tickBefore);
+      _swap(bob, int256(amountIn), principalForCash, currentTick);
 
     assertEq(selector, BaseHook.beforeSwap.selector, "Selector");
     assertEq(BeforeSwapDelta.unwrap(delta), 0, "Delta");
     assertEq(fee, 0, "Fee");
 
-    assertEq(hook.getCurrentTick(), tickBefore, "Tick unchanged");
+    assertEq(hook.getCurrentTick(), currentTick, "Tick unchanged");
     assertEq(hook.getActiveLiquidity(), activeBefore, "Liquidity unchanged");
     assertEq(hook.getCurrentPrice(), expectedPrice, "Price initialized");
 
@@ -3254,19 +3281,33 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertEq(token1.balanceOf(address(hook)), hookBalance1Before, "Hook TOKEN1 unchanged");
   }
 
-  /// @dev NO_TICK_LIMIT allows consuming all input in both directions.
-  function testFuzz_NoTickLimitConsumesEntireInput(uint256 amountIn, bool principalForCash) public {
-    // Use amounts large enough to always move a tick (2 bips covers exp/ln rounding)
-    amountIn = bound(amountIn, _ptForOneBip() * 2, 100e18);
 
-    uint256 balanceBefore = principalForCash ? token0.balanceOf(bob) : token1.balanceOf(bob);
+  function testFuzz_PrincipalForCashSwapWithNoTickLimit(uint256 amountIn) public {
+    // 2 bips minimum covers exp/ln rounding. _moveTickTo(100) creates a position from 0-600
+    // (activeLiq 2e22), and setUp adds another from 0-2000 (total 2e22 up to tick 600, then 1e22).
+    // Cap at 500 ticks so input is consumed before the liquidity drop at tick 600, since
+    // _minInputForTicks assumes constant liquidity.
+    amountIn = bound(amountIn, _ptForOneBip() * 2, _minInputForTicks(500));
 
-    _swap(bob, int256(amountIn), principalForCash, NO_TICK_LIMIT);
+    uint256 balanceBefore = token0.balanceOf(bob);
+    _swap(bob, int256(amountIn), true, NO_TICK_LIMIT);
 
-    uint256 balanceAfter = principalForCash ? token0.balanceOf(bob) : token1.balanceOf(bob);
-    uint256 consumed = balanceBefore - balanceAfter;
+    uint256 consumed = balanceBefore - token0.balanceOf(bob);
     assertEq(consumed, amountIn, "Full amount should be consumed with no tick limit");
   }
+
+  function testFuzz_CashForPrincipalSwapWithNoTickLimit(uint256 amountIn) public {
+    // 2 bips minimum covers exp/ln rounding. Cash→PT moves tick down from 100; liquidity ends at
+    // tick 0 so cap at 95 ticks to stay within range.
+    amountIn = bound(amountIn, _ptForOneBip() * 2, _minInputForTicks(95));
+
+    uint256 balanceBefore = token1.balanceOf(bob);
+    _swap(bob, int256(amountIn), false, NO_TICK_LIMIT);
+
+    uint256 consumed = balanceBefore - token1.balanceOf(bob);
+    assertEq(consumed, amountIn, "Full amount should be consumed with no tick limit");
+  }
+
 
   // ============ Edge Case Tests ============
 
