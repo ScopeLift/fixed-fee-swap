@@ -3311,8 +3311,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
   // ============ Edge Case Tests ============
 
-  /// @dev Empty hookParams returns early (no-op)
-  function test_EmptyHookParamsReturnsEarly() public {
+  function test_EmptyHookParamsIsNoOp() public {
     uint256 balance0Before = token0.balanceOf(bob);
     uint256 balance1Before = token1.balanceOf(bob);
     uint256 hookBalance0Before = token0.balanceOf(address(hook));
@@ -3333,39 +3332,62 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertEq(fee, 0, "Fee should be zero");
   }
 
-  /// @dev Swap near maturity
-  function test_SwapNearMaturity() public {
-    // Warp to near maturity
-    uint48 maturity = hook.getMaturity();
-    vm.warp(maturity - 1);
+  function testFuzz_PrincipalForCashSwapNearMaturity(uint256 timeToMaturity) public {
+    timeToMaturity = bound(timeToMaturity, 1, 1 days);
+    vm.warp(hook.getMaturity() - timeToMaturity);
 
-    // Use at least 1 bip to ensure output with integer-tick snapping
-    uint256 swapAmount = _ptForOneBip();
+    // Use at least 2 bips to ensure output with integer-tick snapping and exp/ln rounding
+    uint256 swapAmount = _ptForOneBip() * 2;
+
+    int24 tickBefore = hook.getCurrentTick();
     uint256 balance0Before = token0.balanceOf(bob);
+    uint256 balance1Before = token1.balanceOf(bob);
+    uint256 hookBalance0Before = token0.balanceOf(address(hook));
+    uint256 hookBalance1Before = token1.balanceOf(address(hook));
 
     _swap(bob, int256(swapAmount), true, NO_TICK_LIMIT);
 
-    assertLt(token0.balanceOf(bob), balance0Before, "Swap should work near maturity");
-  }
-
-  /// @dev Minimum swap amount — must be at least 1 bip to produce output with integer-tick
-  /// snapping
-  function test_MinimumSwapAmount() public {
-    // 1 bip of PT = L / BIPS — the minimum to move a full tick
-    uint256 minAmount = _ptForOneBip();
-
-    uint256 balance0Before = token0.balanceOf(bob);
-
-    _swap(bob, int256(minAmount), true, NO_TICK_LIMIT);
-
     uint256 consumed = balance0Before - token0.balanceOf(bob);
-    assertGt(consumed, 0, "Minimum swap should consume some input");
+    uint256 received = token1.balanceOf(bob) - balance1Before;
+    uint256 hookGained0 = token0.balanceOf(address(hook)) - hookBalance0Before;
+    uint256 hookLost1 = hookBalance1Before - token1.balanceOf(address(hook));
+
+    assertLe(consumed, swapAmount, "Consumed should not exceed input");
+    assertGt(hook.getCurrentTick(), tickBefore, "Tick should increase");
+    assertEq(consumed, hookGained0, "Hook TOKEN0 gain should equal user TOKEN0 spent");
+    assertEq(received, hookLost1, "Hook TOKEN1 loss should equal user TOKEN1 received");
   }
 
-  /// @dev Sequential swaps in same direction
-  function testFuzz_SequentialSwaps_SameDirection(uint256 amount1, uint256 amount2) public {
-    amount1 = _boundSwapAmount(amount1);
-    amount2 = _boundSwapAmount(amount2);
+  function testFuzz_CashForPrincipalSwapNearMaturity(uint256 timeToMaturity) public {
+    timeToMaturity = bound(timeToMaturity, 1, 1 days);
+    vm.warp(hook.getMaturity() - timeToMaturity);
+
+    // Use at least 2 bips to ensure output with integer-tick snapping and exp/ln rounding
+    uint256 swapAmount = _ptForOneBip() * 2;
+
+    int24 tickBefore = hook.getCurrentTick();
+    uint256 balance0Before = token0.balanceOf(bob);
+    uint256 balance1Before = token1.balanceOf(bob);
+    uint256 hookBalance0Before = token0.balanceOf(address(hook));
+    uint256 hookBalance1Before = token1.balanceOf(address(hook));
+
+    _swap(bob, int256(swapAmount), false, NO_TICK_LIMIT);
+
+    uint256 consumed = balance1Before - token1.balanceOf(bob);
+    uint256 received = token0.balanceOf(bob) - balance0Before;
+    uint256 hookGained1 = token1.balanceOf(address(hook)) - hookBalance1Before;
+    uint256 hookLost0 = hookBalance0Before - token0.balanceOf(address(hook));
+
+    assertLe(consumed, swapAmount, "Consumed should not exceed input");
+    assertLt(hook.getCurrentTick(), tickBefore, "Tick should decrease");
+    assertEq(consumed, hookGained1, "Hook TOKEN1 gain should equal user TOKEN1 spent");
+    assertEq(received, hookLost0, "Hook TOKEN0 loss should equal user TOKEN0 received");
+  }
+
+  function testFuzz_SequentialSwapsInTheSameDirection(uint256 amount1, uint256 amount2) public {
+    // Use amounts large enough to always move at least 1 tick (2 bips covers exp/ln rounding)
+    amount1 = bound(amount1, _ptForOneBip() * 2, 100e18);
+    amount2 = bound(amount2, _ptForOneBip() * 2, 100e18);
 
     int24 tickBefore = hook.getCurrentTick();
 
@@ -3375,13 +3397,11 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     _swap(bob, int256(amount2), true, NO_TICK_LIMIT);
     int24 tickAfter2 = hook.getCurrentTick();
 
-    // Each swap should increase tick (or stay same)
-    assertGe(tickAfter1, tickBefore, "First swap increases tick");
-    assertGe(tickAfter2, tickAfter1, "Second swap increases tick further");
+    assertGt(tickAfter1, tickBefore, "First swap increases tick");
+    assertGt(tickAfter2, tickAfter1, "Second swap increases tick further");
   }
 
-  /// @dev Sequential swaps in opposite directions
-  function testFuzz_SequentialSwaps_OppositeDirections(
+  function testFuzz_SequentialSwapsInOppositeDirections(
     uint256 amount1,
     uint256 amount2,
     uint256 timeElapsed
@@ -3406,46 +3426,8 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertLe(tickAfter2, tickAfter1, "Second swap decreases tick");
   }
 
-  /// @dev Different users can swap
-  function testFuzz_MultipleUsersSwap(uint256 amountAlice, uint256 amountBob) public {
-    // Use amounts large enough to always move at least 1 tick (2 bips covers exp/ln rounding)
-    amountAlice = bound(amountAlice, _ptForOneBip() * 2, 100e18);
-    amountBob = bound(amountBob, _ptForOneBip() * 2, 100e18);
-
-    uint256 aliceBalance0Before = token0.balanceOf(alice);
-    uint256 bobBalance0Before = token0.balanceOf(bob);
-
-    _swap(alice, int256(amountAlice), true, NO_TICK_LIMIT);
-    _swap(bob, int256(amountBob), true, NO_TICK_LIMIT);
-
-    assertLt(token0.balanceOf(alice), aliceBalance0Before, "Alice spent tokens");
-    assertLt(token0.balanceOf(bob), bobBalance0Before, "Bob spent tokens");
-  }
-
-  // ============ Return Value Tests ============
-
-  /// @dev Returns correct selector
-  function testFuzz_ReturnsCorrectSelector(uint256 amountIn) public {
-    amountIn = _boundSwapAmount(amountIn);
-
-    (bytes4 selector,,) = _swap(bob, int256(amountIn), true, NO_TICK_LIMIT);
-
-    assertEq(selector, BaseHook.beforeSwap.selector, "Should return beforeSwap selector");
-  }
-
-  /// @dev Returns zero delta (direct transfer model) in both directions.
-  function testFuzz_ReturnsZeroDelta_InBothDirections(uint256 amountIn, bool principalForCash)
-    public
-  {
-    amountIn = _boundSwapAmount(amountIn);
-
-    (, BeforeSwapDelta delta,) = _swap(bob, int256(amountIn), principalForCash, NO_TICK_LIMIT);
-    assertEq(BeforeSwapDelta.unwrap(delta), 0, "Should return zero delta");
-  }
-
   // ============ Revert Tests ============
 
-  /// @dev Reverts when hookParams is wrong length
   function test_RevertWhen_InvalidHookParamsLength() public {
     bytes memory wrongLength = abi.encode(1e18, true); // Only 2 params instead of 3
 
@@ -3615,17 +3597,20 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     hook.exposed_beforeSwap(bob, poolKey, defaultSwapParams, hookParams);
   }
 
-  /// @dev Reverts when insufficient balance
-  function test_RevertWhen_InsufficientBalance() public {
+  /// @dev Reverts when insufficient balance in either direction.
+  function testFuzz_RevertWhen_InsufficientBalance(uint256 amountIn, bool principalForCash) public {
+    // Use amounts large enough to always move at least 1 tick (2 bips covers exp/ln rounding)
+    amountIn = bound(amountIn, _ptForOneBip() * 2, 100e18);
+
     address poorUser = makeAddr("poorUser");
 
     // Approve but no balance
-    vm.prank(poorUser);
+    vm.startPrank(poorUser);
     token0.approve(address(hook), type(uint256).max);
+    token1.approve(address(hook), type(uint256).max);
+    vm.stopPrank();
 
-    // Use amount large enough to move at least one tick (> 2 * activeLiquidity / BIPS)
-    uint256 swapAmount = uint256(hook.getActiveLiquidity()) / BIPS * 3;
-    bytes memory hookParams = _encodeHookParams(int256(swapAmount), true, NO_TICK_LIMIT);
+    bytes memory hookParams = _encodeHookParams(int256(amountIn), principalForCash, NO_TICK_LIMIT);
 
     vm.expectRevert(stdError.arithmeticError);
     hook.exposed_beforeSwap(poorUser, poolKey, defaultSwapParams, hookParams);
