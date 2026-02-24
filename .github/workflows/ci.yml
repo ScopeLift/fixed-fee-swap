@@ -86,6 +86,8 @@ jobs:
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: 1.6.0-nightly
 
       - name: Install scopelint
         uses: engineerd/configurator@v0.0.8
