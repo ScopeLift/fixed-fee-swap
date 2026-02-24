@@ -101,7 +101,7 @@ jobs:
       - name: Check formatting
         run: |
           scopelint --version
-          scopelint check
+          FOUNDRY_DISABLE_NIGHTLY_WARNING=1 scopelint check
 
   # slither-analyze:
   #   runs-on: ubuntu-latest
