@@ -4097,20 +4097,18 @@ contract LiquidityGap is FixedFeeSwapMarketTest {
   }
 
   /// @dev Swap PT->Cash across contiguous positions: A at [0, 100], B at [100, 300]
-  function test_SwapAcrossContiguousPositions_PrincipalForCash() public {
+  function testFuzz_SwapAcrossContiguousPositions_PrincipalForCash(uint128 _liqA, uint128 _liqB) public {
+    _liqA = _boundLiquidity(_liqA);
+    _liqB = _boundLiquidity(_liqB);
     _warpFromStart(1);
-
-    uint128 _liqA = 1e22;
-    uint128 _liqB = 1e22;
 
     // Position A: [0, 100], Position B: [100, 300] (contiguous, B is wider)
     _mintLiquidityAtTicks(alice, 0, 100, _liqA);
     _mintLiquidityAtTicks(bob, 100, 300, _liqB);
 
-    // Swap enough to cross from A into B but not exhaust B (use price limit)
-    // 100 bips exhausts A, add 10 bips into B
+    // Swap enough to cross from A into B (price limit at 150 caps traversal)
+    // 100 bips exhausts A, 110 gives margin to enter B
     uint256 _swapAmount = uint256(_liqA) * 110 / BIPS;
-
     _swap(alice, int256(_swapAmount), true, int24(150));
 
     int24 _currentTick = hook.getCurrentTick();
@@ -4121,24 +4119,23 @@ contract LiquidityGap is FixedFeeSwapMarketTest {
   }
 
   /// @dev Swap Cash->PT across contiguous positions (reverse direction)
-  function test_SwapAcrossContiguousPositions_CashForPrincipal() public {
+  function testFuzz_SwapAcrossContiguousPositions_CashForPrincipal(uint128 _liqA, uint128 _liqB) public {
+    _liqA = _boundLiquidity(_liqA);
+    _liqB = _boundLiquidity(_liqB);
     _warpFromStart(1);
-
-    uint128 _liqA = 1e22;
-    uint128 _liqB = 1e22;
 
     // Position A: [0, 100], Position B: [100, 300]
     _mintLiquidityAtTicks(alice, 0, 100, _liqA);
     _mintLiquidityAtTicks(bob, 100, 300, _liqB);
 
-    // First, move tick into middle of Position B's range (use price limit at tick 150)
-    uint256 _pushAmount = uint256(_liqA) * 200 / BIPS;
+    // Push tick well into B's range: exhaust A's 100 ticks + 20 ticks into B (price limit at 150)
+    uint256 _pushAmount = uint256(_liqA) * 100 / BIPS + uint256(_liqB) * 20 / BIPS;
     _swap(alice, int256(_pushAmount), true, int24(150));
-    assertGe(hook.getCurrentTick(), 100, "Should be in B's range after push");
+    assertGt(hook.getCurrentTick(), 100, "Should be past boundary into B's range after push");
 
-    // Now swap cash->principal to go back into A (use tick limit at tick 50)
-    uint256 _swapAmount = uint256(_liqB) * 200 / BIPS;
-    _swap(alice, int256(_swapAmount), false, int24(50));
+    // Swap cash->principal back into A: enough for B's ticks + A's ticks (tick limit at 50)
+    uint256 _reverseAmount = uint256(_liqB) * 20 / BIPS + uint256(_liqA) * 100 / BIPS;
+    _swap(alice, int256(_reverseAmount), false, int24(50));
 
     int24 _currentTick = hook.getCurrentTick();
     assertLe(_currentTick, 100, "Tick should be back in Position A's range");
@@ -4146,14 +4143,14 @@ contract LiquidityGap is FixedFeeSwapMarketTest {
   }
 
   /// @dev Swap reverts when trying to continue past the only position's range (gap beyond)
-  function test_SwapRevertsAtGapBoundary_PrincipalForCash() public {
+  function testFuzz_SwapRevertsAtGapBoundary_PrincipalForCash(uint128 _liq) public {
+    _liq = _boundLiquidity(_liq);
     _warpFromStart(1);
 
-    // Only Position A exists at [0, 100], gap beyond tick 100
-    uint128 _liqA = 1e22;
-    _mintLiquidityAtTicks(alice, 0, 100, _liqA);
+    // Only position at [0, 100], gap beyond tick 100
+    _mintLiquidityAtTicks(alice, 0, 100, _liq);
 
-    // Compute exact amount to exhaust A's range
+    // Compute exact amount to exhaust the range
     int256 _priceAtStart = hook.tickToPrice(hook.getCurrentTick());
     (uint256 _principalToBoundary,,,) =
       hook.exposed_getCashSwapAmount(int256(1e36), _priceAtStart, 100);
@@ -4164,11 +4161,11 @@ contract LiquidityGap is FixedFeeSwapMarketTest {
   }
 
   /// @dev Swap reverts when liquidity is exhausted going cash->principal past lower tick
-  function test_SwapRevertsAtGapBoundary_CashForPrincipal() public {
+  function testFuzz_SwapRevertsAtGapBoundary_CashForPrincipal(uint128 _liq) public {
+    _liq = _boundLiquidity(_liq);
     _warpFromStart(1);
 
     // Position at [0, 100] — starts in range at tick 0
-    uint128 _liq = 1e22;
     _mintLiquidityAtTicks(alice, 0, 100, _liq);
 
     // Push tick positive into the range so cash->principal has room to move left
