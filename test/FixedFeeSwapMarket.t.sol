@@ -450,6 +450,26 @@ abstract contract FixedFeeSwapMarketTest is Test {
     return _ptForOneBip() * uint256(ticks);
   }
 
+  /// @notice Expected fee growth (Q128-scaled) for a given consumed amount and active liquidity.
+  /// @dev fee ≈ consumed * FEE_RATE / FEE_DENOMINATOR; growth = fee * Q128 / liquidity.
+  function _expectedFeeGrowth(uint256 _consumed, uint128 _liquidity) internal pure returns (uint256) {
+    uint256 _fee = _consumed * LP_FEE_RATE / 1_000_000;
+    return _fee * (1 << 128) / uint256(_liquidity);
+  }
+
+  /// @notice Max fee growth rounding error from per-step accumulation across tick crossings.
+  /// @dev The contract accumulates fee growth per tick step, each independently rounding the fee
+  ///      (mulDivUp, +1 wei) and the Q128-scaled growth (mulDiv, -1 unit). Combined this introduces
+  ///      up to (Q128 / liquidity + 1) of error per tick crossed. For typical values (1e20 liquidity,
+  ///      100 ticks) the tolerance is ~3.4e20 in Q128 units — about 1e-13 relative to expected growth.
+  function _feeGrowthRoundingTolerance(uint256 _amountIn, uint128 _liquidity)
+    internal
+    pure
+    returns (uint256)
+  {
+    return uint256(int256(_maxTickMove(_amountIn, _liquidity))) * ((1 << 128) / uint256(_liquidity) + 1);
+  }
+
   function _assertApproxEqRelBps(uint256 a, uint256 b, uint256 toleranceBps, string memory err)
     internal
     pure
@@ -3646,44 +3666,51 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
   // ============ LP Fee Tests ============
 
-  function test_FeeRateIsSet_OnFeeHook() public {
+  function testFuzz_FeeRateIsSetAndInitialFeeGrowthIsZero(uint24 _feeRate) public {
+    _feeRate = uint24(bound(uint256(_feeRate), 0, 999_999));
     (FixedFeeSwapMarketHarness feeHook,) =
-      _deployHookForBeforeSwapTests(LP_FEE_RATE, "feeRateHookManager");
+      _deployHookForBeforeSwapTests(_feeRate, "feeRateHookManager");
 
-    assertEq(feeHook.FEE_RATE(), LP_FEE_RATE);
-  }
-
-  function test_InitialFeeGrowthIsZero_OnFeeHook() public {
-    (FixedFeeSwapMarketHarness feeHook,) =
-      _deployHookForBeforeSwapTests(LP_FEE_RATE, "initialFeeGrowthManager");
-
+    assertEq(feeHook.FEE_RATE(), _feeRate);
     assertEq(feeHook.feeGrowthGlobal0X128(), 0);
     assertEq(feeHook.feeGrowthGlobal1X128(), 0);
   }
 
   function testFuzz_PrincipalForCashSwapAccumulatesToken0FeeGrowth(uint256 amountIn) public {
-    amountIn = bound(amountIn, 1e17, 1e18);
+    uint128 _liquidity = 1e23;
+    amountIn = bound(amountIn, 2e19, 2e21);
     (FixedFeeSwapMarketHarness feeHook, PoolKey memory feePoolKey) =
       _deployHookForBeforeSwapTests(LP_FEE_RATE, "feeGrowth0Manager");
-    _mintOnHook(feeHook, alice, 0, 200, 1e20);
+    _mintOnHook(feeHook, alice, 0, 200, _liquidity);
 
-    uint256 feeGrowth0Before = feeHook.feeGrowthGlobal0X128();
+    uint256 _balance0Before = token0.balanceOf(bob);
     _swapOnHook(feeHook, feePoolKey, bob, int256(amountIn), true, NO_TICK_LIMIT);
-    uint256 feeGrowth0After = feeHook.feeGrowthGlobal0X128();
+    uint256 _consumed = _balance0Before - token0.balanceOf(bob);
 
-    assertGt(feeGrowth0After, feeGrowth0Before, "Fee growth for TOKEN0 should increase");
+    // Per-step rounding (mulDivUp for fee, mulDiv for growth) introduces error bounded by
+    // ~(Q128 / liquidity + 1) per tick crossed. Use maxTickMove as an upper bound on tick count.
+    uint256 _expected = _expectedFeeGrowth(_consumed, _liquidity);
+    uint256 _feeGrowth0 = feeHook.feeGrowthGlobal0X128();
+
+    assertApproxEqAbs(
+      _feeGrowth0,
+      _expected,
+      _feeGrowthRoundingTolerance(amountIn, _liquidity),
+      "Fee growth should match expected"
+    );
   }
 
   function testFuzz_SwapWithFeesDoesNotIncreaseOutputComparedToNoFee(uint256 amountIn) public {
-    amountIn = bound(amountIn, 1e16, 5e17);
+    uint128 _liquidity = 1e23;
+    amountIn = bound(amountIn, 2e19, 2e21);
 
     (FixedFeeSwapMarketHarness feeHook, PoolKey memory feePoolKey) =
       _deployHookForBeforeSwapTests(LP_FEE_RATE, "feeOutputManager");
     (FixedFeeSwapMarketHarness noFeeHook, PoolKey memory noFeePoolKey) =
       _deployHookForBeforeSwapTests(0, "noFeeOutputManager");
 
-    _mintOnHook(feeHook, alice, 0, 200, 1e20);
-    _mintOnHook(noFeeHook, alice, 0, 200, 1e20);
+    _mintOnHook(feeHook, alice, 0, 200, _liquidity);
+    _mintOnHook(noFeeHook, alice, 0, 200, _liquidity);
 
     uint256 feeGrowth0Before = feeHook.feeGrowthGlobal0X128();
     (uint256 inputWithFee, uint256 outputWithFee) =
@@ -3695,7 +3722,6 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     (uint256 inputNoFee, uint256 outputNoFee) =
       _measurePrincipalForCashSwap(noFeeHook, noFeePoolKey, amountIn);
 
-    vm.assume(outputWithFee > 0 && outputNoFee > 0);
     assertLe(outputWithFee, outputNoFee, "Output should not increase with fees");
     assertApproxEqAbs(inputWithFee, inputNoFee, 1, "Consumed input should match within 1 wei");
     assertLe(inputWithFee, amountIn, "Consumed input should never exceed amountIn");
@@ -3726,15 +3752,6 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertEq(aliceToken0After - aliceToken0Before, collected0, "Balance increase should match fees");
   }
 
-  function test_RevertWhen_NonOwnerCollectsFees_OnFeeHook() public {
-    (FixedFeeSwapMarketHarness feeHook,) =
-      _deployHookForBeforeSwapTests(LP_FEE_RATE, "notOwnerCollectManager");
-    bytes32 positionId = _mintOnHook(feeHook, alice, 0, 200, 1e20);
-
-    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__NotPositionOwner.selector);
-    vm.prank(bob);
-    feeHook.collectFees(positionId, bob, 0, 0);
-  }
 
   function testFuzz_FeeCollectionScalesWithLiquidityShare(uint8 swapCount, uint256 amountIn)
     public
@@ -3860,6 +3877,17 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
     assertEq(fees0, 0, "Re-added liquidity should not backfill TOKEN0 fees");
     assertEq(fees1, 0, "Re-added liquidity should not backfill TOKEN1 fees");
+  }
+
+  function testFuzz_RevertIf_NonOwnerCollectsFees(address _caller) public {
+    vm.assume(_caller != alice && _caller != address(0));
+    (FixedFeeSwapMarketHarness feeHook,) =
+      _deployHookForBeforeSwapTests(LP_FEE_RATE, "notOwnerCollectManager");
+    bytes32 positionId = _mintOnHook(feeHook, alice, 0, 200, 1e20);
+
+    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwap__NotPositionOwner.selector);
+    vm.prank(_caller);
+    feeHook.collectFees(positionId, _caller, 0, 0);
   }
 }
 
