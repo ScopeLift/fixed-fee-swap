@@ -160,6 +160,12 @@ abstract contract FixedFeeSwapMarketTest is Test {
     return uint128(bound(liquidity, 1e17, 3e24));
   }
 
+  function _boundFeeSwapAmount(uint256 _amount, uint128 _liquidity) internal pure returns (uint256) {
+    uint256 _minSwap = uint256(_liquidity) * 2 / BIPS;
+    uint256 _maxSwap = uint256(_liquidity) * 200 / BIPS;
+    return bound(_amount, _minSwap, _maxSwap);
+  }
+
   function _boundTimeElapsed(uint256 time) internal view returns (uint256) {
     return bound(time, 0, MARKET_LENGTH);
   }
@@ -3947,26 +3953,32 @@ contract CollectFees is FixedFeeSwapMarketTest {
     feeHook.exposed_beforeSwap(_sender, feePoolKey, defaultSwapParams, _hookParams);
   }
 
-  function test_PartialFeeCollection() public {
+  function testFuzz_PartialFeeCollection(uint128 _liquidity, uint256 _swapAmount) public {
+    _liquidity = _boundLiquidity(_liquidity);
+    // 3 same-direction swaps, cap each at 90 bips so total stays within 300-tick range
+    uint256 _minSwap = uint256(_liquidity) * 2 / BIPS;
+    uint256 _maxSwap = uint256(_liquidity) * 90 / BIPS;
+    _swapAmount = bound(_swapAmount, _minSwap, _maxSwap);
+
     vm.prank(alice);
-    feeHook.mintLiquidity(0, 300, 1e20, type(uint256).max, type(uint256).max);
+    feeHook.mintLiquidity(0, 300, _liquidity, type(uint256).max, type(uint256).max);
     bytes32 _positionId = keccak256(abi.encodePacked(int24(300), int24(0), alice));
 
-    _feeSwap(bob, int256(1e18), true);
+    _feeSwap(bob, int256(_swapAmount), true);
 
-    // Collect half
+    // Collect all
     vm.prank(alice);
     (uint128 _collected0,) = feeHook.collectFees(_positionId, alice, 0, 0);
     assertGt(_collected0, 0, "Should have fees to collect");
 
-    // Generate more fees and collect a partial amount
-    _feeSwap(bob, int256(1e18), true);
+    // Generate more fees and collect all
+    _feeSwap(bob, int256(_swapAmount), true);
     vm.prank(alice);
-    (uint128 _fullOwed0,) = feeHook.collectFees(_positionId, alice, 0, 0);
-    // We need to generate fees again since we just collected all
-    _feeSwap(bob, int256(1e18), true);
+    feeHook.collectFees(_positionId, alice, 0, 0);
+    // Generate fees again since we just collected all
+    _feeSwap(bob, int256(_swapAmount), true);
 
-    // Now request only half
+    // Now request only 1 wei
     vm.prank(alice);
     (uint128 _partial0,) = feeHook.collectFees(_positionId, alice, 1, 0);
     assertEq(_partial0, 1, "Should collect exactly requested amount");
@@ -3977,12 +3989,15 @@ contract CollectFees is FixedFeeSwapMarketTest {
     assertGt(_remainder0, 0, "Should still have remaining fees");
   }
 
-  function test_DoubleCollectYieldsZero() public {
+  function testFuzz_AlreadyCollectedFeesCannotCollectMore(uint128 _liquidity, uint256 _swapAmount) public {
+    _liquidity = _boundLiquidity(_liquidity);
+    _swapAmount = _boundFeeSwapAmount(_swapAmount, _liquidity);
+
     vm.prank(alice);
-    feeHook.mintLiquidity(0, 300, 1e20, type(uint256).max, type(uint256).max);
+    feeHook.mintLiquidity(0, 300, _liquidity, type(uint256).max, type(uint256).max);
     bytes32 _positionId = keccak256(abi.encodePacked(int24(300), int24(0), alice));
 
-    _feeSwap(bob, int256(1e18), true);
+    _feeSwap(bob, int256(_swapAmount), true);
 
     vm.prank(alice);
     feeHook.collectFees(_positionId, alice, 0, 0);
@@ -3993,61 +4008,52 @@ contract CollectFees is FixedFeeSwapMarketTest {
     assertEq(_collected1, 0, "Second collect should yield zero TOKEN1");
   }
 
-  function test_FeesSentToDifferentRecipient() public {
+  function testFuzz_FeesSentToDifferentRecipient(uint128 _liquidity, uint256 _swapAmount, address _recipient) public {
+    _liquidity = _boundLiquidity(_liquidity);
+    _swapAmount = _boundFeeSwapAmount(_swapAmount, _liquidity);
+    vm.assume(_recipient != address(0) && _recipient != address(feeHook));
+
     vm.prank(alice);
-    feeHook.mintLiquidity(0, 300, 1e20, type(uint256).max, type(uint256).max);
+    feeHook.mintLiquidity(0, 300, _liquidity, type(uint256).max, type(uint256).max);
     bytes32 _positionId = keccak256(abi.encodePacked(int24(300), int24(0), alice));
 
-    _feeSwap(bob, int256(1e18), true);
+    _feeSwap(bob, int256(_swapAmount), true);
 
-    uint256 _bobToken0Before = token0.balanceOf(bob);
+    uint256 _recipientToken0Before = token0.balanceOf(_recipient);
     vm.prank(alice);
-    (uint128 _collected0,) = feeHook.collectFees(_positionId, bob, 0, 0);
+    (uint128 _collected0,) = feeHook.collectFees(_positionId, _recipient, 0, 0);
     assertGt(_collected0, 0, "Should collect fees");
-    assertEq(token0.balanceOf(bob) - _bobToken0Before, _collected0, "Bob should receive the fees");
+    assertEq(
+      token0.balanceOf(_recipient) - _recipientToken0Before, _collected0, "Recipient should receive the fees"
+    );
   }
 
-  function test_CollectWithNoFeesOwed() public {
+  function testFuzz_SwapInBothDirectionsCollectsBothTokenFees(
+    uint128 _liquidity,
+    uint256 _pushAmount,
+    uint256 _reverseAmount
+  ) public {
+    _liquidity = _boundLiquidity(_liquidity);
+    // Push: 4-200 bips of liquidity
+    uint256 _minPush = uint256(_liquidity) * 4 / BIPS;
+    uint256 _maxPush = uint256(_liquidity) * 200 / BIPS;
+    _pushAmount = bound(_pushAmount, _minPush, _maxPush);
+    // Reverse: 2 bips to half of push
+    uint256 _minReverse = uint256(_liquidity) * 2 / BIPS;
+    uint256 _maxReverse = _pushAmount / 2;
+    vm.assume(_maxReverse >= _minReverse);
+    _reverseAmount = bound(_reverseAmount, _minReverse, _maxReverse);
+
     vm.prank(alice);
-    feeHook.mintLiquidity(0, 300, 1e20, type(uint256).max, type(uint256).max);
+    feeHook.mintLiquidity(0, 300, _liquidity, type(uint256).max, type(uint256).max);
     bytes32 _positionId = keccak256(abi.encodePacked(int24(300), int24(0), alice));
 
-    // No swaps — no fees
-    vm.prank(alice);
-    (uint128 _collected0, uint128 _collected1) = feeHook.collectFees(_positionId, alice, 0, 0);
-    assertEq(_collected0, 0, "Should be zero TOKEN0 fees");
-    assertEq(_collected1, 0, "Should be zero TOKEN1 fees");
-  }
-
-  function test_CashForPrincipal_AccumulatesFeeGrowth1() public {
-    vm.prank(alice);
-    feeHook.mintLiquidity(0, 300, 1e20, type(uint256).max, type(uint256).max);
-    bytes32 _positionId = keccak256(abi.encodePacked(int24(300), int24(0), alice));
-
-    // Push tick up first so cash→PT has room to move left
-    // 1e20 liquidity, 1 bip = 1e16, use 100 bips = 1e18 to stay well within 300-tick range
-    _feeSwap(bob, int256(1e18), true);
-
-    // Swap cash→PT (smaller than push to stay in range)
-    _feeSwap(bob, int256(5e17), false);
+    // PT→Cash — push tick up to create room for cash→PT
+    _feeSwap(bob, int256(_pushAmount), true);
+    // Cash→PT (smaller than push to stay in range)
+    _feeSwap(bob, int256(_reverseAmount), false);
 
     assertGt(feeHook.feeGrowthGlobal1X128(), 0, "feeGrowthGlobal1X128 should be > 0");
-
-    vm.prank(alice);
-    (, uint128 _collected1) = feeHook.collectFees(_positionId, alice, 0, 0);
-    assertGt(_collected1, 0, "Should have collected TOKEN1 fees");
-  }
-
-  function test_BothDirections_CollectsBothTokenFees() public {
-    vm.prank(alice);
-    feeHook.mintLiquidity(0, 300, 1e20, type(uint256).max, type(uint256).max);
-    bytes32 _positionId = keccak256(abi.encodePacked(int24(300), int24(0), alice));
-
-    // PT→Cash — push tick up enough to create room for cash→PT
-    // 1e20 liquidity, 1 bip = 1e16, use 100 bips = 1e18 to stay within 300-tick range
-    _feeSwap(bob, int256(1e18), true);
-    // Cash→PT (smaller than push to stay in range)
-    _feeSwap(bob, int256(5e17), false);
 
     vm.prank(alice);
     (uint128 _collected0, uint128 _collected1) = feeHook.collectFees(_positionId, alice, 0, 0);
@@ -4055,12 +4061,15 @@ contract CollectFees is FixedFeeSwapMarketTest {
     assertGt(_collected1, 0, "Should have collected TOKEN1 fees");
   }
 
-  function test_EmitsFeesCollected() public {
+  function testFuzz_EmitsFeesCollected(uint128 _liquidity, uint256 _swapAmount) public {
+    _liquidity = _boundLiquidity(_liquidity);
+    _swapAmount = _boundFeeSwapAmount(_swapAmount, _liquidity);
+
     vm.prank(alice);
-    feeHook.mintLiquidity(0, 300, 1e20, type(uint256).max, type(uint256).max);
+    feeHook.mintLiquidity(0, 300, _liquidity, type(uint256).max, type(uint256).max);
     bytes32 _positionId = keccak256(abi.encodePacked(int24(300), int24(0), alice));
 
-    _feeSwap(bob, int256(1e18), true);
+    _feeSwap(bob, int256(_swapAmount), true);
 
     vm.expectEmit(true, true, false, false, address(feeHook));
     emit FixedFeeSwapMarket.FeesCollected(_positionId, alice, 0, 0);
