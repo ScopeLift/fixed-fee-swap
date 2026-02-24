@@ -3608,31 +3608,40 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
   // ============ Swap Event Tests ============
 
-  function testFuzz_EmitsSwap_InBothDirections(bool principalForCash) public {
-    uint256 amountIn = 1e18;
+  function testFuzz_PrincipalForCashSwapEmitsSwapEvent(uint256 amountIn) public {
+    amountIn = _boundSwapAmount(amountIn);
     uint256 balance0Before = token0.balanceOf(bob);
     uint256 balance1Before = token1.balanceOf(bob);
 
-    _swap(bob, int256(amountIn), principalForCash, NO_TICK_LIMIT);
+    _swap(bob, int256(amountIn), true, NO_TICK_LIMIT);
 
-    uint256 consumed;
-    uint256 received;
-    if (principalForCash) {
-      consumed = balance0Before - token0.balanceOf(bob);
-      received = token1.balanceOf(bob) - balance1Before;
-      token0.mint(bob, consumed);
-      deal(address(token1), bob, balance1Before);
-    } else {
-      received = token0.balanceOf(bob) - balance0Before;
-      consumed = balance1Before - token1.balanceOf(bob);
-      token1.mint(bob, consumed);
-      deal(address(token0), bob, balance0Before);
-    }
+    uint256 consumed = balance0Before - token0.balanceOf(bob);
+    uint256 received = token1.balanceOf(bob) - balance1Before;
+    token0.mint(bob, consumed);
+    deal(address(token1), bob, balance1Before);
 
     // Re-run once we know exact consumed/received amounts to assert event payload.
-    vm.expectEmit(true, false, false, true, address(hook));
-    emit FixedFeeSwapMarket.Swap(bob, principalForCash, consumed, received);
-    _swap(bob, int256(amountIn), principalForCash, NO_TICK_LIMIT);
+    vm.expectEmit(address(hook));
+    emit FixedFeeSwapMarket.Swap(bob, true, consumed, received);
+    _swap(bob, int256(amountIn), true, NO_TICK_LIMIT);
+  }
+
+  function testFuzz_CashForPrincipalSwapEmitsSwap(uint256 amountIn) public {
+    amountIn = _boundSwapAmount(amountIn);
+    uint256 balance0Before = token0.balanceOf(bob);
+    uint256 balance1Before = token1.balanceOf(bob);
+
+    _swap(bob, int256(amountIn), false, NO_TICK_LIMIT);
+
+    uint256 received = token0.balanceOf(bob) - balance0Before;
+    uint256 consumed = balance1Before - token1.balanceOf(bob);
+    token1.mint(bob, consumed);
+    deal(address(token0), bob, balance0Before);
+
+    // Re-run once we know exact consumed/received amounts to assert event payload.
+    vm.expectEmit(address(hook));
+    emit FixedFeeSwapMarket.Swap(bob, false, consumed, received);
+    _swap(bob, int256(amountIn), false, NO_TICK_LIMIT);
   }
 
   // ============ LP Fee Tests ============
