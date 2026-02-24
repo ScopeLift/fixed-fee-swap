@@ -86,8 +86,6 @@ jobs:
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: nightly
 
       - name: Install scopelint
         uses: engineerd/configurator@v0.0.8
@@ -103,7 +101,7 @@ jobs:
       - name: Check formatting
         run: |
           scopelint --version
-          FOUNDRY_DISABLE_NIGHTLY_WARNING=1 scopelint check
+          scopelint check
 
   # slither-analyze:
   #   runs-on: ubuntu-latest
