@@ -170,6 +170,16 @@ abstract contract FixedFeeSwapMarketTest is Test {
     return bound(_amount, _minSwap, _maxSwap);
   }
 
+  function _boundSwapForRange(uint256 _amount, uint128 _liquidity, int24 _tickUpper, uint256 _maxBipsDesired)
+    internal
+    pure
+    returns (uint256)
+  {
+    uint256 _maxBips = uint256(int256(_tickUpper)) - 2;
+    if (_maxBips > _maxBipsDesired) _maxBips = _maxBipsDesired;
+    return bound(_amount, uint256(_liquidity) * 2 / BIPS, uint256(_liquidity) * _maxBips / BIPS);
+  }
+
   function _boundTimeElapsed(uint256 time) internal view returns (uint256) {
     return bound(time, 0, MARKET_LENGTH);
   }
@@ -2456,7 +2466,6 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   // ============ Solvency Tests ============
 
   function testFuzz_SingleLPCanWithdrawAfterPrincipalForCashSwap(
-    int24 tickLower,
     int24 tickUpper,
     uint128 liquidity,
     uint256 swapAmount,
@@ -2465,20 +2474,17 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     (FixedFeeSwapMarketHarness localHook, PoolKey memory localPoolKey,) =
       _deployHookForSolvency(0, "solvencySinglePrincipalForCash");
 
-    tickLower = int24(bound(int256(tickLower), 0, 1999));
-    tickUpper = int24(bound(int256(tickUpper), int256(tickLower) + 1, 2000));
+    tickUpper = int24(bound(int256(tickUpper), 4, 2000));
     liquidity = uint128(bound(liquidity, 1e18, 1e24));
-    swapAmount = bound(swapAmount, uint256(liquidity) / BIPS, uint256(liquidity) * 500 / BIPS);
+    swapAmount = _boundSwapForRange(swapAmount, liquidity, tickUpper, 500);
     timeElapsed = bound(timeElapsed, 1 days, MARKET_LENGTH - 1);
 
     _warpFromHookStart(localHook, 1);
-    bytes32 positionId = _mintOnHook(localHook, alice, tickLower, tickUpper, liquidity);
+    bytes32 positionId = _mintOnHook(localHook, alice, 0, tickUpper, liquidity);
 
     _warpFromHookStart(localHook, timeElapsed);
 
-    bool swapped =
-      _trySwapOnHook(localHook, localPoolKey, bob, int256(swapAmount), true, NO_TICK_LIMIT);
-    vm.assume(swapped);
+    _swapOnHook(localHook, localPoolKey, bob, int256(swapAmount), true, NO_TICK_LIMIT);
 
     uint256 balance0Before = token0.balanceOf(alice);
     uint256 balance1Before = token1.balanceOf(alice);
@@ -2490,7 +2496,6 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   }
 
   function testFuzz_SingleLPCanWithdrawAfterRoundTripSwap(
-    int24 tickLower,
     int24 tickUpper,
     uint128 liquidity,
     uint256 swapAmount1,
@@ -2500,21 +2505,18 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     (FixedFeeSwapMarketHarness localHook, PoolKey memory localPoolKey,) =
       _deployHookForSolvency(0, "solvencySingleRoundTrip");
 
-    tickLower = int24(bound(int256(tickLower), 0, 1999));
-    tickUpper = int24(bound(int256(tickUpper), int256(tickLower) + 1, 2000));
+    tickUpper = int24(bound(int256(tickUpper), 4, 2000));
     liquidity = uint128(bound(liquidity, 1e18, 1e24));
-    swapAmount1 = bound(swapAmount1, uint256(liquidity) / BIPS, uint256(liquidity) * 500 / BIPS);
-    swapAmount2 = bound(swapAmount2, uint256(liquidity) / BIPS, uint256(liquidity) * 500 / BIPS);
+    swapAmount1 = _boundSwapForRange(swapAmount1, liquidity, tickUpper, 500);
+    swapAmount2 = bound(swapAmount2, uint256(liquidity) * 2 / BIPS, uint256(liquidity) * 500 / BIPS);
     timeElapsed = bound(timeElapsed, 1 days, MARKET_LENGTH - 1);
 
     _warpFromHookStart(localHook, 1);
-    bytes32 positionId = _mintOnHook(localHook, alice, tickLower, tickUpper, liquidity);
+    bytes32 positionId = _mintOnHook(localHook, alice, 0, tickUpper, liquidity);
 
     _warpFromHookStart(localHook, timeElapsed);
 
-    bool swapped =
-      _trySwapOnHook(localHook, localPoolKey, bob, int256(swapAmount1), true, NO_TICK_LIMIT);
-    vm.assume(swapped);
+    _swapOnHook(localHook, localPoolKey, bob, int256(swapAmount1), true, NO_TICK_LIMIT);
     _trySwapOnHook(localHook, localPoolKey, bob, int256(swapAmount2), false, NO_TICK_LIMIT);
 
     uint256 balance0Before = token0.balanceOf(alice);
@@ -2527,7 +2529,6 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   }
 
   function testFuzz_TwoLpsCanBothWithdrawAfterSwap(
-    int24 tickLower1,
     int24 tickUpper1,
     int24 tickLower2,
     int24 tickUpper2,
@@ -2539,24 +2540,21 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     (FixedFeeSwapMarketHarness localHook, PoolKey memory localPoolKey, address charlie) =
       _deployHookForSolvency(0, "solvencyTwoLps");
 
-    tickLower1 = int24(bound(int256(tickLower1), 0, 1999));
-    tickUpper1 = int24(bound(int256(tickUpper1), int256(tickLower1) + 1, 2000));
+    tickUpper1 = int24(bound(int256(tickUpper1), 4, 2000));
     tickLower2 = int24(bound(int256(tickLower2), 0, 1999));
     tickUpper2 = int24(bound(int256(tickUpper2), int256(tickLower2) + 1, 2000));
     liquidity1 = uint128(bound(liquidity1, 1e18, 1e24));
     liquidity2 = uint128(bound(liquidity2, 1e18, 1e24));
-    swapAmount = bound(swapAmount, uint256(liquidity1) / BIPS, uint256(liquidity1) * 500 / BIPS);
+    swapAmount = _boundSwapForRange(swapAmount, liquidity1, tickUpper1, 500);
     timeElapsed = bound(timeElapsed, 1 days, MARKET_LENGTH - 1);
 
     _warpFromHookStart(localHook, 1);
-    bytes32 positionId1 = _mintOnHook(localHook, alice, tickLower1, tickUpper1, liquidity1);
+    bytes32 positionId1 = _mintOnHook(localHook, alice, 0, tickUpper1, liquidity1);
     bytes32 positionId2 = _mintOnHook(localHook, charlie, tickLower2, tickUpper2, liquidity2);
 
     _warpFromHookStart(localHook, timeElapsed);
 
-    bool swapped =
-      _trySwapOnHook(localHook, localPoolKey, bob, int256(swapAmount), true, NO_TICK_LIMIT);
-    vm.assume(swapped);
+    _swapOnHook(localHook, localPoolKey, bob, int256(swapAmount), true, NO_TICK_LIMIT);
 
     vm.prank(alice);
     localHook.decreaseLiquidity(positionId1, -int128(uint128(liquidity1)), 0, 0);
@@ -2565,7 +2563,6 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   }
 
   function testFuzz_PartialThenFullWithdrawIsSolventAcrossSwaps(
-    int24 tickLower,
     int24 tickUpper,
     uint128 liquidity,
     uint128 partialRemove,
@@ -2576,22 +2573,19 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     (FixedFeeSwapMarketHarness localHook, PoolKey memory localPoolKey,) =
       _deployHookForSolvency(0, "solvencyPartialFull");
 
-    tickLower = int24(bound(int256(tickLower), 0, 1999));
-    tickUpper = int24(bound(int256(tickUpper), int256(tickLower) + 1, 2000));
+    tickUpper = int24(bound(int256(tickUpper), 4, 2000));
     liquidity = uint128(bound(liquidity, 1e18, 1e24));
     partialRemove = uint128(bound(partialRemove, 1e17, uint256(liquidity) / 2));
-    swapAmount1 = bound(swapAmount1, uint256(liquidity) / BIPS, uint256(liquidity) * 500 / BIPS);
-    swapAmount2 = bound(swapAmount2, uint256(liquidity) / BIPS, uint256(liquidity) * 500 / BIPS);
+    swapAmount1 = _boundSwapForRange(swapAmount1, liquidity, tickUpper, 500);
+    swapAmount2 = bound(swapAmount2, uint256(liquidity) * 2 / BIPS, uint256(liquidity) * 500 / BIPS);
     timeElapsed = bound(timeElapsed, 1 days, MARKET_LENGTH - 1);
 
     _warpFromHookStart(localHook, 1);
-    bytes32 positionId = _mintOnHook(localHook, alice, tickLower, tickUpper, liquidity);
+    bytes32 positionId = _mintOnHook(localHook, alice, 0, tickUpper, liquidity);
 
     _warpFromHookStart(localHook, timeElapsed);
 
-    bool swapped =
-      _trySwapOnHook(localHook, localPoolKey, bob, int256(swapAmount1), true, NO_TICK_LIMIT);
-    vm.assume(swapped);
+    _swapOnHook(localHook, localPoolKey, bob, int256(swapAmount1), true, NO_TICK_LIMIT);
 
     vm.prank(alice);
     localHook.decreaseLiquidity(positionId, -int128(partialRemove), 0, 0);
@@ -2604,7 +2598,6 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   }
 
   function testFuzz_SingleLPCanWithdrawAfterCashForPrincipalSwap(
-    int24 tickLower,
     int24 tickUpper,
     uint128 liquidity,
     uint256 setupSwapAmount,
@@ -2614,23 +2607,19 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     (FixedFeeSwapMarketHarness localHook, PoolKey memory localPoolKey,) =
       _deployHookForSolvency(0, "solvencySingleCashForPrincipal");
 
-    tickLower = int24(bound(int256(tickLower), 0, 1999));
-    tickUpper = int24(bound(int256(tickUpper), int256(tickLower) + 1, 2000));
+    tickUpper = int24(bound(int256(tickUpper), 4, 2000));
     liquidity = uint128(bound(liquidity, 1e18, 1e24));
-    setupSwapAmount =
-      bound(setupSwapAmount, uint256(liquidity) / BIPS, uint256(liquidity) * 500 / BIPS);
+    setupSwapAmount = _boundSwapForRange(setupSwapAmount, liquidity, tickUpper, 500);
     cashSwapAmount =
-      bound(cashSwapAmount, uint256(liquidity) / BIPS, uint256(liquidity) * 500 / BIPS);
+      bound(cashSwapAmount, uint256(liquidity) * 2 / BIPS, uint256(liquidity) * 500 / BIPS);
     timeElapsed = bound(timeElapsed, 1 days, MARKET_LENGTH - 1);
 
     _warpFromHookStart(localHook, 1);
-    bytes32 positionId = _mintOnHook(localHook, alice, tickLower, tickUpper, liquidity);
+    bytes32 positionId = _mintOnHook(localHook, alice, 0, tickUpper, liquidity);
 
     _warpFromHookStart(localHook, timeElapsed);
 
-    bool swapped =
-      _trySwapOnHook(localHook, localPoolKey, bob, int256(setupSwapAmount), true, NO_TICK_LIMIT);
-    vm.assume(swapped);
+    _swapOnHook(localHook, localPoolKey, bob, int256(setupSwapAmount), true, NO_TICK_LIMIT);
 
     _trySwapOnHook(localHook, localPoolKey, bob, int256(cashSwapAmount), false, NO_TICK_LIMIT);
 
@@ -2644,7 +2633,6 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   }
 
   function testFuzz_SingleLPCanWithdrawAfterCashThenPrincipalRoundTrip(
-    int24 tickLower,
     int24 tickUpper,
     uint128 liquidity,
     uint256 setupAmount,
@@ -2655,25 +2643,21 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     (FixedFeeSwapMarketHarness localHook, PoolKey memory localPoolKey,) =
       _deployHookForSolvency(0, "solvencyCashThenPrincipal");
 
-    tickLower = int24(bound(int256(tickLower), 0, 1999));
-    tickUpper = int24(bound(int256(tickUpper), int256(tickLower) + 1, 2000));
+    tickUpper = int24(bound(int256(tickUpper), 104, 2000));
     liquidity = uint128(bound(liquidity, 1e18, 1e24));
-    setupAmount =
-      bound(setupAmount, uint256(liquidity) * 100 / BIPS, uint256(liquidity) * 500 / BIPS);
+    setupAmount = _boundSwapForRange(setupAmount, liquidity, tickUpper, 500);
     cashForPrincipalAmount =
-      bound(cashForPrincipalAmount, uint256(liquidity) / BIPS, uint256(liquidity) * 250 / BIPS);
+      bound(cashForPrincipalAmount, uint256(liquidity) * 2 / BIPS, uint256(liquidity) * 250 / BIPS);
     principalForCashAmount =
-      bound(principalForCashAmount, uint256(liquidity) / BIPS, uint256(liquidity) * 250 / BIPS);
+      bound(principalForCashAmount, uint256(liquidity) * 2 / BIPS, uint256(liquidity) * 250 / BIPS);
     timeElapsed = bound(timeElapsed, 1 days, MARKET_LENGTH - 1);
 
     _warpFromHookStart(localHook, 1);
-    bytes32 positionId = _mintOnHook(localHook, alice, tickLower, tickUpper, liquidity);
+    bytes32 positionId = _mintOnHook(localHook, alice, 0, tickUpper, liquidity);
 
     _warpFromHookStart(localHook, timeElapsed);
 
-    bool swapped =
-      _trySwapOnHook(localHook, localPoolKey, bob, int256(setupAmount), true, NO_TICK_LIMIT);
-    vm.assume(swapped);
+    _swapOnHook(localHook, localPoolKey, bob, int256(setupAmount), true, NO_TICK_LIMIT);
 
     _trySwapOnHook(
       localHook, localPoolKey, bob, int256(cashForPrincipalAmount), false, NO_TICK_LIMIT
@@ -2692,7 +2676,6 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   }
 
   function testFuzz_MintSwapWaitWithdrawIsSolvent(
-    int24 tickLower,
     int24 tickUpper,
     uint128 liquidity,
     uint256 swapAmount,
@@ -2702,20 +2685,17 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     (FixedFeeSwapMarketHarness localHook, PoolKey memory localPoolKey,) =
       _deployHookForSolvency(0, "solvencyMintSwapWaitWithdraw");
 
-    tickLower = int24(bound(int256(tickLower), 0, 1999));
-    tickUpper = int24(bound(int256(tickUpper), int256(tickLower) + 1, 2000));
+    tickUpper = int24(bound(int256(tickUpper), 4, 2000));
     liquidity = uint128(bound(liquidity, 1e18, 1e24));
-    swapAmount = bound(swapAmount, uint256(liquidity) / BIPS, uint256(liquidity) * 500 / BIPS);
+    swapAmount = _boundSwapForRange(swapAmount, liquidity, tickUpper, 500);
     swapTime = bound(swapTime, 1 days, MARKET_LENGTH / 2);
     withdrawTime = bound(withdrawTime, swapTime + 1, MARKET_LENGTH - 1);
 
     _warpFromHookStart(localHook, 1);
-    bytes32 positionId = _mintOnHook(localHook, alice, tickLower, tickUpper, liquidity);
+    bytes32 positionId = _mintOnHook(localHook, alice, 0, tickUpper, liquidity);
 
     _warpFromHookStart(localHook, swapTime);
-    bool swapped =
-      _trySwapOnHook(localHook, localPoolKey, bob, int256(swapAmount), true, NO_TICK_LIMIT);
-    vm.assume(swapped);
+    _swapOnHook(localHook, localPoolKey, bob, int256(swapAmount), true, NO_TICK_LIMIT);
 
     _warpFromHookStart(localHook, withdrawTime);
 
@@ -2729,7 +2709,6 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   }
 
   function testFuzz_SingleLPCanWithdrawAfterPrincipalForCashSwap_WithFees(
-    int24 tickLower,
     int24 tickUpper,
     uint128 liquidity,
     uint256 swapAmount,
@@ -2739,19 +2718,17 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
       SOLVENCY_FEE_RATE, "solvencySinglePrincipalForCashFees"
     );
 
-    tickLower = int24(bound(int256(tickLower), 0, 1999));
-    tickUpper = int24(bound(int256(tickUpper), int256(tickLower) + 1, 2000));
+    tickUpper = int24(bound(int256(tickUpper), 4, 2000));
     liquidity = uint128(bound(liquidity, 1e18, 1e24));
-    swapAmount = bound(swapAmount, uint256(liquidity) / BIPS, uint256(liquidity) * 500 / BIPS);
+    swapAmount = _boundSwapForRange(swapAmount, liquidity, tickUpper, 500);
     timeElapsed = bound(timeElapsed, 1 days, MARKET_LENGTH - 1);
 
     _warpFromHookStart(feeHook, 1);
-    bytes32 positionId = _mintOnHook(feeHook, alice, tickLower, tickUpper, liquidity);
+    bytes32 positionId = _mintOnHook(feeHook, alice, 0, tickUpper, liquidity);
 
     _warpFromHookStart(feeHook, timeElapsed);
 
-    bool swapped = _trySwapOnHook(feeHook, feePoolKey, bob, int256(swapAmount), true, NO_TICK_LIMIT);
-    vm.assume(swapped);
+    _swapOnHook(feeHook, feePoolKey, bob, int256(swapAmount), true, NO_TICK_LIMIT);
 
     uint256 balance0Before = token0.balanceOf(alice);
     uint256 balance1Before = token1.balanceOf(alice);
@@ -2763,7 +2740,6 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   }
 
   function testFuzz_SingleLPCanWithdrawAfterCashForPrincipalSwap_WithFees(
-    int24 tickLower,
     int24 tickUpper,
     uint128 liquidity,
     uint256 setupSwapAmount,
@@ -2773,23 +2749,19 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     (FixedFeeSwapMarketHarness feeHook, PoolKey memory feePoolKey,) =
       _deployHookForSolvency(SOLVENCY_FEE_RATE, "solvencySingleCashForPrincipalFees");
 
-    tickLower = int24(bound(int256(tickLower), 0, 1999));
-    tickUpper = int24(bound(int256(tickUpper), int256(tickLower) + 1, 2000));
+    tickUpper = int24(bound(int256(tickUpper), 4, 2000));
     liquidity = uint128(bound(liquidity, 1e18, 1e24));
-    setupSwapAmount =
-      bound(setupSwapAmount, uint256(liquidity) / BIPS, uint256(liquidity) * 500 / BIPS);
+    setupSwapAmount = _boundSwapForRange(setupSwapAmount, liquidity, tickUpper, 500);
     cashSwapAmount =
-      bound(cashSwapAmount, uint256(liquidity) / BIPS, uint256(liquidity) * 500 / BIPS);
+      bound(cashSwapAmount, uint256(liquidity) * 2 / BIPS, uint256(liquidity) * 500 / BIPS);
     timeElapsed = bound(timeElapsed, 1 days, MARKET_LENGTH - 1);
 
     _warpFromHookStart(feeHook, 1);
-    bytes32 positionId = _mintOnHook(feeHook, alice, tickLower, tickUpper, liquidity);
+    bytes32 positionId = _mintOnHook(feeHook, alice, 0, tickUpper, liquidity);
 
     _warpFromHookStart(feeHook, timeElapsed);
 
-    bool swapped =
-      _trySwapOnHook(feeHook, feePoolKey, bob, int256(setupSwapAmount), true, NO_TICK_LIMIT);
-    vm.assume(swapped);
+    _swapOnHook(feeHook, feePoolKey, bob, int256(setupSwapAmount), true, NO_TICK_LIMIT);
 
     _trySwapOnHook(feeHook, feePoolKey, bob, int256(cashSwapAmount), false, NO_TICK_LIMIT);
 
@@ -2803,7 +2775,6 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   }
 
   function testFuzz_TwoLpsCanBothWithdrawAfterSwap_WithFees(
-    int24 tickLower1,
     int24 tickUpper1,
     int24 tickLower2,
     int24 tickUpper2,
@@ -2815,23 +2786,21 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     (FixedFeeSwapMarketHarness feeHook, PoolKey memory feePoolKey, address charlie) =
       _deployHookForSolvency(SOLVENCY_FEE_RATE, "solvencyTwoLpsFees");
 
-    tickLower1 = int24(bound(int256(tickLower1), 0, 1999));
-    tickUpper1 = int24(bound(int256(tickUpper1), int256(tickLower1) + 1, 2000));
+    tickUpper1 = int24(bound(int256(tickUpper1), 4, 2000));
     tickLower2 = int24(bound(int256(tickLower2), 0, 1999));
     tickUpper2 = int24(bound(int256(tickUpper2), int256(tickLower2) + 1, 2000));
     liquidity1 = uint128(bound(liquidity1, 1e18, 1e24));
     liquidity2 = uint128(bound(liquidity2, 1e18, 1e24));
-    swapAmount = bound(swapAmount, uint256(liquidity1) / BIPS, uint256(liquidity1) * 500 / BIPS);
+    swapAmount = _boundSwapForRange(swapAmount, liquidity1, tickUpper1, 500);
     timeElapsed = bound(timeElapsed, 1 days, MARKET_LENGTH - 1);
 
     _warpFromHookStart(feeHook, 1);
-    bytes32 positionId1 = _mintOnHook(feeHook, alice, tickLower1, tickUpper1, liquidity1);
+    bytes32 positionId1 = _mintOnHook(feeHook, alice, 0, tickUpper1, liquidity1);
     bytes32 positionId2 = _mintOnHook(feeHook, charlie, tickLower2, tickUpper2, liquidity2);
 
     _warpFromHookStart(feeHook, timeElapsed);
 
-    bool swapped = _trySwapOnHook(feeHook, feePoolKey, bob, int256(swapAmount), true, NO_TICK_LIMIT);
-    vm.assume(swapped);
+    _swapOnHook(feeHook, feePoolKey, bob, int256(swapAmount), true, NO_TICK_LIMIT);
 
     vm.prank(alice);
     feeHook.decreaseLiquidity(positionId1, -int128(uint128(liquidity1)), 0, 0);
@@ -2840,7 +2809,6 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   }
 
   function testFuzz_WithdrawAfterFeeCollectionIsSolvent(
-    int24 tickLower,
     int24 tickUpper,
     uint128 liquidity,
     uint256 swapAmount,
@@ -2849,19 +2817,17 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     (FixedFeeSwapMarketHarness feeHook, PoolKey memory feePoolKey,) =
       _deployHookForSolvency(SOLVENCY_FEE_RATE, "solvencyWithdrawAfterCollectFees");
 
-    tickLower = int24(bound(int256(tickLower), 0, 1999));
-    tickUpper = int24(bound(int256(tickUpper), int256(tickLower) + 1, 2000));
+    tickUpper = int24(bound(int256(tickUpper), 4, 2000));
     liquidity = uint128(bound(liquidity, 1e18, 1e24));
-    swapAmount = bound(swapAmount, uint256(liquidity) / BIPS, uint256(liquidity) * 500 / BIPS);
+    swapAmount = _boundSwapForRange(swapAmount, liquidity, tickUpper, 500);
     timeElapsed = bound(timeElapsed, 1 days, MARKET_LENGTH - 1);
 
     _warpFromHookStart(feeHook, 1);
-    bytes32 positionId = _mintOnHook(feeHook, alice, tickLower, tickUpper, liquidity);
+    bytes32 positionId = _mintOnHook(feeHook, alice, 0, tickUpper, liquidity);
 
     _warpFromHookStart(feeHook, timeElapsed);
 
-    bool swapped = _trySwapOnHook(feeHook, feePoolKey, bob, int256(swapAmount), true, NO_TICK_LIMIT);
-    vm.assume(swapped);
+    _swapOnHook(feeHook, feePoolKey, bob, int256(swapAmount), true, NO_TICK_LIMIT);
 
     vm.prank(alice);
     feeHook.collectFees(positionId, alice, 0, 0);
