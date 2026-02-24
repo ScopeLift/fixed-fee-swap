@@ -85,58 +85,58 @@ contract FixedFeeSwapMarket is BaseHook {
   // ============ Errors ============
 
   /// @notice Thrown when the fee rate is 100% or higher
-  error FixedFeeSwap__FeeRateTooHigh();
+  error FixedFeeSwapMarket_FeeRateTooHigh();
 
   /// @notice Thrown when yield spacing is zero or negative
-  error FixedFeeSwap__InvalidYieldSpacing();
+  error FixedFeeSwapMarket_InvalidYieldSpacing();
 
   /// @notice Thrown when trying to remove more liquidity than the position holds
-  error FixedFeeSwap__InsufficientPositionLiquidity();
+  error FixedFeeSwapMarket_InsufficientPositionLiquidity();
 
   /// @notice Thrown when swap hook parameters are malformed or have incorrect length
-  error FixedFeeSwap__InvalidHookParams();
+  error FixedFeeSwapMarket_InvalidHookParams();
 
   /// @notice Thrown when liquidity amount is zero or exceeds slippage bounds
-  error FixedFeeSwap__InvalidLiquidityAmount();
+  error FixedFeeSwapMarket_InvalidLiquidityAmount();
 
   /// @notice Thrown when price moves in an unexpected direction during swap calculation
-  error FixedFeeSwap__InvalidPriceDirection();
+  error FixedFeeSwapMarket_InvalidPriceDirection();
 
   /// @notice Thrown when the lower tick is greater than or equal to the upper tick
-  error FixedFeeSwap__InvalidTickRange();
+  error FixedFeeSwapMarket_InvalidTickRange();
 
   /// @notice Thrown when tick traversal produces an invalid delta or zero boundary amount
-  error FixedFeeSwap__InvalidTickTraversal();
+  error FixedFeeSwapMarket_InvalidTickTraversal();
 
   /// @notice Thrown when decreaseLiquidity is called with a non-negative liquidity delta
-  error FixedFeeSwap__LiquidityDeltaMustBeNegative();
+  error FixedFeeSwapMarket_LiquidityDeltaMustBeNegative();
 
   /// @notice Thrown when attempting to swap with no active liquidity in range
-  error FixedFeeSwap__NoActiveLiquidity();
+  error FixedFeeSwapMarket_NoActiveLiquidity();
 
   /// @notice Thrown when the caller is not the owner of the position
-  error FixedFeeSwap__NotPositionOwner();
+  error FixedFeeSwapMarket_NotPositionOwner();
 
   /// @notice Thrown when the specified position does not exist
-  error FixedFeeSwap__PositionNotFound();
+  error FixedFeeSwapMarket_PositionNotFound();
 
   /// @notice Thrown when the swap amount is zero or negative
-  error FixedFeeSwap__SwapAmountCannotBeZero();
+  error FixedFeeSwapMarket_SwapAmountCannotBeZero();
 
   /// @notice Thrown when a swap step consumes zero input, which would cause an infinite loop
-  error FixedFeeSwap__SwapStepProducedZeroIn();
+  error FixedFeeSwapMarket_SwapStepProducedZeroIn();
 
   /// @notice Thrown when a swap step produces zero output for nonzero input
-  error FixedFeeSwap__SwapStepProducedZeroOut();
+  error FixedFeeSwapMarket_SwapStepProducedZeroOut();
 
   /// @notice Thrown when a swap or time-dependent calculation is attempted at or after maturity
-  error FixedFeeSwap__MarketExpired();
+  error FixedFeeSwapMarket_MarketExpired();
 
   /// @notice Thrown when a tick's gross liquidity would underflow
-  error FixedFeeSwap__TickLiquidityGrossUnderflow();
+  error FixedFeeSwapMarket_TickLiquidityGrossUnderflow();
 
   /// @notice Thrown when liquidity is added or removed via PoolManager instead of this hook
-  error LiquidityOnlyViaHook();
+  error FixedFeeSwapMarket_LiquidityOnlyViaHook();
 
   // ============ Constants ============
 
@@ -194,8 +194,8 @@ contract FixedFeeSwapMarket is BaseHook {
     IPoolManager _manager,
     int24 _initialTick
   ) BaseHook(_manager) {
-    if (_feeRate >= FEE_DENOMINATOR) revert FixedFeeSwap__FeeRateTooHigh();
-    if (_yieldPerTick <= 0) revert FixedFeeSwap__InvalidYieldSpacing();
+    if (_feeRate >= FEE_DENOMINATOR) revert FixedFeeSwapMarket_FeeRateTooHigh();
+    if (_yieldPerTick <= 0) revert FixedFeeSwapMarket_InvalidYieldSpacing();
     START_TIME = uint48(block.timestamp);
     MATURITY = uint48(block.timestamp) + _lengthOfMarket;
     TOKEN0 = IERC20(_token0);
@@ -265,16 +265,16 @@ contract FixedFeeSwapMarket is BaseHook {
     uint256 _amount0Max,
     uint256 _amount1Max
   ) external virtual {
-    if (_tickLower < 0) revert FixedFeeSwap__InvalidTickRange();
+    if (_tickLower < 0) revert FixedFeeSwapMarket_InvalidTickRange();
     bytes32 _positionId = _getPositionId(msg.sender, _tickUpper, _tickLower);
-    PositionInfo storage _position = positions[_positionId];
-    bool _isNew = _position.owner == address(0);
-    int128 _liquidityBefore = _position.liquidity;
+    PositionInfo storage position = positions[_positionId];
+    bool _isNew = position.owner == address(0);
+    int128 _liquidityBefore = position.liquidity;
 
     if (_isNew) {
-      _position.tickUpper = _tickUpper;
-      _position.tickLower = _tickLower;
-      _position.owner = msg.sender;
+      position.tickUpper = _tickUpper;
+      position.tickLower = _tickLower;
+      position.owner = msg.sender;
     }
 
     // Call modifyLiquidity first so tick init sets feeGrowthOutside correctly
@@ -283,15 +283,15 @@ contract FixedFeeSwapMarket is BaseHook {
     uint128 _amount0In = _tokenDelta.amount0.toUint128();
     uint128 _amount1In = _tokenDelta.amount1.toUint128();
     if (_amount0In > _amount0Max || _amount1In > _amount1Max) {
-      revert FixedFeeSwap__InvalidLiquidityAmount();
+      revert FixedFeeSwapMarket_InvalidLiquidityAmount();
     }
 
     // Update liquidity without overwriting fee fields
-    _position.liquidity = _position.liquidity + _liquidity.toInt128();
+    position.liquidity = position.liquidity + _liquidity.toInt128();
 
     // Initialize snapshots when liquidity transitions from 0 -> positive
     // (isNew implies liquidityBefore == 0, so we only need to check liquidityBefore)
-    if (_liquidityBefore == 0) _refreshFeeSnapshots(_position);
+    if (_liquidityBefore == 0) _refreshFeeSnapshots(position);
 
     if (_amount0In != 0) TOKEN0.safeTransferFrom(msg.sender, address(this), _amount0In);
     if (_amount1In != 0) TOKEN1.safeTransferFrom(msg.sender, address(this), _amount1In);
@@ -309,23 +309,23 @@ contract FixedFeeSwapMarket is BaseHook {
     uint256 _amount0Max,
     uint256 _amount1Max
   ) external virtual {
-    PositionInfo storage _position = _requirePositionOwner(_positionId);
-    int128 _liquidityBefore = _position.liquidity;
+    PositionInfo storage position = _requirePositionOwner(_positionId);
+    int128 _liquidityBefore = position.liquidity;
 
     // modifyLiquidity accrues fees internally and refreshes snapshots
     TokenDelta memory _tokenDelta =
-      _modifyLiquidity(msg.sender, _position.tickUpper, _position.tickLower, _liquidity.toInt128());
+      _modifyLiquidity(msg.sender, position.tickUpper, position.tickLower, _liquidity.toInt128());
     uint128 _amount0In = _tokenDelta.amount0.toUint128();
     uint128 _amount1In = _tokenDelta.amount1.toUint128();
     if (_amount0In > _amount0Max || _amount1In > _amount1Max) {
-      revert FixedFeeSwap__InvalidLiquidityAmount();
+      revert FixedFeeSwapMarket_InvalidLiquidityAmount();
     }
 
     // Update position liquidity without overwriting fee fields
-    _position.liquidity = _position.liquidity + _liquidity.toInt128();
+    position.liquidity = position.liquidity + _liquidity.toInt128();
 
     // If the position had zero liquidity, refresh snapshots to prevent earning past fees
-    if (_liquidityBefore == 0) _refreshFeeSnapshots(_position);
+    if (_liquidityBefore == 0) _refreshFeeSnapshots(position);
 
     if (_amount0In != 0) TOKEN0.safeTransferFrom(msg.sender, address(this), _amount0In);
     if (_amount1In != 0) TOKEN1.safeTransferFrom(msg.sender, address(this), _amount1In);
@@ -343,24 +343,24 @@ contract FixedFeeSwapMarket is BaseHook {
     uint256 _amount0Min,
     uint256 _amount1Min
   ) external virtual {
-    PositionInfo storage _position = _requirePositionOwner(_positionId);
-    if (_liquidity >= 0) revert FixedFeeSwap__LiquidityDeltaMustBeNegative();
-    if (_position.liquidity < 0) revert FixedFeeSwap__InvalidLiquidityAmount();
-    if (uint128(_position.liquidity) < uint128(_liquidity.abs())) {
-      revert FixedFeeSwap__InsufficientPositionLiquidity();
+    PositionInfo storage position = _requirePositionOwner(_positionId);
+    if (_liquidity >= 0) revert FixedFeeSwapMarket_LiquidityDeltaMustBeNegative();
+    if (position.liquidity < 0) revert FixedFeeSwapMarket_InvalidLiquidityAmount();
+    if (uint128(position.liquidity) < uint128(_liquidity.abs())) {
+      revert FixedFeeSwapMarket_InsufficientPositionLiquidity();
     }
 
     // modifyLiquidity accrues fees owed before burning liquidity
     TokenDelta memory _tokenDelta =
-      _modifyLiquidity(msg.sender, _position.tickUpper, _position.tickLower, _liquidity);
+      _modifyLiquidity(msg.sender, position.tickUpper, position.tickLower, _liquidity);
     uint128 _amount0Out = uint128(_tokenDelta.amount0.abs());
     uint128 _amount1Out = uint128(_tokenDelta.amount1.abs());
     if (_amount0Out < _amount0Min || _amount1Out < _amount1Min) {
-      revert FixedFeeSwap__InvalidLiquidityAmount();
+      revert FixedFeeSwapMarket_InvalidLiquidityAmount();
     }
 
     // Update position liquidity without overwriting fee fields
-    _position.liquidity = _position.liquidity + _liquidity;
+    position.liquidity = position.liquidity + _liquidity;
 
     if (_tokenDelta.amount0 < 0) TOKEN0.safeTransfer(msg.sender, _amount0Out);
     if (_tokenDelta.amount1 < 0) TOKEN1.safeTransfer(msg.sender, _amount1Out);
@@ -379,22 +379,22 @@ contract FixedFeeSwapMarket is BaseHook {
     uint128 _amount0Requested,
     uint128 _amount1Requested
   ) external returns (uint128 _amount0, uint128 _amount1) {
-    PositionInfo storage _position = _requirePositionOwner(_positionId);
+    PositionInfo storage position = _requirePositionOwner(_positionId);
 
     // Accrue pending fees before collection
-    _accruePositionFees(_position);
+    _accruePositionFees(position);
 
     // Calculate amounts to collect (0 means collect all, otherwise min of requested and owed)
-    _amount0 = (_amount0Requested == 0 || _amount0Requested > _position.tokensOwed0)
-      ? _position.tokensOwed0
+    _amount0 = (_amount0Requested == 0 || _amount0Requested > position.tokensOwed0)
+      ? position.tokensOwed0
       : _amount0Requested;
-    _amount1 = (_amount1Requested == 0 || _amount1Requested > _position.tokensOwed1)
-      ? _position.tokensOwed1
+    _amount1 = (_amount1Requested == 0 || _amount1Requested > position.tokensOwed1)
+      ? position.tokensOwed1
       : _amount1Requested;
 
     // Update owed amounts (CEI: update state before transfers)
-    _position.tokensOwed0 -= _amount0;
-    _position.tokensOwed1 -= _amount1;
+    position.tokensOwed0 -= _amount0;
+    position.tokensOwed1 -= _amount1;
 
     // Transfer fees
     if (_amount0 > 0) TOKEN0.safeTransfer(_recipient, _amount0);
@@ -414,7 +414,7 @@ contract FixedFeeSwapMarket is BaseHook {
     ModifyLiquidityParams calldata,
     bytes calldata
   ) internal virtual override returns (bytes4) {
-    revert LiquidityOnlyViaHook();
+    revert FixedFeeSwapMarket_LiquidityOnlyViaHook();
   }
 
   /// @notice Hook called before liquidity is removed via PoolManager
@@ -426,7 +426,7 @@ contract FixedFeeSwapMarket is BaseHook {
     ModifyLiquidityParams calldata,
     bytes calldata
   ) internal virtual override returns (bytes4) {
-    revert LiquidityOnlyViaHook();
+    revert FixedFeeSwapMarket_LiquidityOnlyViaHook();
   }
 
   /// @notice Hook called before a swap is executed via PoolManager
@@ -448,13 +448,15 @@ contract FixedFeeSwapMarket is BaseHook {
     if (_hookParams.length == 0) {
       return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(0, 0), 0);
     }
-    if (_hookParams.length != SWAP_HOOK_PARAMS_LENGTH) revert FixedFeeSwap__InvalidHookParams();
+    if (_hookParams.length != SWAP_HOOK_PARAMS_LENGTH) {
+      revert FixedFeeSwapMarket_InvalidHookParams();
+    }
 
     (int256 _amountIn, bool _principalForCash, int24 _tickLimit) =
       abi.decode(_hookParams, (int256, bool, int24));
-    if (_amountIn <= 0) revert FixedFeeSwap__SwapAmountCannotBeZero();
-    if (block.timestamp >= MATURITY) revert FixedFeeSwap__MarketExpired();
-    if (activeLiquidity == 0) revert FixedFeeSwap__NoActiveLiquidity();
+    if (_amountIn <= 0) revert FixedFeeSwapMarket_SwapAmountCannotBeZero();
+    if (block.timestamp >= MATURITY) revert FixedFeeSwapMarket_MarketExpired();
+    if (activeLiquidity == 0) revert FixedFeeSwapMarket_NoActiveLiquidity();
     currentPrice = tickToPrice(currentTick);
 
     (uint256 _amountInUsed, uint256 _amountOutCalculated) =
@@ -652,8 +654,8 @@ contract FixedFeeSwapMarket is BaseHook {
     view
     returns (uint256 _amountInConsumed, uint256 _cashOut, int256 _newPrice, int24 _newTick)
   {
-    if (_amountIn <= 0) revert FixedFeeSwap__SwapAmountCannotBeZero();
-    if (_currentPrice <= 0) revert FixedFeeSwap__InvalidPriceDirection();
+    if (_amountIn <= 0) revert FixedFeeSwapMarket_SwapAmountCannotBeZero();
+    if (_currentPrice <= 0) revert FixedFeeSwapMarket_InvalidPriceDirection();
 
     uint256 _scaledTime = _scaledTimeRemainingWad();
     // Derive start yield directly from the integer tick to avoid exp/ln round-trip error.
@@ -666,21 +668,21 @@ contract FixedFeeSwapMarket is BaseHook {
     // the next tick boundary.
     int256 _targetYieldWad = _tickToYieldWad(_nextTick);
     int256 _targetPrice = tickToPrice(_nextTick);
-    if (_targetPrice > _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
-    if (_targetYieldWad <= _startYieldWad) revert FixedFeeSwap__InvalidTickTraversal();
+    if (_targetPrice > _currentPrice) revert FixedFeeSwapMarket_InvalidPriceDirection();
+    if (_targetYieldWad <= _startYieldWad) revert FixedFeeSwapMarket_InvalidTickTraversal();
     if (_tickLimit != NO_TICK_LIMIT && _tickLimit < _nextTick) {
       _nextTick = _tickLimit;
       _targetYieldWad = _tickToYieldWad(_tickLimit);
       _targetPrice = _priceFromYieldWad(_targetYieldWad, _scaledTime);
     }
 
-    if (_targetPrice > _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
-    if (_targetYieldWad <= _startYieldWad) revert FixedFeeSwap__InvalidTickTraversal();
+    if (_targetPrice > _currentPrice) revert FixedFeeSwapMarket_InvalidPriceDirection();
+    if (_targetYieldWad <= _startYieldWad) revert FixedFeeSwapMarket_InvalidTickTraversal();
 
     uint256 _principalToTarget = FixedPointMathLib.mulDivUp(
       uint256(_targetYieldWad - _startYieldWad), uint256(activeLiquidity), BIPS * WAD
     );
-    if (_principalToTarget == 0) revert FixedFeeSwap__InvalidTickTraversal();
+    if (_principalToTarget == 0) revert FixedFeeSwapMarket_InvalidTickTraversal();
 
     if (uint256(_amountIn) >= _principalToTarget) {
       _amountInConsumed = _principalToTarget;
@@ -774,8 +776,8 @@ contract FixedFeeSwapMarket is BaseHook {
     view
     returns (uint256 _amountInConsumed, uint256 _principalOut, int256 _newPrice, int24 _newTick)
   {
-    if (_amountIn <= 0) revert FixedFeeSwap__SwapAmountCannotBeZero();
-    if (_currentPrice <= 0) revert FixedFeeSwap__InvalidPriceDirection();
+    if (_amountIn <= 0) revert FixedFeeSwapMarket_SwapAmountCannotBeZero();
+    if (_currentPrice <= 0) revert FixedFeeSwapMarket_InvalidPriceDirection();
 
     uint256 _scaledTime = _scaledTimeRemainingWad();
     // Derive start yield directly from the integer tick (same rationale as _getCashSwapAmount).
@@ -785,21 +787,21 @@ contract FixedFeeSwapMarket is BaseHook {
     // the next tick boundary.
     int256 _targetYieldWad = _tickToYieldWad(_nextTick);
     int256 _targetPrice = tickToPrice(_nextTick);
-    if (_targetPrice < _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
-    if (_targetYieldWad >= _startYieldWad) revert FixedFeeSwap__InvalidTickTraversal();
+    if (_targetPrice < _currentPrice) revert FixedFeeSwapMarket_InvalidPriceDirection();
+    if (_targetYieldWad >= _startYieldWad) revert FixedFeeSwapMarket_InvalidTickTraversal();
     if (_tickLimit != NO_TICK_LIMIT && _tickLimit > _nextTick) {
       _nextTick = _tickLimit;
       _targetYieldWad = _tickToYieldWad(_tickLimit);
       _targetPrice = _priceFromYieldWad(_targetYieldWad, _scaledTime);
     }
 
-    if (_targetPrice < _currentPrice) revert FixedFeeSwap__InvalidPriceDirection();
-    if (_targetYieldWad >= _startYieldWad) revert FixedFeeSwap__InvalidTickTraversal();
+    if (_targetPrice < _currentPrice) revert FixedFeeSwapMarket_InvalidPriceDirection();
+    if (_targetYieldWad >= _startYieldWad) revert FixedFeeSwapMarket_InvalidTickTraversal();
 
     uint256 _priceDiff = uint256(_targetPrice - _currentPrice);
     uint256 _cashInToTarget =
       FixedPointMathLib.mulDivUp(_priceDiff, uint256(activeLiquidity), _scaledTime);
-    if (_cashInToTarget == 0) revert FixedFeeSwap__InvalidTickTraversal();
+    if (_cashInToTarget == 0) revert FixedFeeSwapMarket_InvalidTickTraversal();
 
     if (uint256(_amountIn) >= _cashInToTarget) {
       _amountInConsumed = _cashInToTarget;
@@ -837,7 +839,7 @@ contract FixedFeeSwapMarket is BaseHook {
     // newPrice = startPrice + (scaledTime / L) * cashIn
     int256 _exactNewPrice = _startPrice
       + int256(FixedPointMathLib.mulDiv(_scaledTime, _amountIn, uint256(activeLiquidity)));
-    if (_exactNewPrice < _startPrice) revert FixedFeeSwap__InvalidPriceDirection();
+    if (_exactNewPrice < _startPrice) revert FixedFeeSwapMarket_InvalidPriceDirection();
 
     // endYieldWad = -ln(newPrice) / scaledTime * BIPS * WAD
     int256 _endYieldWad = _yieldWadFromPrice(_exactNewPrice, _scaledTime);
@@ -869,14 +871,14 @@ contract FixedFeeSwapMarket is BaseHook {
     internal
     returns (TokenDelta memory)
   {
-    if (_tickLower >= _tickUpper) revert FixedFeeSwap__InvalidTickRange();
+    if (_tickLower >= _tickUpper) revert FixedFeeSwapMarket_InvalidTickRange();
     if (_liquidity == 0) return TokenDelta({amount0: 0, amount1: 0});
 
     bytes32 _positionId = _getPositionId(_owner, _tickUpper, _tickLower);
-    PositionInfo storage _position = positions[_positionId];
+    PositionInfo storage position = positions[_positionId];
 
     // Accrue fees before mutating ticks (must happen before tick data is cleared)
-    if (_position.owner != address(0)) _accruePositionFees(_position);
+    if (position.owner != address(0)) _accruePositionFees(position);
 
     // Mutate ticks / bitmap / activeLiquidity
     (bool _flippedLower,) = _updateTickLiquidity(_tickLower, _liquidity, false);
@@ -936,17 +938,17 @@ contract FixedFeeSwapMarket is BaseHook {
     internal
     returns (bool, uint128)
   {
-    TickInfo storage _info = ticks[_tick];
+    TickInfo storage info = ticks[_tick];
 
-    uint128 _liquidityGrossBefore = _info.liquidityGross;
-    int128 _liquidityNetBefore = _info.liquidityNet;
+    uint128 _liquidityGrossBefore = info.liquidityGross;
+    int128 _liquidityNetBefore = info.liquidityNet;
 
     uint128 _liquidityGrossAfter;
     if (_liquidityDelta > 0) {
       _liquidityGrossAfter = _liquidityGrossBefore + _liquidityDelta.toUint128();
     } else {
       if (_liquidityGrossBefore < _liquidityDelta.abs()) {
-        revert FixedFeeSwap__TickLiquidityGrossUnderflow();
+        revert FixedFeeSwapMarket_TickLiquidityGrossUnderflow();
       }
       _liquidityGrossAfter = _liquidityGrossBefore - uint128(_liquidityDelta.abs());
     }
@@ -957,8 +959,8 @@ contract FixedFeeSwapMarket is BaseHook {
     // By convention, assume all prior fee growth occurred below this tick
     if (_liquidityGrossBefore == 0 && _liquidityGrossAfter > 0) {
       if (_tick <= currentTick) {
-        _info.feeGrowthOutside0X128 = feeGrowthGlobal0X128;
-        _info.feeGrowthOutside1X128 = feeGrowthGlobal1X128;
+        info.feeGrowthOutside0X128 = feeGrowthGlobal0X128;
+        info.feeGrowthOutside1X128 = feeGrowthGlobal1X128;
       }
       // If tick > currentTick, feeGrowthOutside stays 0 (all growth is below)
     }
@@ -968,8 +970,8 @@ contract FixedFeeSwapMarket is BaseHook {
     int128 _liquidityNet =
       _upper ? _liquidityNetBefore - _liquidityDelta : _liquidityNetBefore + _liquidityDelta;
 
-    _info.liquidityGross = _liquidityGrossAfter;
-    _info.liquidityNet = _liquidityNet;
+    info.liquidityGross = _liquidityGrossAfter;
+    info.liquidityNet = _liquidityNet;
 
     return (_flipped, _liquidityGrossAfter);
   }
@@ -978,11 +980,11 @@ contract FixedFeeSwapMarket is BaseHook {
   function _requirePositionOwner(bytes32 _positionId)
     internal
     view
-    returns (PositionInfo storage _position)
+    returns (PositionInfo storage position)
   {
-    _position = positions[_positionId];
-    if (_position.owner == address(0)) revert FixedFeeSwap__PositionNotFound();
-    if (_position.owner != msg.sender) revert FixedFeeSwap__NotPositionOwner();
+    position = positions[_positionId];
+    if (position.owner == address(0)) revert FixedFeeSwapMarket_PositionNotFound();
+    if (position.owner != msg.sender) revert FixedFeeSwapMarket_NotPositionOwner();
   }
 
   // ============ Internal Functions - Token Amount Calculations ============
@@ -1026,7 +1028,7 @@ contract FixedFeeSwapMarket is BaseHook {
     uint256 _scaledTimeWad = _scaledTimeElapsedWad();
     int256 _upperTickPrice = _priceElapsed(int256(_upperYield) * int256(WAD), _scaledTimeWad);
     int256 _lowerTickPrice = _priceElapsed(int256(_lowerYield) * int256(WAD), _scaledTimeWad);
-    if (_lowerTickPrice < _upperTickPrice) revert FixedFeeSwap__InvalidPriceDirection();
+    if (_lowerTickPrice < _upperTickPrice) revert FixedFeeSwapMarket_InvalidPriceDirection();
     uint256 _priceDiff = uint256(_lowerTickPrice - _upperTickPrice);
     uint256 _amount = FixedPointMathLib.mulDiv(_absLiquidity, _priceDiff, _scaledTimeWad);
     return _liq < 0 ? -int256(_amount) : int256(_amount);
@@ -1054,33 +1056,33 @@ contract FixedFeeSwapMarket is BaseHook {
   // ============ Internal Functions - Fee Tracking ============
 
   /// @notice Accrues pending fees for a position and updates its fee growth snapshots
-  /// @param _position The position storage pointer to update
-  function _accruePositionFees(PositionInfo storage _position) internal {
-    if (_position.liquidity <= 0) return;
+  /// @param position The position storage pointer to update
+  function _accruePositionFees(PositionInfo storage position) internal {
+    if (position.liquidity <= 0) return;
 
-    (uint256 _fg0, uint256 _fg1) = _getFeeGrowthInside(_position.tickLower, _position.tickUpper);
-    uint256 _liq = uint256(uint128(_position.liquidity));
+    (uint256 _fg0, uint256 _fg1) = _getFeeGrowthInside(position.tickLower, position.tickUpper);
+    uint256 _liq = uint256(uint128(position.liquidity));
 
     // Note: Cast to uint128 assumes fee amounts won't exceed type(uint128).max.
     // This is safe in practice as it would require mass fee accumulation beyond realistic volumes.
-    _position.tokensOwed0 += uint128(
-      FixedPointMathLib.mulDiv(_fg0 - _position.feeGrowthInside0LastX128, _liq, Q128)
+    position.tokensOwed0 += uint128(
+      FixedPointMathLib.mulDiv(_fg0 - position.feeGrowthInside0LastX128, _liq, Q128)
     );
-    _position.tokensOwed1 += uint128(
-      FixedPointMathLib.mulDiv(_fg1 - _position.feeGrowthInside1LastX128, _liq, Q128)
+    position.tokensOwed1 += uint128(
+      FixedPointMathLib.mulDiv(_fg1 - position.feeGrowthInside1LastX128, _liq, Q128)
     );
 
-    _position.feeGrowthInside0LastX128 = _fg0;
-    _position.feeGrowthInside1LastX128 = _fg1;
+    position.feeGrowthInside0LastX128 = _fg0;
+    position.feeGrowthInside1LastX128 = _fg1;
   }
 
   /// @notice Refreshes fee growth snapshots for a position (used when liquidity goes from 0 to
   /// positive)
-  /// @param _position The position storage pointer to update
-  function _refreshFeeSnapshots(PositionInfo storage _position) internal {
-    (uint256 _fg0, uint256 _fg1) = _getFeeGrowthInside(_position.tickLower, _position.tickUpper);
-    _position.feeGrowthInside0LastX128 = _fg0;
-    _position.feeGrowthInside1LastX128 = _fg1;
+  /// @param position The position storage pointer to update
+  function _refreshFeeSnapshots(PositionInfo storage position) internal {
+    (uint256 _fg0, uint256 _fg1) = _getFeeGrowthInside(position.tickLower, position.tickUpper);
+    position.feeGrowthInside0LastX128 = _fg0;
+    position.feeGrowthInside1LastX128 = _fg1;
   }
 
   /// @notice Calculates fee growth inside a tick range
@@ -1093,24 +1095,24 @@ contract FixedFeeSwapMarket is BaseHook {
     view
     returns (uint256 _fg0, uint256 _fg1)
   {
-    TickInfo storage _lower = ticks[_tickLower];
-    TickInfo storage _upper = ticks[_tickUpper];
+    TickInfo storage lower = ticks[_tickLower];
+    TickInfo storage upper = ticks[_tickUpper];
 
     bool _belowLower = currentTick < _tickLower;
     bool _aboveUpper = currentTick >= _tickUpper;
 
     uint256 _below0 = _belowLower
-      ? feeGrowthGlobal0X128 - _lower.feeGrowthOutside0X128
-      : _lower.feeGrowthOutside0X128;
+      ? feeGrowthGlobal0X128 - lower.feeGrowthOutside0X128
+      : lower.feeGrowthOutside0X128;
     uint256 _below1 = _belowLower
-      ? feeGrowthGlobal1X128 - _lower.feeGrowthOutside1X128
-      : _lower.feeGrowthOutside1X128;
+      ? feeGrowthGlobal1X128 - lower.feeGrowthOutside1X128
+      : lower.feeGrowthOutside1X128;
     uint256 _above0 = _aboveUpper
-      ? feeGrowthGlobal0X128 - _upper.feeGrowthOutside0X128
-      : _upper.feeGrowthOutside0X128;
+      ? feeGrowthGlobal0X128 - upper.feeGrowthOutside0X128
+      : upper.feeGrowthOutside0X128;
     uint256 _above1 = _aboveUpper
-      ? feeGrowthGlobal1X128 - _upper.feeGrowthOutside1X128
-      : _upper.feeGrowthOutside1X128;
+      ? feeGrowthGlobal1X128 - upper.feeGrowthOutside1X128
+      : upper.feeGrowthOutside1X128;
 
     _fg0 = feeGrowthGlobal0X128 - _below0 - _above0;
     _fg1 = feeGrowthGlobal1X128 - _below1 - _above1;
@@ -1121,9 +1123,9 @@ contract FixedFeeSwapMarket is BaseHook {
   ///      the above/below perspective. This is the standard Uniswap v3 tick crossing pattern.
   /// @param _tick The tick being crossed
   function _crossTick(int24 _tick) internal {
-    TickInfo storage _info = ticks[_tick];
-    _info.feeGrowthOutside0X128 = feeGrowthGlobal0X128 - _info.feeGrowthOutside0X128;
-    _info.feeGrowthOutside1X128 = feeGrowthGlobal1X128 - _info.feeGrowthOutside1X128;
+    TickInfo storage info = ticks[_tick];
+    info.feeGrowthOutside0X128 = feeGrowthGlobal0X128 - info.feeGrowthOutside0X128;
+    info.feeGrowthOutside1X128 = feeGrowthGlobal1X128 - info.feeGrowthOutside1X128;
   }
 
   // ============ Internal Functions - Fee Helpers ============
@@ -1140,7 +1142,7 @@ contract FixedFeeSwapMarket is BaseHook {
   /// At START_TIME returns WAD (full duration). Reverts at or after MATURITY.
   /// @return The scaled time remaining in WAD precision
   function _scaledTimeRemainingWad() internal view returns (uint256) {
-    if (block.timestamp >= MATURITY) revert FixedFeeSwap__MarketExpired();
+    if (block.timestamp >= MATURITY) revert FixedFeeSwapMarket_MarketExpired();
     uint256 _remaining = MATURITY - block.timestamp;
     uint256 _duration = MATURITY - START_TIME;
     return (_remaining * WAD) / _duration;
