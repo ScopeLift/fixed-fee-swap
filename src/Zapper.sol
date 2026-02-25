@@ -114,9 +114,13 @@ contract Zapper is IERC3156FlashBorrower {
       "" // No data needed
     );
 
-    // 3. After repaying flash loan (via `onFlashLoan`), transfer remaining VST to user
+    // 3. After repaying flash loan (via `onFlashLoan`), transfer remaining tokens to user
     uint256 _vstReceived = VAULT_SHARE_TOKEN.balanceOf(address(this));
     VAULT_SHARE_TOKEN.transfer(msg.sender, _vstReceived);
+
+    // Transfer any remaining PT dust to user (from rounding in VST→PT swap)
+    uint256 _ptRemaining = PRINCIPAL_TOKEN.balanceOf(address(this));
+    if (_ptRemaining > 0) IERC20(address(PRINCIPAL_TOKEN)).transfer(msg.sender, _ptRemaining);
 
     emit YieldTokenSold(msg.sender, _ytAmount, _vstReceived);
   }
@@ -193,10 +197,16 @@ contract Zapper is IERC3156FlashBorrower {
     IERC20(address(YIELD_TOKEN)).approve(address(FIXED_FEE_SWAP), _amount);
 
     // Burn PT and YT to mint VST
-    uint256 _vstMinted = FIXED_FEE_SWAP.redeem(_amount);
+    FIXED_FEE_SWAP.redeem(_amount);
 
-    // Calculate and swap portion of VST for PT to repay flash loan
-    uint256 _swappedPT = _calculateAndSwapVSTForPT(_vstMinted);
+    // Calculate VST needed to buy back _amount PT for flash loan repayment.
+    // At price p: to get X PT out, need X * p / WAD VST in (since output = input * WAD / p).
+    int256 _ptPriceSigned = FIXED_FEE_SWAP_MARKET.getCurrentPrice();
+    uint256 _ptPrice = _ptPriceSigned > 0 ? uint256(_ptPriceSigned) : 0;
+    uint256 _vstNeeded = Math.mulDiv(_amount, _ptPrice, FeeTracking.PRECISION, Math.Rounding.Ceil);
+
+    // Swap only the needed VST for PT to repay flash loan
+    uint256 _swappedPT = _calculateAndSwapVSTForPT(_vstNeeded);
 
     // Approve PT contract to spend PT to repay flash loan
     IERC20(address(PRINCIPAL_TOKEN)).approve(address(PRINCIPAL_TOKEN), _swappedPT);
