@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {Test, Vm} from "forge-std/Test.sol";
+import {Test, Vm, stdError} from "forge-std/Test.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Deployers} from "lib/v4-periphery/lib/v4-core/test/utils/Deployers.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
@@ -501,7 +501,7 @@ contract InitializeLiquidity is LPVaultTest {
     deal(Currency.unwrap(currency0), initializer, _amount0Max);
     deal(Currency.unwrap(currency1), initializer, _amount1Max);
 
-    vm.expectRevert(LPVault.LPVault__InsufficientAllowance.selector);
+    vm.expectRevert(stdError.arithmeticError);
     vm.prank(initializer);
     vault.initializeLiquidity(_amount0Max, _amount1Max);
   }

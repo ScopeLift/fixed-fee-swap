@@ -129,9 +129,6 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   /// @notice Thrown when attempting deposit before initialization.
   error LPVault__NotInitialized();
 
-  /// @notice Thrown when the caller has insufficient token allowance for initialization.
-  error LPVault__InsufficientAllowance();
-
   /// @notice Thrown when INIT_MAX_VALUE constructor parameter is zero.
   error LPVault__ZeroValue();
 
@@ -242,15 +239,10 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   {
     if (liquidityInitialized) revert LPVault__AlreadyInitialized();
 
-    // Check allowances before proceeding
-    if (IERC20(TOKEN0).allowance(msg.sender, address(this)) < _amount0Max) {
-      revert LPVault__InsufficientAllowance();
-    }
-    if (IERC20(TOKEN1).allowance(msg.sender, address(this)) < _amount1Max) {
-      revert LPVault__InsufficientAllowance();
-    }
-
     // Fetch current pool price for value constraint check and liquidity calculation.
+    // NOTE: Price is read outside the unlock callback, so it may be stale by the time
+    // modifyLiquidity executes. The SlippageCheck in _addLiquidityToPositions provides
+    // the actual protection; this is a best-effort cap.
     (uint160 _sqrtPriceX96,,,) = POOL_MANAGER.getSlot0(targetPoolKey.toId());
 
     // Check value constraint: convert amount0 to token1 value and verify total <= INIT_MAX_VALUE.
@@ -310,6 +302,9 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   {
     if (!liquidityInitialized) revert LPVault__NotInitialized();
     if (_liquidity == 0) revert LPVault__ZeroLiquidity();
+
+    // Sync fee accounting using the current liquidity configuration before changing it.
+    _syncFees();
 
     // Calculate liquidity for each position based on current ratios
     uint128[] memory _liquidityPerPosition = new uint128[](positions.length);
@@ -385,7 +380,9 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
       positions[_i].liquidity -= _liquidityToRemove[_i];
     }
 
-    // If all liquidity is withdrawn, reset initialization to allow re-initialization.
+    // If all shares are burned, reset initialization to allow re-initialization.
+    // Using totalSupply (checked after burn below) would require reordering; position0.liquidity
+    // is equivalent since shares == position0.liquidity is a maintained invariant.
     if (positions[0].liquidity == 0) liquidityInitialized = false;
 
     // Burn shares before making external calls (reentrancy protection).
@@ -474,12 +471,16 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   {
     DepositCallbackData memory _callbackData = abi.decode(_actionData, (DepositCallbackData));
 
-    (int256 _totalDelta0, int256 _totalDelta1,,) = _addLiquidityToPositions(
+    (int256 _totalDelta0, int256 _totalDelta1, int256 _totalFeeDelta0, int256 _totalFeeDelta1) = _addLiquidityToPositions(
       _callbackData.liquidityPerPosition, _callbackData.amount0Max, _callbackData.amount1Max
     );
 
     (uint256 _amount0Used, uint256 _amount1Used) =
       _settleDeltas(_totalDelta0, _totalDelta1, _callbackData.sender);
+
+    // Collect any fee tokens owed by the pool (should be zero on first init, but handles
+    // re-initialization after full withdrawal where fees may have accrued).
+    _collectFees(_totalFeeDelta0, _totalFeeDelta1);
 
     return abi.encode(_amount0Used, _amount1Used);
   }
