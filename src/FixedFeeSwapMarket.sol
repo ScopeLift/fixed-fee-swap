@@ -123,7 +123,6 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @notice Thrown when the swap amount is zero or negative
   error FixedFeeSwapMarket_SwapAmountCannotBeZero();
 
-
   /// @notice Thrown when a swap or time-dependent calculation is attempted at or after maturity
   error FixedFeeSwapMarket_MarketExpired();
 
@@ -552,8 +551,7 @@ contract FixedFeeSwapMarket is BaseHook {
 
     // Compute fee for this step directly from net consumed and attribute to LPs.
     // Per-step tracking is needed because activeLiquidity changes at tick crossings.
-    uint256 _stepFee =
-      FixedPointMathLib.mulDiv(_netConsumed, FEE_RATE, FEE_DENOMINATOR - FEE_RATE);
+    uint256 _stepFee = FixedPointMathLib.mulDiv(_netConsumed, FEE_RATE, FEE_DENOMINATOR - FEE_RATE);
     if (_stepFee > 0 && activeLiquidity > 0) {
       if (_ctx.principalForCash) {
         feeGrowthGlobal0X128 += FixedPointMathLib.mulDiv(_stepFee, Q128, activeLiquidity);
