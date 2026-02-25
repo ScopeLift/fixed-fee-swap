@@ -47,7 +47,7 @@ contract FixedFeeSwapMarketMock {
   /// @param _priceLimitWad Price limit (ignored in mock)
   /// @return amountInUsed Amount of input consumed (always full amount in mock)
   /// @return amountOut Amount of output tokens
-  function swap(uint256 _amountIn, bool _principalForCash, uint256 _priceLimitWad)
+  function swap(uint256 _amountIn, bool _principalForCash, int24 _priceLimitWad)
     external
     returns (uint256 amountInUsed, uint256 amountOut)
   {
