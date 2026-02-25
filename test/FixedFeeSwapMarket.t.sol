@@ -451,7 +451,7 @@ abstract contract FixedFeeSwapMarketTest is Test {
   }
 
   function _initializePrice() internal returns (int256) {
-    if (hook.getCurrentPrice() != 0) return hook.getCurrentPrice();
+    if (hook.getRawCurrentPrice() != 0) return hook.getCurrentPrice();
 
     _swap(bob, 1, true, hook.getCurrentTick());
 
@@ -3136,6 +3136,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
   {
     _extraLiquidity = uint128(bound(uint256(_extraLiquidity), 1e18, 1e22));
     _mintLiquidityAtTicks(alice, 0, 2000, _extraLiquidity);
+
     uint128 _activeBefore = hook.getActiveLiquidity();
     int24 _tickBefore = hook.getCurrentTick();
     int256 _priceBefore = hook.tickToPrice(_tickBefore);

@@ -429,6 +429,8 @@ contract FixedFeeSwapMarket is BaseHook {
       if (amountInUsed != 0) TOKEN1.safeTransferFrom(msg.sender, address(this), amountInUsed);
       if (amountOut != 0) TOKEN0.safeTransfer(msg.sender, amountOut);
     }
+
+    emit Swap(msg.sender, _principalForCash, amountInUsed, amountOut);
   }
 
   // ============ Internal Functions - Hook Overrides ============
