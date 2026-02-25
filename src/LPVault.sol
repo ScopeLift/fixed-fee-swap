@@ -56,8 +56,7 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   enum CallbackAction {
     Deposit,
     Withdraw,
-    CollectFees,
-    InitializeLiquidity
+    CollectFees
   }
 
   /// @notice Struct for passing deposit callback data.
@@ -258,7 +257,7 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
 
     bytes memory _result = POOL_MANAGER.unlock(
       abi.encode(
-        CallbackAction.InitializeLiquidity,
+        CallbackAction.Deposit,
         abi.encode(
           DepositCallbackData({
             sender: msg.sender,
@@ -424,9 +423,6 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
 
     if (_action == CallbackAction.Deposit) return _handleDepositCallback(_actionData);
     if (_action == CallbackAction.Withdraw) return _handleWithdrawCallback(_actionData);
-    if (_action == CallbackAction.InitializeLiquidity) {
-      return _handleInitializeLiquidityCallback(_actionData);
-    }
     return _handleCollectFeesCallback();
   }
 
@@ -455,31 +451,8 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     (uint256 _amount0Used, uint256 _amount1Used) =
       _settleDeltas(_totalDelta0, _totalDelta1, _callbackData.sender);
 
-    // Collect fees and update fee-per-share indexes.
-    _collectFees(_totalFeeDelta0, _totalFeeDelta1);
-
-    return abi.encode(_amount0Used, _amount1Used);
-  }
-
-  /// @notice Handles the initialize liquidity callback logic.
-  /// @param _actionData The encoded callback data.
-  /// @return The encoded result containing amounts used.
-  function _handleInitializeLiquidityCallback(bytes memory _actionData)
-    internal
-    virtual
-    returns (bytes memory)
-  {
-    DepositCallbackData memory _callbackData = abi.decode(_actionData, (DepositCallbackData));
-
-    (int256 _totalDelta0, int256 _totalDelta1, int256 _totalFeeDelta0, int256 _totalFeeDelta1) = _addLiquidityToPositions(
-      _callbackData.liquidityPerPosition, _callbackData.amount0Max, _callbackData.amount1Max
-    );
-
-    (uint256 _amount0Used, uint256 _amount1Used) =
-      _settleDeltas(_totalDelta0, _totalDelta1, _callbackData.sender);
-
-    // Collect any fee tokens owed by the pool (should be zero on first init, but handles
-    // re-initialization after full withdrawal where fees may have accrued).
+    // Collect fee tokens from the pool. Fee-per-share indexes are updated separately
+    // by _syncFees() (called before unlock and in _update on mint/burn/transfer).
     _collectFees(_totalFeeDelta0, _totalFeeDelta1);
 
     return abi.encode(_amount0Used, _amount1Used);
@@ -501,7 +474,8 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     (uint256 _amount0Received, uint256 _amount1Received) =
       _settleWithdrawDeltas(_totalDelta0, _totalDelta1, _callbackData.receiver);
 
-    // Collect fees and update fee-per-share indexes.
+    // Collect fee tokens from the pool. Fee-per-share indexes are updated separately
+    // by _syncFees() (called before unlock and in _update on mint/burn/transfer).
     _collectFees(_totalFeeDelta0, _totalFeeDelta1);
 
     return abi.encode(_amount0Received, _amount1Received);
@@ -824,7 +798,7 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     }
   }
 
-  /// @notice Collects fee tokens from the pool and updates the fee-per-share indexes.
+  /// @notice Collects fee tokens from the pool.
   /// @dev Fee deltas are positive when the pool owes us fees.
   /// @param _feeDelta0 The fee delta for token0.
   /// @param _feeDelta1 The fee delta for token1.

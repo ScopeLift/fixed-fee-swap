@@ -905,6 +905,12 @@ contract Withdraw is LPVaultTest {
     assertEq(vault.totalSupply(), _totalSupplyBefore);
 
     // Verify amounts received match total deposited (within rounding tolerance).
+    // Two sources of rounding loss compound across 2 deposits + 1 withdrawal:
+    //   1. v4 SqrtPriceMath asymmetric rounding: deposit rounds token amounts UP (user overpays),
+    //      withdraw rounds DOWN (user receives less). Up to 1 wei per token per position per op.
+    //   2. FullMath.mulDiv truncation: proportional liquidity for positions 1 & 2 is truncated on
+    //      each deposit/withdraw, so deposited vs withdrawn liquidity can differ by ~1 wei.
+    // With 2 positions contributing to each token, the practical max is ~5 wei.
     assertApproxEqAbs(_amount0Received, _amount0Used1, 5);
     assertApproxEqAbs(_amount1Received, _amount1Used1, 5);
 
