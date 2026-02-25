@@ -405,18 +405,19 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @notice Swaps tokens directly without going through PoolManager
   /// @param _amountIn The amount of input tokens
   /// @param _principalForCash True to swap PT→cash, false to swap cash→PT
-  /// @param _priceLimitWad Price limit in WAD (0 = no limit)
+  /// @param _tickLimit Tick limit (0 = no limit)
   /// @return amountInUsed The amount of input tokens consumed
   /// @return amountOut The amount of output tokens received
-  function swap(uint256 _amountIn, bool _principalForCash, int24 _priceLimitWad)
+  function swap(uint256 _amountIn, bool _principalForCash, int24 _tickLimit)
     external
     returns (uint256 amountInUsed, uint256 amountOut)
   {
-    // if (_amountIn == 0) revert FixedFeeSwap__SwapAmountCannotBeZero();
-    //if (activeLiquidity == 0) revert FixedFeeSwap__NoActiveLiquidity();
-    if (currentPrice == 0) currentPrice = tickToPrice(currentTick);
+    if (_amountIn == 0) revert FixedFeeSwapMarket_SwapAmountCannotBeZero();
+    if (block.timestamp >= MATURITY) revert FixedFeeSwapMarket_MarketExpired();
+    if (activeLiquidity == 0) revert FixedFeeSwapMarket_NoActiveLiquidity();
+    currentPrice = tickToPrice(currentTick);
 
-    (amountInUsed, amountOut) = _executeSwapLoop(_amountIn, _principalForCash, _priceLimitWad);
+    (amountInUsed, amountOut) = _executeSwapLoop(_amountIn, _principalForCash, _tickLimit);
 
     // Execute token transfers
     if (_principalForCash) {

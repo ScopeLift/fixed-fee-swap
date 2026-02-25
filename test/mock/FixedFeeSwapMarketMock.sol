@@ -44,15 +44,15 @@ contract FixedFeeSwapMarketMock {
   /// @notice Mock swap function that simulates trading
   /// @param _amountIn Amount of input tokens
   /// @param _principalForCash True = PT->cash, False = cash->PT
-  /// @param _priceLimitWad Price limit (ignored in mock)
+  /// @param _tickLimit Tick limit (ignored in mock)
   /// @return amountInUsed Amount of input consumed (always full amount in mock)
   /// @return amountOut Amount of output tokens
-  function swap(uint256 _amountIn, bool _principalForCash, int24 _priceLimitWad)
+  function swap(uint256 _amountIn, bool _principalForCash, int24 _tickLimit)
     external
     returns (uint256 amountInUsed, uint256 amountOut)
   {
     // Silence unused variable warning
-    _priceLimitWad;
+    _tickLimit;
 
     amountInUsed = _amountIn;
     amountOut = (_amountIn * swapOutputRatioBps) / 10_000;
