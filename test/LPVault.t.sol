@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {Test, Vm, stdError} from "forge-std/Test.sol";
+import {Test, stdError} from "forge-std/Test.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Deployers} from "lib/v4-periphery/lib/v4-core/test/utils/Deployers.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
@@ -678,7 +678,7 @@ contract Deposit is LPVaultTest {
 
   function test_RevertIf_NotInitialized(address _caller, uint128 _liquidity) public {
     // Deploy a fresh vault without initialization
-    LPVault freshVault = new LPVault(
+    LPVault _freshVault = new LPVault(
       manager, defaultPoolKey, defaultPositions, DEFAULT_NAME, DEFAULT_SYMBOL, INIT_MAX_VALUE
     );
 
@@ -687,11 +687,11 @@ contract Deposit is LPVaultTest {
     deal(Currency.unwrap(currency0), _caller, 1e18);
     deal(Currency.unwrap(currency1), _caller, 1e18);
     vm.startPrank(_caller);
-    MockERC20(Currency.unwrap(currency0)).approve(address(freshVault), 1e18);
-    MockERC20(Currency.unwrap(currency1)).approve(address(freshVault), 1e18);
+    MockERC20(Currency.unwrap(currency0)).approve(address(_freshVault), 1e18);
+    MockERC20(Currency.unwrap(currency1)).approve(address(_freshVault), 1e18);
 
     vm.expectRevert(LPVault.LPVault__NotInitialized.selector);
-    freshVault.deposit(1e18, 1e18, _liquidity);
+    _freshVault.deposit(1e18, 1e18, _liquidity);
     vm.stopPrank();
   }
 

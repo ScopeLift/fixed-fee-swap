@@ -835,12 +835,12 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
       (uint256 _feeGrowthInside0NowX128, uint256 _feeGrowthInside1NowX128) =
         POOL_MANAGER.getFeeGrowthInside(_poolId, _position.tickLower, _position.tickUpper);
 
-      PositionCheckpoint storage _checkpoint = positionCheckpoints[_i];
+      PositionCheckpoint storage checkpoint = positionCheckpoints[_i];
 
       // Only compute fees if position has liquidity.
       if (_liquidity > 0) {
-        uint256 _feeGrowthInside0LastX128 = _checkpoint.feeGrowthInside0LastX128;
-        uint256 _feeGrowthInside1LastX128 = _checkpoint.feeGrowthInside1LastX128;
+        uint256 _feeGrowthInside0LastX128 = checkpoint.feeGrowthInside0LastX128;
+        uint256 _feeGrowthInside1LastX128 = checkpoint.feeGrowthInside1LastX128;
 
         // Compute growth deltas since last checkpoint.
         uint256 _deltaFeeGrowth0X128 = _feeGrowthInside0NowX128 - _feeGrowthInside0LastX128;
@@ -855,8 +855,8 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
       }
 
       // Always advance checkpoints to prevent claiming fees from before we had liquidity.
-      _checkpoint.feeGrowthInside0LastX128 = _feeGrowthInside0NowX128;
-      _checkpoint.feeGrowthInside1LastX128 = _feeGrowthInside1NowX128;
+      checkpoint.feeGrowthInside0LastX128 = _feeGrowthInside0NowX128;
+      checkpoint.feeGrowthInside1LastX128 = _feeGrowthInside1NowX128;
     }
 
     // Update fee indexes if any fees accrued.
