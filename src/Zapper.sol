@@ -206,7 +206,7 @@ contract Zapper is IERC3156FlashBorrower {
     uint256 _vstNeeded = Math.mulDiv(_amount, _ptPrice, FeeTracking.PRECISION, Math.Rounding.Ceil);
 
     // Swap only the needed VST for PT to repay flash loan
-    uint256 _swappedPT = _calculateAndSwapVSTForPT(_vstNeeded);
+    uint256 _swappedPT = _swapVSTForPT(_vstNeeded);
 
     // Approve PT contract to spend PT to repay flash loan
     IERC20(address(PRINCIPAL_TOKEN)).approve(address(PRINCIPAL_TOKEN), _swappedPT);
@@ -240,7 +240,7 @@ contract Zapper is IERC3156FlashBorrower {
   /// @notice Swaps VST (cash) for PT using the FixedFeeSwapMarket
   /// @param _availableVST The amount of VST available to swap
   /// @return _swappedPT The amount of PT obtained from swapping VST
-  function _calculateAndSwapVSTForPT(uint256 _availableVST) internal returns (uint256 _swappedPT) {
+  function _swapVSTForPT(uint256 _availableVST) internal returns (uint256 _swappedPT) {
     // Approve market to spend VST (cash token)
     IERC20(address(VAULT_SHARE_TOKEN)).approve(address(FIXED_FEE_SWAP_MARKET), _availableVST);
 

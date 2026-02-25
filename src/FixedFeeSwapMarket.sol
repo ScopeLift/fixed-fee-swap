@@ -417,7 +417,8 @@ contract FixedFeeSwapMarket is BaseHook {
     if (activeLiquidity == 0) revert FixedFeeSwapMarket_NoActiveLiquidity();
     currentPrice = tickToPrice(currentTick);
 
-    (amountInUsed, amountOut) = _executeSwapLoop(_amountIn, _principalForCash, _tickLimit);
+    int24 _effectiveTickLimit = _tickLimit == 0 ? NO_TICK_LIMIT : _tickLimit;
+    (amountInUsed, amountOut) = _executeSwapLoop(_amountIn, _principalForCash, _effectiveTickLimit);
 
     // Execute token transfers
     if (_principalForCash) {

@@ -301,8 +301,9 @@ contract SellYieldToken is ZapperTest {
 }
 
 contract BuyYieldToken is ZapperTest {
-  function testFuzz_TransfersVSTFromUserToZapper(uint256 _vstAmount) public {
+  function testFuzz_TransfersVSTFromUserToZapper(uint256 _vstAmount, uint256 _mockPrice) public {
     _vstAmount = _boundToRealisticAmount(_vstAmount);
+    _boundAndSetMockPrice(_mockPrice);
 
     // Give user VST
     deal(address(vaultShareToken), user, _vstAmount);
@@ -327,8 +328,9 @@ contract BuyYieldToken is ZapperTest {
     );
   }
 
-  function testFuzz_UserReceivesYTAfterBuy(uint256 _vstAmount) public {
+  function testFuzz_UserReceivesYTAfterBuy(uint256 _vstAmount, uint256 _mockPrice) public {
     _vstAmount = _boundToRealisticAmount(_vstAmount);
+    _boundAndSetMockPrice(_mockPrice);
 
     // Give user VST
     deal(address(vaultShareToken), user, _vstAmount);
@@ -359,11 +361,14 @@ contract BuyYieldToken is ZapperTest {
     // Exact amount depends on mock implementation
   }
 
-  function testFuzz_YTReceivedIsProportionalToVSTSupplied(uint256 _vstAmount1, uint256 _vstAmount2)
-    public
-  {
+  function testFuzz_YTReceivedIsProportionalToVSTSupplied(
+    uint256 _vstAmount1,
+    uint256 _vstAmount2,
+    uint256 _mockPrice
+  ) public {
     _vstAmount1 = bound(_vstAmount1, 1e18, type(uint64).max);
     _vstAmount2 = bound(_vstAmount2, 1e18, type(uint64).max);
+    _boundAndSetMockPrice(_mockPrice);
     vm.assume(_vstAmount1 != _vstAmount2);
 
     address _user1 = makeAddr("user1");
@@ -396,8 +401,11 @@ contract BuyYieldToken is ZapperTest {
     else assertGt(_yt2, _yt1, "More VST should yield more YT");
   }
 
-  function testFuzz_ZapperHasNoRemainingBalancesAfterBuy(uint256 _vstAmount) public {
+  function testFuzz_ZapperHasNoRemainingBalancesAfterBuy(uint256 _vstAmount, uint256 _mockPrice)
+    public
+  {
     _vstAmount = _boundToRealisticAmount(_vstAmount);
+    _boundAndSetMockPrice(_mockPrice);
 
     // Give user VST
     deal(address(vaultShareToken), user, _vstAmount);
@@ -420,8 +428,9 @@ contract BuyYieldToken is ZapperTest {
     assertEq(_yt.balanceOf(address(zapper)), 0, "Zapper should have no remaining YT after buy");
   }
 
-  function testFuzz_EmitsYieldTokenBoughtEvent(uint256 _vstAmount) public {
+  function testFuzz_EmitsYieldTokenBoughtEvent(uint256 _vstAmount, uint256 _mockPrice) public {
     _vstAmount = _boundToRealisticAmount(_vstAmount);
+    _boundAndSetMockPrice(_mockPrice);
 
     // Give user VST
     deal(address(vaultShareToken), user, _vstAmount);
@@ -430,16 +439,34 @@ contract BuyYieldToken is ZapperTest {
     vm.prank(user);
     vaultShareToken.approve(address(zapper), _vstAmount);
 
-    // Expect event with correct user and vstSupplied (ytBought is checked separately)
-    vm.expectEmit(true, false, false, false);
-    emit Zapper.YieldTokenBought(user, 0, _vstAmount);
-
+    // Execute buy and record logs
+    vm.recordLogs();
     vm.prank(user);
     zapper.buyYieldToken(_vstAmount);
+
+    // Find the YieldTokenBought event and verify all fields
+    Vm.Log[] memory _logs = vm.getRecordedLogs();
+    bytes32 _eventSig = keccak256("YieldTokenBought(address,uint256,uint256)");
+    bool _found;
+    for (uint256 _i; _i < _logs.length; _i++) {
+      if (_logs[_i].topics[0] == _eventSig) {
+        // Verify indexed user field
+        assertEq(_logs[_i].topics[1], bytes32(uint256(uint160(user))), "Event user mismatch");
+        // Decode non-indexed fields
+        (uint256 _ytBoughtEmitted, uint256 _vstSuppliedEmitted) =
+          abi.decode(_logs[_i].data, (uint256, uint256));
+        assertGt(_ytBoughtEmitted, 0, "Event ytBought should be non-zero");
+        assertEq(_vstSuppliedEmitted, _vstAmount, "Event vstSupplied mismatch");
+        _found = true;
+        break;
+      }
+    }
+    assertTrue(_found, "YieldTokenBought event not emitted");
   }
 
-  function testFuzz_FlashLoanIsRepaidSuccessfully(uint256 _vstAmount) public {
+  function testFuzz_FlashLoanIsRepaidSuccessfully(uint256 _vstAmount, uint256 _mockPrice) public {
     _vstAmount = _boundToRealisticAmount(_vstAmount);
+    _boundAndSetMockPrice(_mockPrice);
 
     // Give user VST
     deal(address(vaultShareToken), user, _vstAmount);
@@ -586,8 +613,9 @@ contract OnFlashLoan is ZapperTest {
     );
   }
 
-  function testFuzz_BuyPathApprovesVSTForDeposit(uint256 _amount) public {
+  function testFuzz_BuyPathApprovesVSTForDeposit(uint256 _amount, uint256 _mockPrice) public {
     _amount = _boundToRealisticAmount(_amount);
+    _boundAndSetMockPrice(_mockPrice);
 
     // Get PT contract
     PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
@@ -614,8 +642,9 @@ contract OnFlashLoan is ZapperTest {
     assertTrue(true, "Buy path flash loan callback succeeded");
   }
 
-  function testFuzz_BuyPathApprovesPTForRepayment(uint256 _amount) public {
+  function testFuzz_BuyPathApprovesPTForRepayment(uint256 _amount, uint256 _mockPrice) public {
     _amount = _boundToRealisticAmount(_amount);
+    _boundAndSetMockPrice(_mockPrice);
 
     // Get PT contract
     PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
