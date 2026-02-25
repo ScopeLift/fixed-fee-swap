@@ -3,7 +3,6 @@ pragma solidity ^0.8.26;
 
 // External imports
 import {Test} from "forge-std/Test.sol";
-import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 // Internal imports
@@ -45,15 +44,15 @@ contract ZapperTest is Test {
     fixedFeeSwap = new FixedFeeSwap(vaultShareToken, maturity);
 
     // Create mock FixedFeeSwapMarket for PT/VST trading
-    PrincipalToken pt = fixedFeeSwap.PRINCIPAL_TOKEN();
+    PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
     fixedFeeSwapMarketMock = new FixedFeeSwapMarketMock(
-      address(pt), // token0 = PT (principal)
+      address(_pt), // token0 = PT (principal)
       address(vaultShareToken) // token1 = VST (cash)
     );
 
     // Fund the mock market with tokens so it can perform swaps
     // Use a large but reasonable amount to cover all test scenarios
-    deal(address(pt), address(fixedFeeSwapMarketMock), 1e30);
+    deal(address(_pt), address(fixedFeeSwapMarketMock), 1e30);
     deal(address(vaultShareToken), address(fixedFeeSwapMarketMock), 1e30);
 
     zapper = new Zapper(fixedFeeSwap, FixedFeeSwapMarket(address(fixedFeeSwapMarketMock)));
