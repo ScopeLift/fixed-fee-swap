@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import {LPVault} from "src/LPVault.sol";
+import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {PoolKey} from "v4-core/types/PoolKey.sol";
+import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
+
+contract LPVaultHarness is LPVault {
+  using StateLibrary for IPoolManager;
+
+  constructor(
+    IPoolManager _poolManager,
+    PoolKey memory _targetPoolKey,
+    LiquidityPosition[] memory _positions,
+    string memory _name,
+    string memory _symbol,
+    uint256 _initMaxValue
+  ) LPVault(_poolManager, _targetPoolKey, _positions, _name, _symbol, _initMaxValue) {}
+
+  function computeInitialLiquidity()
+    external
+    view
+    returns (uint128[] memory _liquidityPerPosition, uint128 _liquidity0)
+  {
+    (uint160 _sqrtPriceX96,,,) = POOL_MANAGER.getSlot0(targetPoolKey.toId());
+    (_liquidityPerPosition, _liquidity0) = _calculateInitialLiquidity(_sqrtPriceX96);
+  }
+
+  function getAmountsForLiquidity(
+    int24 _tickLower,
+    int24 _tickUpper,
+    uint160 _sqrtPriceX96,
+    uint128 _liquidity
+  ) external pure returns (uint256 _amount0, uint256 _amount1) {
+    LiquidityPosition memory _position = LiquidityPosition({
+      tickLower: _tickLower, tickUpper: _tickUpper, weight: 0, liquidity: 0
+    });
+    return _getAmountsForLiquidity(_position, _sqrtPriceX96, _liquidity);
+  }
+}
