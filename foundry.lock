@@ -8,6 +8,12 @@
       "rev": "fcbae5394ae8ad52d8e580a3477db99814b9d565"
     }
   },
+  "lib/solady": {
+    "tag": {
+      "name": "v0.1.26",
+      "rev": "acd959aa4bd04720d640bf4e6a5c71037510cc4b"
+    }
+  },
   "lib/v4-periphery": {
     "rev": "3779387e5d296f39df543d23524b050f89a62917"
   }
