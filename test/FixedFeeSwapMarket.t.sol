@@ -18,7 +18,7 @@ import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
 
 struct Amounts {
   int256 amount0;
-  int256 _amount1;
+  int256 amount1;
 }
 
 struct SharedWithdrawalCtx {
@@ -1001,7 +1001,7 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     assertGt(token1Used2, token1Used1, "larger _liquidity token1");
   }
 
-  function testFuzz_AddingLiquidityAboveCurrentTickIncreasesToken1Used(
+  function testFuzz_InRangeLiquidityScalesBothTokensWithLiquidity(
     uint128 _liquidity1,
     uint128 _liquidity2
   ) public {
@@ -1382,29 +1382,29 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
 
     _warpFromStart(1);
     Amounts memory _expectedAtT1;
-    (_expectedAtT1.amount0, _expectedAtT1._amount1) =
+    (_expectedAtT1.amount0, _expectedAtT1.amount1) =
       _expectedMintAmounts(_tickLower, _tickUpper, _additionalLiquidity);
     Amounts memory _usedAtT1;
-    (_usedAtT1.amount0, _usedAtT1._amount1) =
+    (_usedAtT1.amount0, _usedAtT1.amount1) =
       _increaseLiquidity(alice, _positionId, _additionalLiquidity);
 
     vm.revertToState(_snapshot);
     _warpFromStart(30 days);
     Amounts memory _expectedAtT2;
-    (_expectedAtT2.amount0, _expectedAtT2._amount1) =
+    (_expectedAtT2.amount0, _expectedAtT2.amount1) =
       _expectedMintAmounts(_tickLower, _tickUpper, _additionalLiquidity);
     Amounts memory _usedAtT2;
-    (_usedAtT2.amount0, _usedAtT2._amount1) =
+    (_usedAtT2.amount0, _usedAtT2.amount1) =
       _increaseLiquidity(alice, _positionId, _additionalLiquidity);
 
     assertEq(_usedAtT1.amount0, _expectedAtT1.amount0, "t1 token0");
-    assertEq(_usedAtT1._amount1, _expectedAtT1._amount1, "t1 token1");
+    assertEq(_usedAtT1.amount1, _expectedAtT1.amount1, "t1 token1");
     assertEq(_usedAtT2.amount0, _expectedAtT2.amount0, "t2 token0");
-    assertEq(_usedAtT2._amount1, _expectedAtT2._amount1, "t2 token1");
+    assertEq(_usedAtT2.amount1, _expectedAtT2.amount1, "t2 token1");
     assertGt(_expectedAtT1.amount0, 0, "t1 token0 required");
-    assertGt(_expectedAtT1._amount1, 0, "t1 token1 required");
+    assertGt(_expectedAtT1.amount1, 0, "t1 token1 required");
     assertEq(_expectedAtT2.amount0, _expectedAtT1.amount0, "principal invariant");
-    assertTrue(_expectedAtT2._amount1 != _expectedAtT1._amount1, "cash changes over _time");
+    assertTrue(_expectedAtT2.amount1 != _expectedAtT1.amount1, "cash changes over _time");
   }
 
   // ============ Active Liquidity Tests ============
@@ -2262,13 +2262,13 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     {
       (int256 e0, int256 e1) = _expectedMintAmounts(_tickLower, _tickUpper, _removeAmount);
       _expectedAtT1.amount0 = e0;
-      _expectedAtT1._amount1 = e1;
+      _expectedAtT1.amount1 = e1;
     }
     Amounts memory _receivedAtT1;
     {
       (uint256 received0, uint256 received1) = _decreaseLiquidity(alice, _positionId, _removeAmount);
       _receivedAtT1.amount0 = int256(received0);
-      _receivedAtT1._amount1 = int256(received1);
+      _receivedAtT1.amount1 = int256(received1);
     }
 
     vm.revertToState(_snapshot);
@@ -2278,21 +2278,21 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     {
       (int256 e0, int256 e1) = _expectedMintAmounts(_tickLower, _tickUpper, _removeAmount);
       _expectedAtT2.amount0 = e0;
-      _expectedAtT2._amount1 = e1;
+      _expectedAtT2.amount1 = e1;
     }
     Amounts memory _receivedAtT2;
     {
       (uint256 received0, uint256 received1) = _decreaseLiquidity(alice, _positionId, _removeAmount);
       _receivedAtT2.amount0 = int256(received0);
-      _receivedAtT2._amount1 = int256(received1);
+      _receivedAtT2.amount1 = int256(received1);
     }
 
     assertEq(_receivedAtT1.amount0, _expectedAtT1.amount0, "t1 token0");
-    assertEq(_receivedAtT1._amount1, _expectedAtT1._amount1, "t1 token1");
+    assertEq(_receivedAtT1.amount1, _expectedAtT1.amount1, "t1 token1");
     assertEq(_receivedAtT2.amount0, _expectedAtT2.amount0, "t2 token0");
-    assertEq(_receivedAtT2._amount1, _expectedAtT2._amount1, "t2 token1");
+    assertEq(_receivedAtT2.amount1, _expectedAtT2.amount1, "t2 token1");
     assertEq(_expectedAtT2.amount0, _expectedAtT1.amount0, "principal invariant");
-    assertNotEq(_expectedAtT2._amount1, _expectedAtT1._amount1, "cash changes over _time");
+    assertNotEq(_expectedAtT2.amount1, _expectedAtT1.amount1, "cash changes over _time");
   }
 
   // ============ Slippage Tests ============
