@@ -123,11 +123,6 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @notice Thrown when the swap amount is zero or negative
   error FixedFeeSwapMarket_SwapAmountCannotBeZero();
 
-  /// @notice Thrown when a swap step consumes zero input, which would cause an infinite loop
-  error FixedFeeSwapMarket_SwapStepProducedZeroIn();
-
-  /// @notice Thrown when a swap step produces zero output for nonzero input
-  error FixedFeeSwapMarket_SwapStepProducedZeroOut();
 
   /// @notice Thrown when a swap or time-dependent calculation is attempted at or after maturity
   error FixedFeeSwapMarket_MarketExpired();
@@ -345,7 +340,6 @@ contract FixedFeeSwapMarket is BaseHook {
   ) external virtual {
     PositionInfo storage position = _requirePositionOwner(_positionId);
     if (_liquidity >= 0) revert FixedFeeSwapMarket_LiquidityDeltaMustBeNegative();
-    if (position.liquidity < 0) revert FixedFeeSwapMarket_InvalidLiquidityAmount();
     if (uint128(position.liquidity) < uint128(_liquidity.abs())) {
       revert FixedFeeSwapMarket_InsufficientPositionLiquidity();
     }
@@ -559,7 +553,7 @@ contract FixedFeeSwapMarket is BaseHook {
     // Compute fee for this step directly from net consumed and attribute to LPs.
     // Per-step tracking is needed because activeLiquidity changes at tick crossings.
     uint256 _stepFee =
-      FixedPointMathLib.mulDivUp(_netConsumed, FEE_RATE, FEE_DENOMINATOR - FEE_RATE);
+      FixedPointMathLib.mulDiv(_netConsumed, FEE_RATE, FEE_DENOMINATOR - FEE_RATE);
     if (_stepFee > 0 && activeLiquidity > 0) {
       if (_ctx.principalForCash) {
         feeGrowthGlobal0X128 += FixedPointMathLib.mulDiv(_stepFee, Q128, activeLiquidity);
