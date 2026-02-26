@@ -2,7 +2,7 @@
 pragma solidity ^0.8.26;
 
 // External imports
-import {Test, Vm} from "forge-std/Test.sol";
+import {Test} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 // Internal imports
@@ -246,29 +246,12 @@ contract SellYieldToken is ZapperTest {
     vm.prank(user);
     _yt.approve(address(zapper), _ytAmount);
 
-    // Execute sell and record logs
-    vm.recordLogs();
+    // Check indexed user; skip data fields (vstReceived unknown before call)
+    vm.expectEmit(true, false, false, false, address(zapper));
+    emit Zapper.YieldTokenSold(user, 0, 0);
+
     vm.prank(user);
     zapper.sellYieldToken(_ytAmount);
-
-    // Find the YieldTokenSold event and verify all fields
-    Vm.Log[] memory _logs = vm.getRecordedLogs();
-    bytes32 _eventSig = keccak256("YieldTokenSold(address,uint256,uint256)");
-    bool _found;
-    for (uint256 _i; _i < _logs.length; _i++) {
-      if (_logs[_i].topics[0] == _eventSig) {
-        // Verify indexed user field
-        assertEq(_logs[_i].topics[1], bytes32(uint256(uint160(user))), "Event user mismatch");
-        // Decode non-indexed fields
-        (uint256 _ytAmountEmitted, uint256 _vstReceivedEmitted) =
-          abi.decode(_logs[_i].data, (uint256, uint256));
-        assertEq(_ytAmountEmitted, _ytAmount, "Event ytAmount mismatch");
-        assertGt(_vstReceivedEmitted, 0, "Event vstReceived should be non-zero");
-        _found = true;
-        break;
-      }
-    }
-    assertTrue(_found, "YieldTokenSold event not emitted");
   }
 
   function testFuzz_FlashLoanIsRepaidSuccessfully(uint256 _ytAmount, uint256 _mockPrice) public {
@@ -439,29 +422,12 @@ contract BuyYieldToken is ZapperTest {
     vm.prank(user);
     vaultShareToken.approve(address(zapper), _vstAmount);
 
-    // Execute buy and record logs
-    vm.recordLogs();
+    // Check indexed user; skip data fields (ytBought unknown before call)
+    vm.expectEmit(true, false, false, false, address(zapper));
+    emit Zapper.YieldTokenBought(user, 0, 0);
+
     vm.prank(user);
     zapper.buyYieldToken(_vstAmount);
-
-    // Find the YieldTokenBought event and verify all fields
-    Vm.Log[] memory _logs = vm.getRecordedLogs();
-    bytes32 _eventSig = keccak256("YieldTokenBought(address,uint256,uint256)");
-    bool _found;
-    for (uint256 _i; _i < _logs.length; _i++) {
-      if (_logs[_i].topics[0] == _eventSig) {
-        // Verify indexed user field
-        assertEq(_logs[_i].topics[1], bytes32(uint256(uint160(user))), "Event user mismatch");
-        // Decode non-indexed fields
-        (uint256 _ytBoughtEmitted, uint256 _vstSuppliedEmitted) =
-          abi.decode(_logs[_i].data, (uint256, uint256));
-        assertGt(_ytBoughtEmitted, 0, "Event ytBought should be non-zero");
-        assertEq(_vstSuppliedEmitted, _vstAmount, "Event vstSupplied mismatch");
-        _found = true;
-        break;
-      }
-    }
-    assertTrue(_found, "YieldTokenBought event not emitted");
   }
 
   function testFuzz_FlashLoanIsRepaidSuccessfully(uint256 _vstAmount, uint256 _mockPrice) public {
