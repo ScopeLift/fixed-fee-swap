@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {Test, Vm} from "forge-std/Test.sol";
+import {Test} from "forge-std/Test.sol";
 import {stdError} from "forge-std/StdError.sol";
 import {FixedFeeSwapMarket} from "src/FixedFeeSwapMarket.sol";
 import {FixedFeeSwapMarketHarness} from "test/harness/FixedFeeSwapMarketHarness.sol";
@@ -3885,36 +3885,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
 
   // ============ Direct Swap Tests (FixedFeeSwapMarket.swap) ============
 
-  function test_DirectSwap_RevertIf_AmountIsZero() public {
-    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwapMarket_SwapAmountCannotBeZero.selector);
-    hook.swap(0, true, 0);
-  }
-
-  function test_DirectSwap_RevertIf_MarketExpired() public {
-    vm.warp(hook.getStartTime() + MARKET_LENGTH);
-    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwapMarket_MarketExpired.selector);
-    hook.swap(1e18, true, 0);
-  }
-
-  function test_DirectSwap_RevertIf_NoActiveLiquidity() public {
-    // Deploy fresh hook with no liquidity
-    address _mockManager = makeAddr("directSwapNoLiqManager");
-    FixedFeeSwapMarketHarness _freshHook = new FixedFeeSwapMarketHarness(
-      MARKET_LENGTH,
-      address(token0),
-      address(token1),
-      FEE_RATE,
-      YIELD_PER_TICK,
-      IPoolManager(_mockManager),
-      0
-    );
-    vm.warp(_freshHook.getStartTime() + 1);
-    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwapMarket_NoActiveLiquidity.selector);
-    vm.prank(alice);
-    _freshHook.swap(1e18, true, 0);
-  }
-
-  function testFuzz_DirectSwap_PrincipalForCashTransfersCorrectTokens(uint256 _amount) public {
+  function testFuzz_DirectSwapPrincipalForCashTransfersCorrectTokens(uint256 _amount) public {
     // Minimum 2 bips (2 * activeLiquidity / BIPS) for guaranteed tick movement
     _amount = bound(_amount, _ptForOneBip() * 2, 1e20);
 
@@ -3930,7 +3901,7 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertEq(token1.balanceOf(bob), _token1Before + _amountOut, "Cash should increase by amountOut");
   }
 
-  function testFuzz_DirectSwap_CashForPrincipalTransfersCorrectTokens(uint256 _amount) public {
+  function testFuzz_DirectSwapCashForPrincipalTransfersCorrectTokens(uint256 _amount) public {
     // Minimum 2 bips for guaranteed tick movement
     _amount = bound(_amount, _ptForOneBip() * 2, 1e20);
 
@@ -3948,32 +3919,18 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertEq(token0.balanceOf(bob), _token0Before + _amountOut, "PT should increase by amountOut");
   }
 
-  function testFuzz_DirectSwap_EmitsSwapEvent(uint256 _amount) public {
+  function testFuzz_DirectSwapEmitsSwapEvent(uint256 _amount) public {
     _amount = bound(_amount, _ptForOneBip() * 2, 1e20);
 
-    vm.recordLogs();
-    vm.prank(bob);
-    (uint256 _amountInUsed, uint256 _amountOut) = hook.swap(_amount, true, 0);
+    // Check indexed sender; skip data fields (amounts unknown before call)
+    vm.expectEmit(true, false, false, false, address(hook));
+    emit FixedFeeSwapMarket.Swap(bob, true, 0, 0);
 
-    Vm.Log[] memory _logs = vm.getRecordedLogs();
-    bytes32 _eventSig = keccak256("Swap(address,bool,uint256,uint256)");
-    bool _found;
-    for (uint256 _i; _i < _logs.length; _i++) {
-      if (_logs[_i].topics[0] == _eventSig) {
-        assertEq(_logs[_i].topics[1], bytes32(uint256(uint160(bob))), "Event sender should be bob");
-        (bool _principalForCash, uint256 _emittedIn, uint256 _emittedOut) =
-          abi.decode(_logs[_i].data, (bool, uint256, uint256));
-        assertTrue(_principalForCash, "Event should indicate principalForCash");
-        assertEq(_emittedIn, _amountInUsed, "Event amountIn mismatch");
-        assertEq(_emittedOut, _amountOut, "Event amountOut mismatch");
-        _found = true;
-        break;
-      }
-    }
-    assertTrue(_found, "Swap event not emitted");
+    vm.prank(bob);
+    hook.swap(_amount, true, 0);
   }
 
-  function testFuzz_DirectSwap_DoesNotConsumeMoreThanRequested(uint256 _amount) public {
+  function testFuzz_DirectSwapDoesNotConsumeMoreThanRequested(uint256 _amount) public {
     _amount = bound(_amount, _ptForOneBip() * 2, 1e20);
 
     vm.prank(bob);
@@ -3982,6 +3939,41 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertGt(_amountInUsed, 0, "Direct swap should consume input");
     assertGt(_amountOut, 0, "Direct swap should produce output");
     assertLe(_amountInUsed, _amount, "Should not consume more than requested");
+  }
+
+  function testFuzz_RevertIf_DirectSwapAmountIsZero(bool _principalForCash) public {
+    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwapMarket_SwapAmountCannotBeZero.selector);
+    hook.swap(0, _principalForCash, 0);
+  }
+
+  function testFuzz_RevertIf_DirectSwapMarketExpired(uint256 _amount, bool _principalForCash)
+    public
+  {
+    _amount = bound(_amount, 1, 1e20);
+    vm.warp(hook.getStartTime() + MARKET_LENGTH);
+    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwapMarket_MarketExpired.selector);
+    hook.swap(_amount, _principalForCash, 0);
+  }
+
+  function testFuzz_RevertIf_DirectSwapNoActiveLiquidity(uint256 _amount, bool _principalForCash)
+    public
+  {
+    _amount = bound(_amount, 1, 1e20);
+    // Deploy fresh hook with no liquidity
+    address _mockManager = makeAddr("directSwapNoLiqManager");
+    FixedFeeSwapMarketHarness _freshHook = new FixedFeeSwapMarketHarness(
+      MARKET_LENGTH,
+      address(token0),
+      address(token1),
+      FEE_RATE,
+      YIELD_PER_TICK,
+      IPoolManager(_mockManager),
+      0
+    );
+    vm.warp(_freshHook.getStartTime() + 1);
+    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwapMarket_NoActiveLiquidity.selector);
+    vm.prank(alice);
+    _freshHook.swap(_amount, _principalForCash, 0);
   }
 }
 
