@@ -32,10 +32,10 @@ contract FixedFeeSwap {
   /// @notice Thrown when deposit is attempted with an invalid amount.
   error FixedFeeSwap_InvalidAmount();
 
-  /// @notice Thrown when split is attempted with an invalid maturity.
+  /// @notice Thrown when the maturity is in the past.
   error FixedFeeSwap_InvalidMaturity();
 
-  /// @notice Thrown when split is attempted with an invalid vault share token.
+  /// @notice Thrown when the vault share token is zero.
   error FixedFeeSwap_InvalidVaultShareToken();
 
   /// @notice Thrown when action is attempted with an insufficient balance.

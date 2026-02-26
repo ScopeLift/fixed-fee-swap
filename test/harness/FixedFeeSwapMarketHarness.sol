@@ -106,7 +106,7 @@ contract FixedFeeSwapMarketHarness is FixedFeeSwapMarket {
     return currentTick;
   }
 
-  function getCurrentPrice() external view returns (int256) {
+  function getRawCurrentPrice() external view returns (int256) {
     return currentPrice;
   }
 
