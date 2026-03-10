@@ -1,6 +1,6 @@
-# Fixed Fee Swap: Principal and Yield Token Separation
+⚠️ **Disclaimer:** This repository has not been audited. It is a proof of concept and is not ready for production use.
 
-**Disclaimer:** This repository has not been audited. It is a proof of concept and is not ready for production use.
+# Fixed Fee Swap: Principal and Yield Token Separation
 
 - [Fixed Fee Swap: Principal and Yield Token Separation](#fixed-fee-swap-principal-and-yield-token-separation)
   - [About](#about)
