@@ -1132,6 +1132,35 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     assertEq(uint128(_liq), 1e22, "Liquidity should match");
   }
 
+  function testFuzz_MintsANewPositionSharingAnUpperTickThatSwapsCrossedBothWays(uint128 _liquidity)
+    public
+  {
+    _liquidity = _boundLiquidity(_liquidity);
+    // LP fees must be on, so the swaps below grow fee growth on both sides of tick 10.
+    (FixedFeeSwapMarketHarness _feeHook,) =
+      _deployHookForBeforeSwapTests(LP_FEE_RATE, "sharedCrossedTickManager");
+    // Bob's ranges initialize tick 10, which Alice's position shares, and keep liquidity active
+    // above it up to tick 40.
+    _mintOnHook(_feeHook, bob, 0, 10, 1000e18);
+    _mintOnHook(_feeHook, bob, 0, 40, 1000e18);
+
+    // The amounts are more than enough to reach each tick limit, so each swap stops at its limit.
+    // Crossing tick 10 up and back sets its fee growth outside to the fees earned above it.
+    vm.startPrank(bob);
+    _feeHook.swap(1000e18, true, 30);
+    assertEq(_feeHook.getCurrentTick(), 30, "Setup: tick should cross above tick 10");
+    _feeHook.swap(1000e18, false, 8);
+    vm.stopPrank();
+    assertEq(_feeHook.getCurrentTick(), 8, "Setup: tick should end between ticks 3 and 10");
+
+    // Tick 3 is fresh and below the current tick, so minting sets its fee growth outside to the
+    // global fee growth.
+    bytes32 _positionId = _mintOnHook(_feeHook, alice, 3, 10, _liquidity);
+
+    (,,, int128 _positionLiquidity) = _feeHook.getPositionInfo(_positionId);
+    assertEq(uint128(_positionLiquidity), _liquidity, "Position should hold the minted liquidity");
+  }
+
   // ============ Revert Tests ============
 
   function testFuzz_RevertIf_TickRangeIsInvalid(
