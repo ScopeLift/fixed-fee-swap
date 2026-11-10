@@ -91,6 +91,8 @@ An ERC20 token representing the right to fees earned by the underlying LP positi
 
 - Tracks and distributes fees using the same cumulative index model as VaultShareToken
 - Fees are automatically claimed when tokens are burned
+- Transfers first sync the vault fees earned so far, so the sender keeps them and the recipient earns only from the transfer on
+- Earned fees can be claimed at any time, without burning YT, through FixedFeeSwap's `claimYTFees(address)`. The holder can call it, or any account with a YT allowance from the holder, and it always pays the holder
 - Earns fees up to maturity and nothing after it
 - After maturity, holders can claim the fees their YT earned and burn it via `claimYTFeesAfterMaturity()`, whatever other holders have done
 - Can only be minted/burned by the FixedFeeSwap contract
