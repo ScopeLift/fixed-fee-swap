@@ -1163,10 +1163,10 @@ contract FixedFeeSwapMarket is BaseHook {
       _fgDelta1 = _fg1 - position.feeGrowthInside1LastX128;
     }
 
-    // Note: Cast to uint128 assumes fee amounts won't exceed type(uint128).max.
-    // This is safe in practice as it would require mass fee accumulation beyond realistic volumes.
-    position.tokensOwed0 += uint128(FixedPointMathLib.mulDiv(_fgDelta0, _liq, Q128));
-    position.tokensOwed1 += uint128(FixedPointMathLib.mulDiv(_fgDelta1, _liq, Q128));
+    // Fee amounts beyond type(uint128).max would need fee accumulation far beyond realistic
+    // volumes, so the casts revert rather than truncate if fee accounting is ever inconsistent.
+    position.tokensOwed0 += FixedPointMathLib.mulDiv(_fgDelta0, _liq, Q128).toUint128();
+    position.tokensOwed1 += FixedPointMathLib.mulDiv(_fgDelta1, _liq, Q128).toUint128();
 
     position.feeGrowthInside0LastX128 = _fg0;
     position.feeGrowthInside1LastX128 = _fg1;
