@@ -459,6 +459,40 @@ contract UpdateFees is YieldTokenTest {
 }
 
 contract Transfer is YieldTokenTest {
+  function testFuzz_CreditsFeesSyncedAtTheTransferToTheSender(
+    address _from,
+    address _to,
+    uint256 _amount,
+    uint256 _fee
+  ) public {
+    _assumeSafeAddress(_from);
+    _assumeSafeAddress(_to);
+    vm.assume(_from != _to);
+    _amount = _boundMintAmount(_amount);
+    _fee = _boundFeeAmount(_fee);
+    vm.prank(hook);
+    yieldToken.mint(_from, _amount);
+    // Fees the vault earned while `_from` held the YT, which FixedFeeSwap syncs at the transfer.
+    FixedFeeSwapMock(payable(hook)).setPendingFees(_fee, 0);
+
+    vm.prank(_from);
+    yieldToken.transfer(_to, _amount);
+
+    (,, uint256 _fromAccrued0,) = yieldToken.userFees(_from);
+    (,, uint256 _toAccrued0,) = yieldToken.userFees(_to);
+    assertEq(_fromAccrued0, _calculateAccruedFees(_amount, yieldToken.globalFeeIndex0Scaled(), 0));
+    assertEq(_toAccrued0, 0);
+  }
+
+  function testFuzz_DoesNotSyncFixedFeeSwapFeesOnMint(address _to, uint256 _amount) public {
+    _assumeSafeAddress(_to);
+    _amount = _boundMintAmount(_amount);
+
+    vm.expectCall(hook, abi.encodeCall(IFixedFeeSwap.syncFees, ()), 0);
+    vm.prank(hook);
+    yieldToken.mint(_to, _amount);
+  }
+
   function testFuzz_SyncsFixedFeeSwapFeesBeforeTransferring(
     address _from,
     address _to,

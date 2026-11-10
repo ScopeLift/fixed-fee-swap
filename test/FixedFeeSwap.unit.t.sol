@@ -382,6 +382,22 @@ contract SyncFees is FixedFeeSwapTest {
     assertEq(_yt.globalFeeIndex0Scaled(), _ytIndexBefore);
   }
 
+  function test_CarriesFeesYieldTokenRoundingDroppedIntoTheNextSync() public {
+    // One share more than 1e24, so crediting 1e6 wei rounds YieldToken's fee index increase down to
+    // zero, while a vault fee of 1e6 + 1 still raises the vault's index by exactly 1.
+    uint256 _depositAmount = 1e24 + 1;
+    YieldToken _yieldToken = fixedFeeSwap.YIELD_TOKEN();
+    _mintVstAndDepositForUser(user, _depositAmount);
+    _updateYieldTokenFees(1e6 + 1, 0);
+    fixedFeeSwap.syncFees();
+    assertEq(_yieldToken.globalFeeIndex0Scaled(), 0);
+
+    _updateYieldTokenFees(1e6 + 1, 0);
+    fixedFeeSwap.syncFees();
+
+    assertEq(_yieldToken.globalFeeIndex0Scaled(), 1);
+  }
+
   function testFuzz_CreditsNoFeesEarnedWhileNoYieldTokensExisted(
     uint256 _depositAmount,
     uint256 _feeToken0
@@ -1517,7 +1533,6 @@ contract YieldTokenTransfer is FixedFeeSwapTest {
 
 contract ClaimYTFees is FixedFeeSwapTest {
   function testFuzz_PaysTheHolderTheFeesTheirYieldTokensEarned(
-    address _caller,
     uint256 _depositAmount,
     uint256 _feeToken0,
     uint256 _feeToken1
@@ -1534,12 +1549,52 @@ contract ClaimYTFees is FixedFeeSwapTest {
     _yieldToken.transfer(user, 0);
     (,, uint256 _accrued0, uint256 _accrued1) = _yieldToken.userFees(user);
 
-    vm.prank(_caller);
+    vm.prank(user);
     fixedFeeSwap.claimYTFees(user);
 
     assertEq(token0.balanceOf(user), _accrued0);
     assertEq(token1.balanceOf(user), _accrued1);
     assertEq(_yieldToken.balanceOf(user), _depositAmount);
+  }
+
+  function testFuzz_PaysTheHolderWhenCalledByAnAccountWithAYieldTokenAllowance(
+    address _spender,
+    uint256 _allowance,
+    uint256 _depositAmount,
+    uint256 _feeToken0
+  ) public {
+    _assumeSafeAddress(_spender);
+    vm.assume(_spender != user);
+    _allowance = bound(_allowance, 1, type(uint256).max);
+    _depositAmount = _boundToFeeEarningDeposit(_depositAmount);
+    _feeToken0 = _boundToFeeAboveRounding(_feeToken0);
+    YieldToken _yieldToken = fixedFeeSwap.YIELD_TOKEN();
+    _mintVstAndDepositForUser(user, _depositAmount);
+    _updateYieldTokenFees(_feeToken0, 0);
+    vm.prank(user);
+    _yieldToken.approve(_spender, _allowance);
+    // A zero transfer checkpoints the user's accrued fees so the test can read them.
+    vm.prank(user);
+    _yieldToken.transfer(user, 0);
+    (,, uint256 _accrued0,) = _yieldToken.userFees(user);
+
+    vm.prank(_spender);
+    fixedFeeSwap.claimYTFees(user);
+
+    assertEq(token0.balanceOf(user), _accrued0);
+  }
+
+  function testFuzz_RevertIf_CallerIsNeitherTheHolderNorApprovedForItsYieldTokens(
+    address _caller,
+    uint256 _depositAmount
+  ) public {
+    vm.assume(_caller != user);
+    _depositAmount = _boundToRealisticAmount(_depositAmount);
+    _mintVstAndDepositForUser(user, _depositAmount);
+
+    vm.expectRevert(FixedFeeSwap.FixedFeeSwap_NotAuthorized.selector);
+    vm.prank(_caller);
+    fixedFeeSwap.claimYTFees(user);
   }
 
   function testFuzz_PaysAnAccountThatTransferredAllItsYieldTokens(
@@ -1555,6 +1610,7 @@ contract ClaimYTFees is FixedFeeSwapTest {
     _yieldToken.transfer(userB, _depositAmount);
     (,, uint256 _accrued0,) = _yieldToken.userFees(user);
 
+    vm.prank(user);
     fixedFeeSwap.claimYTFees(user);
 
     assertGt(_accrued0, 0);

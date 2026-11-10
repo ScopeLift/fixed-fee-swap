@@ -12,6 +12,7 @@ import {PrincipalToken} from "src/PrincipalToken.sol";
 import {YieldToken} from "src/YieldToken.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
 import {FeeTracking} from "src/lib/FeeTracking.sol";
+import {IFixedFeeSwap} from "src/interface/IFixedFeeSwap.sol";
 
 /// @notice Splits VaultShareTokens into PrincipalTokens and YieldTokens until a maturity date.
 /// @dev
@@ -29,7 +30,7 @@ import {FeeTracking} from "src/lib/FeeTracking.sol";
 ///  - The split by time assumes fees accrued evenly between the last checkpoint and settlement.
 ///    Anyone can shrink that window by calling `collectFeesToYT` shortly before maturity and
 ///    `settle` shortly after it.
-contract FixedFeeSwap {
+contract FixedFeeSwap is IFixedFeeSwap {
   using SafeERC20 for IERC20;
 
   /// @notice The last vault fee indexes credited to YT holders, and when they were read.
@@ -152,6 +153,14 @@ contract FixedFeeSwap {
   /// @notice Token1 fees credited to YT holders and not yet paid to them.
   /// @dev Held back from PT redeemers, so PT can't be paid fees that YT holders earned.
   uint256 public yieldTokenFeesOwed1;
+
+  /// @notice Token0 fees credited to YT that YieldToken's index rounding hasn't paid out yet.
+  /// @dev Added to the next credit, so frequent syncs can't grind YT's fees away as rounding dust.
+  uint256 public yieldTokenFeesCarried0;
+
+  /// @notice Token1 fees credited to YT that YieldToken's index rounding hasn't paid out yet.
+  /// @dev Added to the next credit, so frequent syncs can't grind YT's fees away as rounding dust.
+  uint256 public yieldTokenFeesCarried1;
 
   /*//////////////////////////////////////////////////////////////
                         CONSTRUCTOR
@@ -280,9 +289,9 @@ contract FixedFeeSwap {
   /// @notice Records the vault fee indexes at maturity, which switches vault fees from YT holders
   /// to PT holders.
   /// @dev
-  ///  - Callable by anyone at or after maturity. Every redeem, YT claim and `collectFeesToYT`
-  ///    after maturity also settles first, so calling this is optional; it lets anyone fix the
-  ///    switch close to maturity.
+  ///  - Callable by anyone at or after maturity. Every redeem, YT claim, YT transfer, `syncFees`
+  ///    and `collectFeesToYT` after maturity also settles first, so calling this is optional; it
+  ///    lets anyone fix the switch close to maturity.
   ///  - Does nothing once the contract has settled.
   function settle() external {
     if (block.timestamp < MATURITY) revert FixedFeeSwap_BeforeMaturity();
@@ -318,13 +327,15 @@ contract FixedFeeSwap {
   ///  - Callable by anyone. YieldToken calls it before every transfer, so the sender keeps the
   ///    fees they earned.
   ///  - Before maturity, credits YT holders with the vault fees earned since the last sync. At or
-  ///    after maturity, settles if nobody has yet.
+  ///    after maturity, settles if nobody has yet, and then does nothing.
   function syncFees() external {
+    if (settled()) return;
     _syncFees();
   }
 
   /// @notice Pays a YT holder the fees their YT has earned, without burning it.
-  /// @param _user The holder to pay. The fees always go to `_user`, so anyone can call this.
+  /// @param _user The holder to pay. The caller must be `_user` or hold a YT allowance from it, so
+  /// nobody can push fees into a contract that doesn't expect them. The fees always go to `_user`.
   /// @return _claimedToken0 Amount of fee token0 paid.
   /// @return _claimedToken1 Amount of fee token1 paid.
   /// @dev The only way to collect fees credited to an account that no longer holds YT, such as one
@@ -333,6 +344,9 @@ contract FixedFeeSwap {
     external
     returns (uint256 _claimedToken0, uint256 _claimedToken1)
   {
+    if (msg.sender != _user && YIELD_TOKEN.allowance(_user, msg.sender) == 0) {
+      revert FixedFeeSwap_NotAuthorized();
+    }
     (_claimedToken0, _claimedToken1) = YIELD_TOKEN.claim(_user);
   }
 
@@ -566,25 +580,32 @@ contract FixedFeeSwap {
     // earns at least what YT is credited. With no YT outstanding the fees have no owner.
     uint256 _yieldTokenSupply = YIELD_TOKEN.totalSupply();
     if (_yieldTokenSupply == 0) return;
-    uint256 _newFees0 = Math.mulDiv(_yieldTokenSupply, _deltaIndex0, FeeTracking.PRECISION);
-    uint256 _newFees1 = Math.mulDiv(_yieldTokenSupply, _deltaIndex1, FeeTracking.PRECISION);
+    uint256 _newFees0 =
+      Math.mulDiv(_yieldTokenSupply, _deltaIndex0, FeeTracking.PRECISION) + yieldTokenFeesCarried0;
+    uint256 _newFees1 =
+      Math.mulDiv(_yieldTokenSupply, _deltaIndex1, FeeTracking.PRECISION) + yieldTokenFeesCarried1;
     if (_newFees0 == 0 && _newFees1 == 0) return;
 
     uint256 _yieldTokenIndex0Before = YIELD_TOKEN.globalFeeIndex0Scaled();
     uint256 _yieldTokenIndex1Before = YIELD_TOKEN.globalFeeIndex1Scaled();
     YIELD_TOKEN.updateFees(_newFees0, _newFees1);
     // Holds back only what YieldToken's index now pays out, read from the index itself, so its
-    // rounding dust isn't reserved forever and its rounding rules live only in YieldToken.
-    yieldTokenFeesOwed0 += Math.mulDiv(
+    // rounding rules live only in YieldToken. What its rounding dropped carries into the next
+    // credit.
+    uint256 _paidOut0 = Math.mulDiv(
       YIELD_TOKEN.globalFeeIndex0Scaled() - _yieldTokenIndex0Before,
       _yieldTokenSupply,
       FeeTracking.PRECISION
     );
-    yieldTokenFeesOwed1 += Math.mulDiv(
+    uint256 _paidOut1 = Math.mulDiv(
       YIELD_TOKEN.globalFeeIndex1Scaled() - _yieldTokenIndex1Before,
       _yieldTokenSupply,
       FeeTracking.PRECISION
     );
+    yieldTokenFeesOwed0 += _paidOut0;
+    yieldTokenFeesOwed1 += _paidOut1;
+    yieldTokenFeesCarried0 = _newFees0 - _paidOut0;
+    yieldTokenFeesCarried1 = _newFees1 - _paidOut1;
   }
 
   /// @notice Accepts native ETH sent by the VaultShareToken when claiming fees.

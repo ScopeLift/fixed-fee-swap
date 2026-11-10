@@ -3,6 +3,7 @@ pragma solidity ^0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IFixedFeeSwap} from "src/interface/IFixedFeeSwap.sol";
+import {YieldToken} from "src/YieldToken.sol";
 
 /// @notice Mock FixedFeeSwap for YieldToken unit tests: implements collectFeesToYT and
 ///         transferFeesToUser for the pull model where YieldToken requests fee transfers.
@@ -10,6 +11,8 @@ contract FixedFeeSwapMock is IFixedFeeSwap {
   address public yieldToken;
   address public token0;
   address public token1;
+  uint256 public pendingFee0;
+  uint256 public pendingFee1;
 
   constructor(address _token0, address _token1) {
     token0 = _token0;
@@ -20,9 +23,22 @@ contract FixedFeeSwapMock is IFixedFeeSwap {
     yieldToken = _yt;
   }
 
-  /// @notice Called by YieldToken before a transfer. No-op in mock since we don't simulate the
-  ///         full VST fee accounting.
-  function syncFees() external override {}
+  /// @notice Sets fees the next `syncFees` credits to the YieldToken, standing in for vault fees
+  ///         FixedFeeSwap hasn't synced yet.
+  function setPendingFees(uint256 _fee0, uint256 _fee1) external {
+    pendingFee0 = _fee0;
+    pendingFee1 = _fee1;
+  }
+
+  /// @notice Called by YieldToken before a transfer. Credits any pending fees to the YieldToken
+  ///         once, as FixedFeeSwap would.
+  function syncFees() external override {
+    (uint256 _fee0, uint256 _fee1) = (pendingFee0, pendingFee1);
+    if (_fee0 == 0 && _fee1 == 0) return;
+    pendingFee0 = 0;
+    pendingFee1 = 0;
+    YieldToken(yieldToken).updateFees(_fee0, _fee1);
+  }
 
   /// @notice Called by YieldToken to sync fee accounting. No-op in mock since
   ///         we don't simulate the full VST fee accounting.
