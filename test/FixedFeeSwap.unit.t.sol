@@ -382,28 +382,21 @@ contract SyncFees is FixedFeeSwapTest {
     assertEq(_yt.globalFeeIndex0Scaled(), _ytIndexBefore);
   }
 
-  function testFuzz_NoOpWhenZeroVSTBalance(uint256 _depositAmount, uint256 _feeAmount) public {
-    _depositAmount = _boundToRealisticAmount(_depositAmount);
-    _feeAmount = _boundToRealisticAmount(_feeAmount);
-    vm.assume(_feeAmount > 0);
+  function testFuzz_CreditsNoFeesEarnedWhileNoYieldTokensExisted(
+    uint256 _depositAmount,
+    uint256 _feeToken0
+  ) public {
+    _depositAmount = _boundToFeeEarningDeposit(_depositAmount);
+    _feeToken0 = _boundToFeeAboveRounding(_feeToken0);
+    YieldToken _yieldToken = fixedFeeSwap.YIELD_TOKEN();
+    // Someone else holds vault shares, so the vault's fee index rises while no YT exists.
+    VaultShareTokenHarness(address(vaultShareToken)).exposed_mint(userB, _depositAmount);
+    _updateYieldTokenFees(_feeToken0, 0);
+    assertGt(vaultShareToken.globalFeeIndex0Scaled(), 0);
 
-    VaultShareTokenHarness _vstHarness = VaultShareTokenHarness(address(vaultShareToken));
-    YieldToken _yt = fixedFeeSwap.YIELD_TOKEN();
+    _mintVstAndDepositForUser(user, _depositAmount);
 
-    // Update VST fees BEFORE any deposit (so delta > 0 but hook has 0 VST).
-    _vstHarness.exposed_updateFees(_feeAmount, 0);
-
-    uint256 _ytIndexBefore = _yt.globalFeeIndex0Scaled(); // Should be 0
-
-    // Deposit triggers _syncFees, but hook has 0 VST, so early return.
-    _vstHarness.exposed_mint(user, _depositAmount);
-    vm.prank(user);
-    vaultShareToken.approve(address(fixedFeeSwap), _depositAmount);
-    vm.prank(user);
-    fixedFeeSwap.deposit(_depositAmount);
-
-    // YT index should still be 0 because _vstBalance was 0 during _syncFees.
-    assertEq(_yt.globalFeeIndex0Scaled(), _ytIndexBefore);
+    assertEq(_yieldToken.globalFeeIndex0Scaled(), 0);
   }
 }
 

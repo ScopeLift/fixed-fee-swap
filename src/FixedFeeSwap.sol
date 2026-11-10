@@ -22,8 +22,8 @@ import {FeeTracking} from "src/lib/FeeTracking.sol";
 ///    records the vault fee index at `MATURITY`, interpolating by time when the first reading
 ///    after maturity covers time on both sides of it.
 ///  - YT holders earn vault fees up to that index and can claim them after maturity whatever anyone
-///    else has done. PT holders earn
-///    every fee after it, paid per PT when they redeem, and need no YT to redeem after maturity.
+///    else has done. PT holders earn every fee after it, paid per PT when they redeem, and need no
+///    YT to redeem after maturity.
 ///  - The split by time assumes fees accrued evenly between the last checkpoint and settlement.
 ///    Anyone can shrink that window by calling `collectFeesToYT` shortly before maturity and
 ///    `settle` shortly after it.
@@ -65,6 +65,9 @@ contract FixedFeeSwap {
 
   /// @notice Thrown when the caller is not authorized.
   error FixedFeeSwap_NotAuthorized();
+
+  /// @notice Thrown when reading a maturity index before the contract has settled.
+  error FixedFeeSwap_NotSettled();
 
   /*//////////////////////////////////////////////////////////////
                         EVENTS
@@ -286,17 +289,19 @@ contract FixedFeeSwap {
   }
 
   /// @notice The vault's token0 fee index at maturity. YT earns up to it and PT earns after it.
-  /// @return The index, or zero until `settled()`. Settlement leaves it in the checkpoint, which
-  /// never moves again.
-  function maturityFeeIndex0Scaled() public view returns (uint256) {
-    return settled() ? vstFeeCheckpoint.feeIndex0LastScaled : 0;
+  /// @return The index. Settlement leaves it in the checkpoint, which never moves again.
+  /// @dev Reverts until `settled()`, so a caller can't mistake an unrecorded index for zero.
+  function maturityFeeIndex0Scaled() external view returns (uint256) {
+    if (!settled()) revert FixedFeeSwap_NotSettled();
+    return vstFeeCheckpoint.feeIndex0LastScaled;
   }
 
   /// @notice The vault's token1 fee index at maturity. YT earns up to it and PT earns after it.
-  /// @return The index, or zero until `settled()`. Settlement leaves it in the checkpoint, which
-  /// never moves again.
-  function maturityFeeIndex1Scaled() public view returns (uint256) {
-    return settled() ? vstFeeCheckpoint.feeIndex1LastScaled : 0;
+  /// @return The index. Settlement leaves it in the checkpoint, which never moves again.
+  /// @dev Reverts until `settled()`, so a caller can't mistake an unrecorded index for zero.
+  function maturityFeeIndex1Scaled() external view returns (uint256) {
+    if (!settled()) revert FixedFeeSwap_NotSettled();
+    return vstFeeCheckpoint.feeIndex1LastScaled;
   }
 
   /// @notice Whether the contract has recorded the vault fee indexes at maturity.
@@ -540,23 +545,18 @@ contract FixedFeeSwap {
     uint256 _newFees1 = Math.mulDiv(_yieldTokenSupply, _deltaIndex1, FeeTracking.PRECISION);
     if (_newFees0 == 0 && _newFees1 == 0) return;
 
-    yieldTokenFeesOwed0 += _claimableByYieldTokenHolders(_newFees0, _yieldTokenSupply);
-    yieldTokenFeesOwed1 += _claimableByYieldTokenHolders(_newFees1, _yieldTokenSupply);
+    uint256 _yieldTokenIndex0Before = YIELD_TOKEN.globalFeeIndex0Scaled();
+    uint256 _yieldTokenIndex1Before = YIELD_TOKEN.globalFeeIndex1Scaled();
     YIELD_TOKEN.updateFees(_newFees0, _newFees1);
-  }
-
-  /// @notice How much of `_fees` YT holders can claim once YieldToken adds them to its fee index.
-  /// @param _fees The fees credited to YT.
-  /// @param _yieldTokenSupply The YT supply they're spread over.
-  /// @return The fees YieldToken's index accounts for after rounding its increase down. Only this
-  /// much is held back from PT, so YieldToken's rounding dust isn't reserved forever.
-  function _claimableByYieldTokenHolders(uint256 _fees, uint256 _yieldTokenSupply)
-    internal
-    pure
-    returns (uint256)
-  {
-    return Math.mulDiv(
-      Math.mulDiv(_fees, FeeTracking.PRECISION, _yieldTokenSupply),
+    // Holds back only what YieldToken's index now pays out, read from the index itself, so its
+    // rounding dust isn't reserved forever and its rounding rules live only in YieldToken.
+    yieldTokenFeesOwed0 += Math.mulDiv(
+      YIELD_TOKEN.globalFeeIndex0Scaled() - _yieldTokenIndex0Before,
+      _yieldTokenSupply,
+      FeeTracking.PRECISION
+    );
+    yieldTokenFeesOwed1 += Math.mulDiv(
+      YIELD_TOKEN.globalFeeIndex1Scaled() - _yieldTokenIndex1Before,
       _yieldTokenSupply,
       FeeTracking.PRECISION
     );

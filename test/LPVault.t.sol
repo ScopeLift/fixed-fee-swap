@@ -3,6 +3,7 @@ pragma solidity ^0.8.26;
 
 import {Test, stdError} from "forge-std/Test.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Deployers} from "lib/v4-periphery/lib/v4-core/test/utils/Deployers.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {LPVault} from "src/LPVault.sol";
@@ -1563,5 +1564,37 @@ contract FixedFeeSwapOnTheVault is LPVaultTest {
     _fixedFeeSwap.redeem(_shares);
 
     assertGt(_token0.balanceOf(_splitter), _token0Before);
+  }
+
+  function testFuzz_PaysYieldTokenAndPrincipalHoldersTheFeesOnEachSideOfMaturity(
+    uint256 _swapAbsBeforeMaturity,
+    uint256 _swapAbsAfterMaturity
+  ) public {
+    address _splitter = makeAddr("splitter");
+    address _principalBuyer = makeAddr("principalBuyer");
+    (FixedFeeSwap _fixedFeeSwap, uint256 _shares) = _splitInitialShares(_splitter);
+    MockERC20 _token0 = MockERC20(Currency.unwrap(currency0));
+    IERC20 _principalToken = IERC20(address(_fixedFeeSwap.PRINCIPAL_TOKEN()));
+    // The splitter keeps the YT and sells the PT, which a transfer stands in for.
+    vm.prank(_splitter);
+    _principalToken.transfer(_principalBuyer, _shares);
+    // A token0-in swap before maturity earns the positions only token0 fees, and a token1-in swap
+    // after it earns only token1 fees. Settling at maturity puts the first on the YT side and the
+    // second on the PT side.
+    _performSwap(true, _boundSwapAbs(_swapAbsBeforeMaturity));
+    vm.warp(_fixedFeeSwap.MATURITY());
+    _fixedFeeSwap.settle();
+    _performSwap(false, _boundSwapAbs(_swapAbsAfterMaturity));
+    uint256 _splitterToken0Before = _token0.balanceOf(_splitter);
+
+    vm.prank(_principalBuyer);
+    _fixedFeeSwap.redeem(_shares);
+    vm.prank(_splitter);
+    _fixedFeeSwap.claimYTFeesAfterMaturity();
+
+    assertEq(vault.balanceOf(_principalBuyer), _shares);
+    assertGt(MockERC20(Currency.unwrap(currency1)).balanceOf(_principalBuyer), 0);
+    assertEq(_token0.balanceOf(_principalBuyer), 0);
+    assertGt(_token0.balanceOf(_splitter), _splitterToken0Before);
   }
 }

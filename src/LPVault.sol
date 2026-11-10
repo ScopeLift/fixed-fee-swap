@@ -448,8 +448,10 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
 
   /// @inheritdoc VaultShareToken
   /// @dev Collects the positions' fees from the pool first when the vault doesn't hold enough to
-  /// pay the claim. Syncing the fee indexes counts fees still in the PoolManager, so without
-  /// collecting, the claim would revert or be paid with tokens other holders are owed.
+  /// pay this claim. Syncing the fee indexes counts fees still in the PoolManager, so without it
+  /// the claim would revert. A claim the vault's balance covers can still be paid from tokens other
+  /// holders are owed; the first later claim the balance can't cover collects, and since collecting
+  /// brings in every fee the indexes count, that claim and the rest are paid in full.
   function _claim(address _user)
     internal
     override
@@ -458,17 +460,10 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     _updateUserFees(_user);
     FeeTracking.UserFees storage owed = userFees[_user];
     if (
-      _feeTokenBalance(FEE_TOKEN0) < owed.userAccruedToken0
-        || _feeTokenBalance(FEE_TOKEN1) < owed.userAccruedToken1
+      targetPoolKey.currency0.balanceOfSelf() < owed.userAccruedToken0
+        || targetPoolKey.currency1.balanceOfSelf() < owed.userAccruedToken1
     ) _syncAndCollectFees();
     (_claimedToken0, _claimedToken1) = super._claim(_user);
-  }
-
-  /// @notice The vault's balance of a fee token.
-  /// @param _token The fee token, or address(0) for native ETH.
-  /// @return The balance.
-  function _feeTokenBalance(address _token) internal view returns (uint256) {
-    return _token == address(0) ? address(this).balance : IERC20(_token).balanceOf(address(this));
   }
 
   /// @inheritdoc VaultShareToken
