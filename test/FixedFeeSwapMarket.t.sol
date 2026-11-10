@@ -35,6 +35,21 @@ struct SharedWithdrawalCtx {
   uint256 _upperWordAfterMint;
 }
 
+// Positions and swap targets for the active liquidity test, which takes them as one fuzzed struct.
+struct ActiveLiquidityScenario {
+  uint128 baseLiquidity;
+  int24 lowerA;
+  int24 upperA;
+  uint128 liquidityA;
+  int24 lowerB;
+  int24 upperB;
+  uint128 liquidityB;
+  int24 firstUpTick;
+  int24 firstDownTick;
+  int24 secondUpTick;
+  int24 secondDownTick;
+}
+
 abstract contract FixedFeeSwapMarketTest is Test {
   FixedFeeSwapMarketHarness public hook;
   MockERC20 public token0;
@@ -516,6 +531,40 @@ abstract contract FixedFeeSwapMarketTest is Test {
     _localHook.swap(1000e18, false, 8);
     vm.stopPrank();
     assertEq(_localHook.getCurrentTick(), 8, "Setup: tick should end between ticks 3 and 10");
+  }
+
+  // Swaps on `_localHook` as Bob until the tick reaches `_targetTick`. The input is far more than
+  // any test range needs, so the swap always stops at the tick limit; every tick on the way must
+  // have active liquidity. `_targetTick` must not be 0, which `swap` reads as no limit.
+  function _swapToTick(
+    FixedFeeSwapMarketHarness _localHook,
+    int24 _targetTick,
+    bool _principalForCash
+  ) internal {
+    vm.prank(bob);
+    _localHook.swap(1e27, _principalForCash, _targetTick);
+    assertEq(_localHook.getCurrentTick(), _targetTick, "Setup: swap should stop at its tick limit");
+  }
+
+  // Bounds a tick range to `0 <= _lower < _upper <= _maxTick`. Every such range can come out.
+  function _boundTickRangeBetweenZeroAndMaxTick(int24 _lower, int24 _upper, int24 _maxTick)
+    internal
+    pure
+    returns (int24, int24)
+  {
+    _lower = int24(bound(int256(_lower), 0, int256(_maxTick) - 1));
+    _upper = int24(bound(int256(_upper), int256(_lower) + 1, int256(_maxTick)));
+    return (_lower, _upper);
+  }
+
+  // Returns `_liquidity` when a position over `[_lower, _upper)` is in range at `_tick`, and 0
+  // otherwise. This is the rule active liquidity must follow: `_lower <= _tick < _upper`.
+  function _inRangeLiquidity(int24 _tick, int24 _lower, int24 _upper, uint128 _liquidity)
+    internal
+    pure
+    returns (uint256)
+  {
+    return _lower <= _tick && _tick < _upper ? _liquidity : 0;
   }
 
   function _assertApproxEqRelBps(uint256 _a, uint256 _b, uint256 _toleranceBps, string memory _err)
@@ -2109,6 +2158,29 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     hook.decreaseLiquidity(_positionId, -int128(_removeAmount), 0, 0);
 
     assertEq(hook.getActiveLiquidity(), _activeBefore, "active _liquidity unchanged");
+  }
+
+  function testFuzz_RemovesLiquidityFromActiveLiquidityAfterADownwardSwapStopsOnTheUpperTick(
+    uint128 _bobLiquidity,
+    uint128 _aliceLiquidity
+  ) public {
+    _bobLiquidity = _boundLiquidity(_bobLiquidity);
+    _aliceLiquidity = _boundLiquidity(_aliceLiquidity);
+    // No LP fees, so nothing here depends on fee growth arithmetic.
+    (FixedFeeSwapMarketHarness _localHook,) =
+      _deployHookForBeforeSwapTests(FEE_RATE, "downwardStopOnUpperTickManager");
+    _mintOnHook(_localHook, bob, 0, 40, _bobLiquidity);
+    bytes32 _alicePositionId = _mintOnHook(_localHook, alice, 0, 10, _aliceLiquidity);
+    _swapToTick(_localHook, 30, true);
+    // At tick 10 Alice's range [0, 10] holds only PT, so it is out of range.
+    _swapToTick(_localHook, 10, false);
+
+    vm.prank(alice);
+    _localHook.decreaseLiquidity(_alicePositionId, -int128(_aliceLiquidity), 0, 0);
+
+    assertEq(
+      _localHook.getActiveLiquidity(), _bobLiquidity, "Only Bob's liquidity should stay active"
+    );
   }
 
   // ============ Multiple Operations Tests ============
@@ -3931,6 +4003,45 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwapMarket_NotPositionOwner.selector);
     vm.prank(_caller);
     feeHook.collectFees(_positionId, _caller, 0, 0);
+  }
+
+  function testFuzz_ActiveLiquidityEqualsTheLiquidityOfInRangePositionsAfterSwapsBothWays(ActiveLiquidityScenario memory _scenario)
+    public
+  {
+    _scenario.baseLiquidity = _boundLiquidity(_scenario.baseLiquidity);
+    _scenario.liquidityA = _boundLiquidity(_scenario.liquidityA);
+    _scenario.liquidityB = _boundLiquidity(_scenario.liquidityB);
+    (_scenario.lowerA, _scenario.upperA) =
+      _boundTickRangeBetweenZeroAndMaxTick(_scenario.lowerA, _scenario.upperA, 100);
+    (_scenario.lowerB, _scenario.upperB) =
+      _boundTickRangeBetweenZeroAndMaxTick(_scenario.lowerB, _scenario.upperB, 100);
+    // Each swap target stays in [1, 99]: the base range [0, 100] keeps every tick there active,
+    // and `swap` reads a tick limit of 0 as no limit. Each swap reverses the previous direction.
+    _scenario.firstUpTick = int24(bound(_scenario.firstUpTick, 2, 99));
+    _scenario.firstDownTick = int24(bound(_scenario.firstDownTick, 1, _scenario.firstUpTick - 1));
+    _scenario.secondUpTick = int24(bound(_scenario.secondUpTick, _scenario.firstDownTick + 1, 99));
+    _scenario.secondDownTick = int24(bound(_scenario.secondDownTick, 1, _scenario.secondUpTick - 1));
+    // No LP fees, so nothing here depends on fee growth arithmetic.
+    (FixedFeeSwapMarketHarness _localHook,) =
+      _deployHookForBeforeSwapTests(FEE_RATE, "activeLiquidityRuleManager");
+
+    _mintOnHook(_localHook, alice, 0, 100, _scenario.baseLiquidity);
+    _mintOnHook(_localHook, alice, _scenario.lowerA, _scenario.upperA, _scenario.liquidityA);
+    _swapToTick(_localHook, _scenario.firstUpTick, true);
+    _swapToTick(_localHook, _scenario.firstDownTick, false);
+    // Minting B mid-sequence covers a range that starts or ends at the current tick.
+    _mintOnHook(_localHook, bob, _scenario.lowerB, _scenario.upperB, _scenario.liquidityB);
+    _swapToTick(_localHook, _scenario.secondUpTick, true);
+    _swapToTick(_localHook, _scenario.secondDownTick, false);
+
+    int24 _tick = _localHook.getCurrentTick();
+    assertEq(
+      _localHook.getActiveLiquidity(),
+      _inRangeLiquidity(_tick, 0, 100, _scenario.baseLiquidity)
+        + _inRangeLiquidity(_tick, _scenario.lowerA, _scenario.upperA, _scenario.liquidityA)
+        + _inRangeLiquidity(_tick, _scenario.lowerB, _scenario.upperB, _scenario.liquidityB),
+      "Active liquidity should equal the liquidity of in-range positions"
+    );
   }
 
   // ============ Direct Swap Tests (FixedFeeSwapMarket.swap) ============
