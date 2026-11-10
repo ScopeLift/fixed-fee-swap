@@ -2,6 +2,8 @@
 pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {FixedFeeSwapMarket} from "src/FixedFeeSwapMarket.sol";
 import {FixedFeeSwap} from "src/FixedFeeSwap.sol";
 import {PrincipalToken} from "src/PrincipalToken.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
@@ -32,6 +34,7 @@ abstract contract FixedFeeSwapMarketVaultShareYieldTest is Test {
 
   address internal liquidityProvider = makeAddr("liquidityProvider");
   address internal anyone = makeAddr("anyone");
+  address internal vaultYieldRecipient = makeAddr("vaultYieldRecipient");
 
   function setUp() public virtual {
     feeToken0 = new ERC20Mock("Fee Token 0", "FT0");
@@ -51,7 +54,8 @@ abstract contract FixedFeeSwapMarketVaultShareYieldTest is Test {
       0,
       1,
       IPoolManager(makeAddr("poolManager")),
-      INITIAL_TICK
+      INITIAL_TICK,
+      vaultYieldRecipient
     );
     // Moves past the market's start time so minting liquidity has a nonzero elapsed time.
     vm.warp(block.timestamp + 1);
@@ -74,8 +78,20 @@ abstract contract FixedFeeSwapMarketVaultShareYieldTest is Test {
   // Credits `_amount` of fee token 0 to every vault share holder, as LPVault does when it
   // collects pool fees.
   function _accrueVaultFees(uint256 _amount) internal {
-    feeToken0.mint(address(vaultShareToken), _amount);
-    vaultShareToken.exposed_updateFees(_amount, 0);
+    _accrueVaultFees(_amount, 0);
+  }
+
+  // Credits `_amount0` and `_amount1` of fee tokens 0 and 1 to every vault share holder.
+  function _accrueVaultFees(uint256 _amount0, uint256 _amount1) internal {
+    feeToken0.mint(address(vaultShareToken), _amount0);
+    feeToken1.mint(address(vaultShareToken), _amount1);
+    vaultShareToken.exposed_updateFees(_amount0, _amount1);
+  }
+
+  // The fees `_shares` vault shares earn when `_fees` are spread over every share, rounded down
+  // as the vault rounds them.
+  function _vaultFeesEarnedBy(uint256 _shares, uint256 _fees) internal view returns (uint256) {
+    return Math.mulDiv(_shares, Math.mulDiv(_fees, 1e18, vaultShareToken.totalSupply()), 1e18);
   }
 }
 
@@ -87,16 +103,117 @@ contract VaultShareYield is FixedFeeSwapMarketVaultShareYieldTest {
     _vaultFees = bound(_vaultFees, 1e18, 1e30);
     bytes32 _positionId = _mintLiquidityWithVaultShareCash();
     _accrueVaultFees(_vaultFees);
-
     // Anyone can push the market's share of the vault fees into the market.
     vm.prank(anyone);
     vaultShareToken.claim(address(market));
-
     vm.startPrank(liquidityProvider);
     market.decreaseLiquidity(_positionId, -int128(LIQUIDITY), 0, 0);
     market.collectFees(_positionId, liquidityProvider, 0, 0);
     vm.stopPrank();
 
+    vm.prank(anyone);
+    market.forwardVaultYield();
+
     assertEq(feeToken0.balanceOf(address(market)), 0, "vault fee yield stranded in the market");
+    assertGt(feeToken0.balanceOf(vaultYieldRecipient), 0);
+  }
+
+  function testFuzz_SendsTheMarketsShareOfVaultFeesToTheRecipient(
+    uint256 _vaultFees0,
+    uint256 _vaultFees1
+  ) public {
+    _vaultFees0 = bound(_vaultFees0, 1e18, 1e30);
+    _vaultFees1 = bound(_vaultFees1, 1e18, 1e30);
+    _mintLiquidityWithVaultShareCash();
+    uint256 _marketShares = vaultShareToken.balanceOf(address(market));
+    _accrueVaultFees(_vaultFees0, _vaultFees1);
+
+    vm.prank(anyone);
+    (uint256 _forwarded0, uint256 _forwarded1) = market.forwardVaultYield();
+
+    assertEq(_forwarded0, _vaultFeesEarnedBy(_marketShares, _vaultFees0));
+    assertEq(_forwarded1, _vaultFeesEarnedBy(_marketShares, _vaultFees1));
+    assertEq(feeToken0.balanceOf(vaultYieldRecipient), _forwarded0);
+    assertEq(feeToken1.balanceOf(vaultYieldRecipient), _forwarded1);
+  }
+
+  function testFuzz_LeavesTheMarketsPrincipalAndCashUntouched(uint256 _vaultFees) public {
+    _vaultFees = bound(_vaultFees, 1e18, 1e30);
+    _mintLiquidityWithVaultShareCash();
+    _accrueVaultFees(_vaultFees);
+    uint256 _principalBefore = principalToken.balanceOf(address(market));
+    uint256 _cashBefore = vaultShareToken.balanceOf(address(market));
+
+    market.forwardVaultYield();
+
+    assertEq(principalToken.balanceOf(address(market)), _principalBefore);
+    assertEq(vaultShareToken.balanceOf(address(market)), _cashBefore);
+  }
+
+  function testFuzz_EmitsVaultYieldForwarded(uint256 _vaultFees) public {
+    _vaultFees = bound(_vaultFees, 1e18, 1e30);
+    _mintLiquidityWithVaultShareCash();
+    uint256 _marketShares = vaultShareToken.balanceOf(address(market));
+    _accrueVaultFees(_vaultFees);
+
+    vm.expectEmit();
+    emit FixedFeeSwapMarket.VaultYieldForwarded(
+      vaultYieldRecipient, _vaultFeesEarnedBy(_marketShares, _vaultFees), 0
+    );
+    market.forwardVaultYield();
+  }
+
+  function test_RevertIf_AFeeTokenIsOneOfTheMarketsTokens() public {
+    // A cash token whose fee token0 is the market's own principal token, so forwarding fees would
+    // send reserves.
+    VaultShareTokenHarness _cash =
+      new VaultShareTokenHarness("Cash", "CASH", address(feeToken0), address(feeToken1));
+    FixedFeeSwapMarketHarness _market = new FixedFeeSwapMarketHarness(
+      MARKET_LENGTH,
+      address(feeToken0),
+      address(_cash),
+      0,
+      1,
+      IPoolManager(makeAddr("poolManager")),
+      INITIAL_TICK,
+      vaultYieldRecipient
+    );
+
+    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwapMarket_FeeTokenIsAMarketToken.selector);
+    _market.forwardVaultYield();
+  }
+}
+
+contract VaultShareYieldInNativeEth is Test {
+  function testFuzz_SendsNativeEthVaultFeesToTheRecipient(uint256 _shares, uint256 _vaultFees)
+    public
+  {
+    _shares = bound(_shares, 1, 1e30);
+    // At least 1e18 per share so the market's fees don't round to zero.
+    _vaultFees = bound(_vaultFees, 1e18, 1e30);
+    address _recipient = makeAddr("vaultYieldRecipient");
+    ERC20Mock _principal = new ERC20Mock("Principal", "PT");
+    // A cash token whose token0 fees are native ETH.
+    VaultShareTokenHarness _cash =
+      new VaultShareTokenHarness("Cash", "CASH", address(0), address(new ERC20Mock("T1", "T1")));
+    FixedFeeSwapMarketHarness _market = new FixedFeeSwapMarketHarness(
+      365 days,
+      address(_principal),
+      address(_cash),
+      0,
+      1,
+      IPoolManager(makeAddr("poolManager")),
+      500,
+      _recipient
+    );
+    // The market is the only holder, so it earns every fee.
+    _cash.exposed_mint(address(_market), _shares);
+    vm.deal(address(_cash), _vaultFees);
+    _cash.exposed_updateFees(_vaultFees, 0);
+
+    _market.forwardVaultYield();
+
+    assertEq(_recipient.balance, Math.mulDiv(_shares, Math.mulDiv(_vaultFees, 1e18, _shares), 1e18));
+    assertEq(address(_market).balance, 0);
   }
 }

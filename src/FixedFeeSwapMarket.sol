@@ -13,6 +13,7 @@ import {ModifyLiquidityParams, SwapParams} from "v4-core/types/PoolOperation.sol
 import {toBeforeSwapDelta} from "v4-core/types/BeforeSwapDelta.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {VaultShareToken} from "src/VaultShareToken.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 
 struct TickInfo {
@@ -82,7 +83,24 @@ contract FixedFeeSwapMarket is BaseHook {
     int128 amount1
   );
 
+  /// @notice Emitted when the vault fees earned on the market's cash are sent to the recipient
+  /// @param recipient The address the fees were sent to
+  /// @param feeToken0Amount The amount of the cash token's fee token0 sent
+  /// @param feeToken1Amount The amount of the cash token's fee token1 sent
+  event VaultYieldForwarded(
+    address indexed recipient, uint256 feeToken0Amount, uint256 feeToken1Amount
+  );
+
   // ============ Errors ============
+
+  /// @notice Thrown when the vault yield recipient is the zero address
+  error FixedFeeSwapMarket_InvalidVaultYieldRecipient();
+
+  /// @notice Thrown when one of the cash token's fee tokens is one of the market's own tokens
+  error FixedFeeSwapMarket_FeeTokenIsAMarketToken();
+
+  /// @notice Thrown when sending native ETH vault fees to the recipient fails
+  error FixedFeeSwapMarket_TransferFailed();
 
   /// @notice Thrown when the fee rate is 100% or higher
   error FixedFeeSwapMarket_FeeRateTooHigh();
@@ -159,6 +177,11 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @notice Yield movement (in bps) represented by one tick step
   int24 public immutable YIELD_PER_TICK;
 
+  /// @notice Where the vault fees earned on the market's cash go
+  /// @dev The cash token (TOKEN1) is a VaultShareToken, which earns vault fees for whoever holds
+  /// it. The market has no way to share them among LPs, so `forwardVaultYield` sends them here.
+  address public immutable VAULT_YIELD_RECIPIENT;
+
   // ============ State Variables ============
 
   int24 currentTick;
@@ -186,10 +209,13 @@ contract FixedFeeSwapMarket is BaseHook {
     uint24 _feeRate,
     int24 _yieldPerTick,
     IPoolManager _manager,
-    int24 _initialTick
+    int24 _initialTick,
+    address _vaultYieldRecipient
   ) BaseHook(_manager) {
     if (_feeRate >= FEE_DENOMINATOR) revert FixedFeeSwapMarket_FeeRateTooHigh();
     if (_yieldPerTick <= 0) revert FixedFeeSwapMarket_InvalidYieldSpacing();
+    if (_vaultYieldRecipient == address(0)) revert FixedFeeSwapMarket_InvalidVaultYieldRecipient();
+    VAULT_YIELD_RECIPIENT = _vaultYieldRecipient;
     START_TIME = uint48(block.timestamp);
     MATURITY = uint48(block.timestamp) + _lengthOfMarket;
     TOKEN0 = IERC20(_token0);
@@ -395,6 +421,35 @@ contract FixedFeeSwapMarket is BaseHook {
 
     emit FeesCollected(_positionId, _recipient, _amount0, _amount1);
   }
+
+  /// @notice Sends the vault fees earned on the market's cash to `VAULT_YIELD_RECIPIENT`
+  /// @dev
+  ///  - Callable by anyone. Claims the market's fees from the cash token, then sends the market's
+  ///    whole balance of each fee token, including fees someone else already claimed for it.
+  ///  - Never touches TOKEN0 or TOKEN1, so LP liquidity and swap reserves stay put. Reverts if a
+  ///    fee token is one of them, since sending it would take reserves.
+  /// @return _feeToken0Amount The amount of the cash token's fee token0 sent
+  /// @return _feeToken1Amount The amount of the cash token's fee token1 sent
+  function forwardVaultYield()
+    external
+    returns (uint256 _feeToken0Amount, uint256 _feeToken1Amount)
+  {
+    VaultShareToken _cash = VaultShareToken(address(TOKEN1));
+    address _feeToken0 = _cash.FEE_TOKEN0();
+    address _feeToken1 = _cash.FEE_TOKEN1();
+    if (_isMarketToken(_feeToken0) || _isMarketToken(_feeToken1)) {
+      revert FixedFeeSwapMarket_FeeTokenIsAMarketToken();
+    }
+
+    _cash.claim(address(this));
+    _feeToken0Amount = _sendWholeBalance(_feeToken0, VAULT_YIELD_RECIPIENT);
+    _feeToken1Amount = _sendWholeBalance(_feeToken1, VAULT_YIELD_RECIPIENT);
+
+    emit VaultYieldForwarded(VAULT_YIELD_RECIPIENT, _feeToken0Amount, _feeToken1Amount);
+  }
+
+  /// @notice Accepts native ETH vault fees, which the cash token pays when its fee token is ETH
+  receive() external payable {}
 
   /// @notice Returns the current market price, computing from tick if not yet initialized
   /// @return The current price in WAD precision
@@ -1241,5 +1296,28 @@ contract FixedFeeSwapMarket is BaseHook {
     returns (bytes32)
   {
     return keccak256(abi.encodePacked(_tickUpper, _tickLower, _owner));
+  }
+
+  /// @notice Whether `_token` is one of the market's own tokens
+  /// @param _token The token to check
+  /// @return True if `_token` is TOKEN0 or TOKEN1
+  function _isMarketToken(address _token) internal view returns (bool) {
+    return _token == address(TOKEN0) || _token == address(TOKEN1);
+  }
+
+  /// @notice Sends the market's whole balance of `_token` to `_to`
+  /// @param _token The token, or address(0) for native ETH
+  /// @param _to The recipient
+  /// @return _amount The amount sent
+  function _sendWholeBalance(address _token, address _to) internal returns (uint256 _amount) {
+    if (_token == address(0)) {
+      _amount = address(this).balance;
+      if (_amount == 0) return 0;
+      (bool _success,) = payable(_to).call{value: _amount}("");
+      if (!_success) revert FixedFeeSwapMarket_TransferFailed();
+    } else {
+      _amount = IERC20(_token).balanceOf(address(this));
+      if (_amount > 0) IERC20(_token).safeTransfer(_to, _amount);
+    }
   }
 }

@@ -16,8 +16,13 @@ contract FixedFeeSwapMarketHarness is FixedFeeSwapMarket {
     uint24 _feeRate,
     int24 _yieldPerTick,
     IPoolManager _mgr,
-    int24 _initialTick
-  ) FixedFeeSwapMarket(_length, _t0, _t1, _feeRate, _yieldPerTick, _mgr, _initialTick) {}
+    int24 _initialTick,
+    address _vaultYieldRecipient
+  )
+    FixedFeeSwapMarket(
+      _length, _t0, _t1, _feeRate, _yieldPerTick, _mgr, _initialTick, _vaultYieldRecipient
+    )
+  {}
 
   /// @notice Skip hook address validation for testing
   function validateHookAddress(BaseHook) internal pure override {

@@ -65,6 +65,9 @@ abstract contract FixedFeeSwapMarketTest is Test {
 
   address public alice = makeAddr("alice");
   address public bob = makeAddr("bob");
+  // Receives the vault fees earned on the market's cash. These tests' cash token earns none, so
+  // nothing depends on the address.
+  address public vaultYieldRecipient = makeAddr("vaultYieldRecipient");
 
   function setUp() public virtual {
     token0 = new MockERC20("Token0", "TKN0", 18);
@@ -84,7 +87,8 @@ abstract contract FixedFeeSwapMarketTest is Test {
       FEE_RATE,
       YIELD_PER_TICK,
       IPoolManager(_mockManager),
-      0
+      0,
+      vaultYieldRecipient
     );
 
     // Warp forward for realistic test conditions (prices are near-fully discounted at START_TIME)
@@ -113,7 +117,8 @@ abstract contract FixedFeeSwapMarketTest is Test {
       FEE_RATE,
       _yieldPerTick,
       IPoolManager(_mockManager),
-      0
+      0,
+      vaultYieldRecipient
     );
   }
 
@@ -130,7 +135,8 @@ abstract contract FixedFeeSwapMarketTest is Test {
       FEE_RATE,
       YIELD_PER_TICK,
       IPoolManager(makeAddr(_managerLabel)),
-      _initialTick
+      _initialTick,
+      vaultYieldRecipient
     );
     _approveUser(alice);
     _approveUser(bob);
@@ -383,7 +389,8 @@ abstract contract FixedFeeSwapMarketTest is Test {
       _feeRate,
       YIELD_PER_TICK,
       IPoolManager(makeAddr(_managerLabel)),
-      0
+      0,
+      vaultYieldRecipient
     );
 
     uint256 _resumeTimestamp = _currentTimestamp > 1 days ? _currentTimestamp : 1 days + 1;
@@ -519,8 +526,10 @@ contract Constructor is FixedFeeSwapMarketTest {
     uint24 _feeRate,
     int24 _yieldPerTick,
     int24 _initialTick,
-    address _mockManager
+    address _mockManager,
+    address _vaultYieldRecipient
   ) public {
+    vm.assume(_vaultYieldRecipient != address(0));
     uint48 _startTime = uint48(block.timestamp);
     uint48 _maxMarketLength = type(uint48).max - _startTime;
 
@@ -535,7 +544,8 @@ contract Constructor is FixedFeeSwapMarketTest {
       _feeRate,
       _yieldPerTick,
       IPoolManager(_mockManager),
-      _initialTick
+      _initialTick,
+      _vaultYieldRecipient
     );
 
     assertEq(_hook.getStartTime(), _startTime, "start _time");
@@ -546,6 +556,22 @@ contract Constructor is FixedFeeSwapMarketTest {
     assertEq(_hook.YIELD_PER_TICK(), _yieldPerTick, "yield per _tick");
     assertEq(address(_hook.poolManager()), _mockManager, "pool manager");
     assertEq(_hook.getCurrentTick(), _initialTick, "initial _tick");
+    assertEq(_hook.VAULT_YIELD_RECIPIENT(), _vaultYieldRecipient, "vault yield recipient");
+  }
+
+  function testFuzz_RevertIf_VaultYieldRecipientIsZero(uint24 _feeRate, int24 _initialTick) public {
+    _feeRate = uint24(bound(_feeRate, 0, 999_999));
+    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwapMarket_InvalidVaultYieldRecipient.selector);
+    new FixedFeeSwapMarketHarness(
+      MARKET_LENGTH,
+      address(token0),
+      address(token1),
+      _feeRate,
+      YIELD_PER_TICK,
+      IPoolManager(makeAddr("constructorMockManagerRecipient")),
+      _initialTick,
+      address(0)
+    );
   }
 
   function testFuzz_RevertIf_FeeRateTooHigh(uint24 _feeRate) public {
@@ -559,7 +585,8 @@ contract Constructor is FixedFeeSwapMarketTest {
       _feeRate,
       YIELD_PER_TICK,
       IPoolManager(_mockManager),
-      0
+      0,
+      vaultYieldRecipient
     );
   }
 
@@ -574,7 +601,8 @@ contract Constructor is FixedFeeSwapMarketTest {
       FEE_RATE,
       _yieldPerTick,
       IPoolManager(_mockManager),
-      0
+      0,
+      vaultYieldRecipient
     );
   }
 }
@@ -1733,7 +1761,8 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
       _feeRate,
       YIELD_PER_TICK,
       IPoolManager(makeAddr(_managerLabel)),
-      0
+      0,
+      vaultYieldRecipient
     );
 
     uint256 _resumeTimestamp = _currentTimestamp > 1 days ? _currentTimestamp : 1 days + 1;
@@ -3491,7 +3520,8 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
       FEE_RATE,
       YIELD_PER_TICK,
       IPoolManager(_mockManager),
-      0
+      0,
+      vaultYieldRecipient
     );
 
     vm.warp(block.timestamp + 1 days);
@@ -3519,7 +3549,8 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
       FEE_RATE,
       YIELD_PER_TICK,
       IPoolManager(_mockManager),
-      0
+      0,
+      vaultYieldRecipient
     );
     vm.warp(block.timestamp + 1 days);
 
@@ -3557,7 +3588,8 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
       FEE_RATE,
       YIELD_PER_TICK,
       IPoolManager(_mockManager),
-      0
+      0,
+      vaultYieldRecipient
     );
     vm.warp(block.timestamp + 1 days);
 
@@ -3968,7 +4000,8 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
       FEE_RATE,
       YIELD_PER_TICK,
       IPoolManager(_mockManager),
-      0
+      0,
+      vaultYieldRecipient
     );
     vm.warp(_freshHook.getStartTime() + 1);
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwapMarket_NoActiveLiquidity.selector);
@@ -4027,7 +4060,8 @@ contract CollectFees is FixedFeeSwapMarketTest {
       LP_FEE_RATE,
       YIELD_PER_TICK,
       IPoolManager(_mockManager),
-      0
+      0,
+      vaultYieldRecipient
     );
     vm.warp(block.timestamp + 1 days);
     feePoolKey = PoolKey({

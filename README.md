@@ -167,6 +167,7 @@ The market uses "ticks" that represent yield rates (similar to interest rates). 
 - **Time-based maturity**: The market has a defined start time and maturity date
 - **Configurable fee rate**: Trading fees are collected on each swap
 - **Concentrated liquidity**: LPs can focus their capital in specific yield ranges for higher capital efficiency
+- **Vault yield on cash**: The cash token is a VaultShareToken, which earns vault fees for the market. Anyone can call `forwardVaultYield()` to send those fees to the recipient set at deployment (`VAULT_YIELD_RECIPIENT`). LPs don't receive them, so this is a cost of providing liquidity to price into the fee rate.
 
 ### Diagram
 

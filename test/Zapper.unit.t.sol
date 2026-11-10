@@ -129,7 +129,7 @@ contract ZapperTest is Test {
     deal(address(_pt), address(fixedFeeSwapMarketMock), 1e30);
     deal(address(vaultShareToken), address(fixedFeeSwapMarketMock), 1e30);
 
-    zapper = new Zapper(fixedFeeSwap, FixedFeeSwapMarket(address(fixedFeeSwapMarketMock)));
+    zapper = new Zapper(fixedFeeSwap, FixedFeeSwapMarket(payable(address(fixedFeeSwapMarketMock))));
 
     // The real market trades the same PT and VST. The harness only skips the hook address check,
     // and swaps through `swap` never reach the pool manager, so a made-up address will do.
@@ -140,9 +140,10 @@ contract ZapperTest is Test {
       MARKET_FEE_RATE,
       MARKET_YIELD_PER_TICK,
       IPoolManager(makeAddr("poolManager")),
-      MARKET_INITIAL_TICK
+      MARKET_INITIAL_TICK,
+      makeAddr("vaultYieldRecipient")
     );
-    marketZapper = new Zapper(fixedFeeSwap, FixedFeeSwapMarket(address(market)));
+    marketZapper = new Zapper(fixedFeeSwap, FixedFeeSwapMarket(payable(address(market))));
 
     user = makeAddr("user");
     liquidityProvider = makeAddr("liquidityProvider");
@@ -205,7 +206,7 @@ contract ZapperTest is Test {
       new FixedFeeSwapMarketMock(address(_fixedFeeSwap.PRINCIPAL_TOKEN()), address(_vstWithEth));
     deal(address(_fixedFeeSwap.PRINCIPAL_TOKEN()), address(_market), 1e30);
     deal(address(_vstWithEth), address(_market), 1e30);
-    _zapper = new Zapper(_fixedFeeSwap, FixedFeeSwapMarket(address(_market)));
+    _zapper = new Zapper(_fixedFeeSwap, FixedFeeSwapMarket(payable(address(_market))));
   }
 
   // The spot-sized buyback for a sale of `_ytAmount` YT through `_zapper`, whose market must be a
@@ -414,13 +415,14 @@ contract Constructor is ZapperTest {
   function test_RevertIf_FixedFeeSwapIsZero() public {
     vm.expectRevert(Zapper.Zapper_InvalidAddress.selector);
     new Zapper(
-      FixedFeeSwap(payable(address(0))), FixedFeeSwapMarket(address(fixedFeeSwapMarketMock))
+      FixedFeeSwap(payable(address(0))),
+      FixedFeeSwapMarket(payable(address(fixedFeeSwapMarketMock)))
     );
   }
 
   function test_RevertIf_FixedFeeSwapMarketIsZero() public {
     vm.expectRevert(Zapper.Zapper_InvalidAddress.selector);
-    new Zapper(fixedFeeSwap, FixedFeeSwapMarket(address(0)));
+    new Zapper(fixedFeeSwap, FixedFeeSwapMarket(payable(address(0))));
   }
 }
 
