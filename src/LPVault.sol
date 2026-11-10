@@ -478,7 +478,7 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
       _settleWithdrawDeltas(_totalDelta0, _totalDelta1, _callbackData.receiver);
 
     // Collect fee tokens from the pool. Fee-per-share indexes are updated separately
-    // by _syncFees() (called before unlock and in _update on mint/burn/transfer).
+    // by _syncFees() (called outside the unlock and in _update on mint/burn/transfer).
     _collectFees(_totalFeeDelta0, _totalFeeDelta1);
 
     return abi.encode(_amount0Received, _amount1Received);

@@ -49,8 +49,11 @@ contract LPVaultTest is Test, Deployers {
   // The exact-input amount of each swap in the round trip that accrues fees between the two tick
   // initializations. It only needs to be nonzero and small enough to leave the price near tick 0.
   int256 constant FEE_ACCRUING_SWAP_AMOUNT = -1e15;
-  // A tick inside the wrap range that the swap into the range stops at.
+  // Ticks inside the wrap range where the swaps that accrue fees inside it stop: first down into
+  // the range, accruing token0 fees, then back up, accruing token1 fees, so both tokens' fee growth
+  // inside wraps.
   int24 constant WRAP_RANGE_SWAP_TARGET_TICK = -450;
+  int24 constant WRAP_RANGE_RETURN_SWAP_TARGET_TICK = -350;
 
   string constant DEFAULT_NAME = "LP Vault Share";
   string constant DEFAULT_SYMBOL = "LPVS";
@@ -321,10 +324,11 @@ contract LPVaultTest is Test, Deployers {
       THIRD_PARTY_TICK_LIQUIDITY
     );
 
-    (uint256 _feeGrowthInside0BeforeX128,) = manager.getFeeGrowthInside(
+    (uint256 _feeGrowthInside0BeforeX128, uint256 _feeGrowthInside1BeforeX128) = manager.getFeeGrowthInside(
       defaultPoolKey.toId(), WRAP_RANGE_TICK_LOWER, WRAP_RANGE_TICK_UPPER
     );
-    assertGt(_feeGrowthInside0BeforeX128, type(uint256).max / 2, "fee growth inside not wrapped");
+    assertGt(_feeGrowthInside0BeforeX128, type(uint256).max / 2, "token0 growth not wrapped");
+    assertGt(_feeGrowthInside1BeforeX128, type(uint256).max / 2, "token1 growth not wrapped");
 
     // The range is below the price, so initializing it takes only token1.
     _mintToken1(_initializer, INIT_MAX_VALUE);
@@ -335,13 +339,17 @@ contract LPVaultTest is Test, Deployers {
     _performSwapUpToPrice(
       true, -int256(INIT_MAX_VALUE), TickMath.getSqrtPriceAtTick(WRAP_RANGE_SWAP_TARGET_TICK)
     );
+    _performSwapUpToPrice(
+      false,
+      -int256(INIT_MAX_VALUE),
+      TickMath.getSqrtPriceAtTick(WRAP_RANGE_RETURN_SWAP_TARGET_TICK)
+    );
 
-    (uint256 _feeGrowthInside0AfterX128,) = manager.getFeeGrowthInside(
+    (uint256 _feeGrowthInside0AfterX128, uint256 _feeGrowthInside1AfterX128) = manager.getFeeGrowthInside(
       defaultPoolKey.toId(), WRAP_RANGE_TICK_LOWER, WRAP_RANGE_TICK_UPPER
     );
-    assertLt(
-      _feeGrowthInside0AfterX128, _feeGrowthInside0BeforeX128, "fee growth inside not past zero"
-    );
+    assertLt(_feeGrowthInside0AfterX128, _feeGrowthInside0BeforeX128, "token0 growth not past 0");
+    assertLt(_feeGrowthInside1AfterX128, _feeGrowthInside1BeforeX128, "token1 growth not past 0");
   }
 }
 
@@ -829,6 +837,28 @@ contract Deposit is LPVaultTest {
     assertEq(vault.balanceOf(depositor), _shares1 + _shares2);
     // Total supply includes initializer shares + depositor shares
     assertEq(vault.totalSupply(), _totalSupplyBefore + _shares1 + _shares2);
+  }
+
+  function testFuzz_MintsSharesAfterFeeGrowthInsideWrapsPastZero(
+    address _depositor,
+    uint128 _liquidity
+  ) public {
+    _deployWrapRangeVault();
+    _assumeSafeAddress(_depositor);
+    vm.assume(_depositor != initializer);
+    _initializeVaultAndWrapFeeGrowthInsidePastZero(initializer);
+    // At most 1e30, so the deposit's token amounts fit the depositor's balance and the range's
+    // liquidity stays below Uniswap's per-tick limit for `DEFAULT_TICK_SPACING`.
+    _liquidity = uint128(bound(_liquidity, 1, 1e30));
+    deal(Currency.unwrap(currency0), _depositor, type(uint128).max);
+    deal(Currency.unwrap(currency1), _depositor, type(uint128).max);
+    _approveTokensForVault(_depositor, type(uint128).max, type(uint128).max);
+
+    vm.prank(_depositor);
+    (uint256 _shares,,) = vault.deposit(type(uint128).max, type(uint128).max, _liquidity);
+
+    assertEq(_shares, _liquidity);
+    assertEq(vault.balanceOf(_depositor), _liquidity);
   }
 
   function test_RevertIf_ZeroLiquidity() public {
@@ -1556,10 +1586,12 @@ contract CollectFees is LPVaultTest {
     _initializeVaultAndWrapFeeGrowthInsidePastZero(_initializer);
     uint256 _totalSupply = vault.totalSupply();
 
-    (uint256 _collectedFee0,) = _collectFeesAndAssertVaultDelta();
+    (uint256 _collectedFee0, uint256 _collectedFee1) = _collectFeesAndAssertVaultDelta();
 
     assertGt(_collectedFee0, 0);
+    assertGt(_collectedFee1, 0);
     assertEq(vault.globalFeeIndex0Scaled(), _expectedIndexDelta(_collectedFee0, _totalSupply));
+    assertEq(vault.globalFeeIndex1Scaled(), _expectedIndexDelta(_collectedFee1, _totalSupply));
   }
 
   /// @notice Tests that fees are attributed to the original holder when shares are transferred.
