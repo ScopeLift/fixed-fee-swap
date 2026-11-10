@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {Test, stdError} from "forge-std/Test.sol";
+import {Test, Vm, stdError} from "forge-std/Test.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Deployers} from "lib/v4-periphery/lib/v4-core/test/utils/Deployers.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {LPVault} from "src/LPVault.sol";
 import {LPVaultHarness} from "test/harness/LPVaultHarness.sol";
+import {IFeeTrackingToken} from "src/interface/IFeeTrackingToken.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {ImmutableState} from "v4-periphery/src/base/ImmutableState.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
@@ -36,10 +37,6 @@ contract LPVaultTest is Test, Deployers {
   int24 constant DEFAULT_TICK_SPACING = 60;
   uint256 constant INIT_MAX_VALUE = 1e24;
 
-  // The widest range a pool with `DEFAULT_TICK_SPACING` accepts, used for third-party liquidity
-  // that keeps swaps from running out of liquidity.
-  int24 constant FULL_RANGE_TICK_LOWER = -887_220;
-  int24 constant FULL_RANGE_TICK_UPPER = 887_220;
   // Liquidity a third-party LP adds: enough full-range liquidity that the small fee-accruing swaps
   // keep the price near tick 0, and a small amount to initialize each tick of the wrap range.
   int256 constant THIRD_PARTY_FULL_RANGE_LIQUIDITY = 1e21;
@@ -279,16 +276,19 @@ contract LPVaultTest is Test, Deployers {
     );
   }
 
-  // Replaces `vault` with a vault holding one position over the wrap range, has `_initializer`
-  // initialize it, and returns the shares minted. Before the vault adds liquidity, third-party LPs
-  // initialize the range's upper tick, trade to accrue fees, then initialize its lower tick, so
-  // Uniswap's fee growth inside the range starts just below 2^256. A swap into the range then
-  // accrues fees inside it until that value wraps past zero. Asserts both of those states so a test
-  // can't pass without the wrap happening.
-  function _initializeVaultAndWrapFeeGrowthInsidePastZero(address _initializer)
-    internal
-    returns (uint256 _shares)
-  {
+  // Adds third-party liquidity over the widest range the pool's tick spacing allows, so swaps
+  // don't run out of liquidity.
+  function _addThirdPartyFullRangeLiquidity() internal {
+    _addThirdPartyLiquidity(
+      TickMath.minUsableTick(DEFAULT_TICK_SPACING),
+      TickMath.maxUsableTick(DEFAULT_TICK_SPACING),
+      THIRD_PARTY_FULL_RANGE_LIQUIDITY
+    );
+  }
+
+  // Replaces `vault` with an uninitialized vault holding one position over the wrap range. Tests
+  // call this before excluding fuzzed addresses, so `_assumeSafeAddress` sees the new vault.
+  function _deployWrapRangeVault() internal {
     LPVault.LiquidityPosition[] memory _positions = new LPVault.LiquidityPosition[](1);
     _positions[0] = LPVault.LiquidityPosition({
       tickLower: WRAP_RANGE_TICK_LOWER, tickUpper: WRAP_RANGE_TICK_UPPER, weight: BIPS, liquidity: 0
@@ -296,10 +296,18 @@ contract LPVaultTest is Test, Deployers {
     vault = new LPVault(
       manager, defaultPoolKey, _positions, DEFAULT_NAME, DEFAULT_SYMBOL, INIT_MAX_VALUE
     );
+  }
 
-    _addThirdPartyLiquidity(
-      FULL_RANGE_TICK_LOWER, FULL_RANGE_TICK_UPPER, THIRD_PARTY_FULL_RANGE_LIQUIDITY
-    );
+  // Has `_initializer` initialize the vault from `_deployWrapRangeVault` and returns the shares
+  // minted. Before the vault adds liquidity, third-party LPs initialize the range's upper tick,
+  // trade to accrue fees, then initialize its lower tick, so Uniswap's fee growth inside the range
+  // starts just below 2^256. A swap into the range then accrues fees inside it until that value
+  // wraps past zero. Asserts both of those states so a test can't pass without the wrap happening.
+  function _initializeVaultAndWrapFeeGrowthInsidePastZero(address _initializer)
+    internal
+    returns (uint256 _shares)
+  {
+    _addThirdPartyFullRangeLiquidity();
     // Initializes the upper tick while the price is above it.
     _addThirdPartyLiquidity(
       WRAP_RANGE_TICK_UPPER, -WRAP_RANGE_TICK_UPPER, THIRD_PARTY_TICK_LIQUIDITY
@@ -578,6 +586,20 @@ contract InitializeLiquidity is LPVaultTest {
     assertTrue(vault.liquidityInitialized());
   }
 
+  // Counts the vault's `FeeIndexesUpdated` events in `_logs`.
+  function _countFeeIndexesUpdatedEvents(Vm.Log[] memory _logs)
+    internal
+    view
+    returns (uint256 _count)
+  {
+    for (uint256 _i = 0; _i < _logs.length; _i++) {
+      if (
+        _logs[_i].emitter == address(vault)
+          && _logs[_i].topics[0] == IFeeTrackingToken.FeeIndexesUpdated.selector
+      ) _count++;
+    }
+  }
+
   function testFuzz_CreditsNoFeesThatAccruedBeforeItsLiquidityWasAdded(
     address _caller,
     uint256 _swapAmount
@@ -587,9 +609,7 @@ contract InitializeLiquidity is LPVaultTest {
     // At least 1e6 so the swap pays a nonzero fee, and at most 1e18 so the price stays inside the
     // vault's (-120, 120) position, whose ticks stay uninitialized while fees accrue.
     _swapAmount = bound(_swapAmount, 1e6, 1e18);
-    _addThirdPartyLiquidity(
-      FULL_RANGE_TICK_LOWER, FULL_RANGE_TICK_UPPER, THIRD_PARTY_FULL_RANGE_LIQUIDITY
-    );
+    _addThirdPartyFullRangeLiquidity();
     _performSwap(true, -int256(_swapAmount));
     // Swaps back to exactly 1:1, the price the half-and-half initialization amounts below fit.
     _performSwapUpToPrice(false, -int256(INIT_MAX_VALUE), SQRT_PRICE_1_1);
@@ -597,10 +617,15 @@ contract InitializeLiquidity is LPVaultTest {
     (uint256 _amount0Max, uint256 _amount1Max) = vault.getMaxInitAmounts();
     _amount0Max = _amount0Max / 2;
     _amount1Max = _amount1Max / 2;
+    vm.recordLogs();
     vm.prank(_caller);
     vault.initializeLiquidity(_amount0Max, _amount1Max);
+    Vm.Log[] memory _initializationLogs = vm.getRecordedLogs();
     vault.collectFees();
 
+    // The index alone can't show a bad checkpoint here, because fees synced while no shares exist
+    // are dropped. The vault still reports any fees it synced in `FeeIndexesUpdated`.
+    assertEq(_countFeeIndexesUpdatedEvents(_initializationLogs), 0);
     assertEq(vault.globalFeeIndex0Scaled(), 0);
     assertEq(vault.globalFeeIndex1Scaled(), 0);
   }
@@ -1160,6 +1185,7 @@ contract Withdraw is LPVaultTest {
     address _initializer,
     address _receiver
   ) public {
+    _deployWrapRangeVault();
     _assumeSafeAddress(_initializer);
     _assumeSafeAddress(_receiver);
     uint256 _shares = _initializeVaultAndWrapFeeGrowthInsidePastZero(_initializer);
@@ -1525,6 +1551,7 @@ contract CollectFees is LPVaultTest {
   function testFuzz_CreditsFeesEarnedWhileFeeGrowthInsideWrapsPastZero(address _initializer)
     public
   {
+    _deployWrapRangeVault();
     _assumeSafeAddress(_initializer);
     _initializeVaultAndWrapFeeGrowthInsidePastZero(_initializer);
     uint256 _totalSupply = vault.totalSupply();
@@ -1650,6 +1677,7 @@ contract Transfer is LPVaultTest {
     address _recipient,
     uint256 _amount
   ) public {
+    _deployWrapRangeVault();
     _assumeSafeAddress(_initializer);
     _assumeSafeAddress(_recipient);
     vm.assume(_initializer != _recipient);
