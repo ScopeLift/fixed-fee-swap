@@ -4256,6 +4256,37 @@ contract CollectFees is FixedFeeSwapMarketTest {
     assertEq(_fees1, 0, "Position should earn no TOKEN1 fees");
   }
 
+  function testFuzz_PaysOnlyTheFeesEarnedInRangeAfterADownwardSwapStopsOnTheUpperTick(uint128 _liquidity)
+    public
+  {
+    // Liquidity 1 costs nothing to mint, which made a wrapped fee balance a free drain.
+    _liquidity = uint128(bound(_liquidity, 1, 1000e18));
+    _mintOnHook(feeHook, bob, 0, 40, 1000e18);
+    bytes32 _positionId = _mintOnHook(feeHook, alice, 0, 10, _liquidity);
+
+    // Alice's range [0, 10] is in range only while the tick moves from 0 up to 10, and it earns
+    // its share of the TOKEN0 fees from that move.
+    _swapToTick(feeHook, 10, true);
+    uint256 _expectedFees0 =
+      FixedPointMathLib.mulDiv(feeHook.feeGrowthGlobal0X128(), _liquidity, 1 << 128);
+    _swapToTick(feeHook, 15, true);
+    vm.prank(alice);
+    (uint128 _firstFees0, uint128 _firstFees1) = feeHook.collectFees(_positionId, alice, 0, 0);
+    // Stopping on tick 10 from above leaves Alice's range out of range.
+    _swapToTick(feeHook, 10, false);
+    vm.prank(alice);
+    (uint128 _secondFees0, uint128 _secondFees1) = feeHook.collectFees(_positionId, alice, 0, 0);
+
+    assertEq(
+      uint256(_firstFees0) + _secondFees0,
+      _expectedFees0,
+      "Alice should collect only the TOKEN0 fees earned in range"
+    );
+    assertEq(
+      uint256(_firstFees1) + _secondFees1, 0, "Alice should collect no TOKEN1 fees out of range"
+    );
+  }
+
   function testFuzz_PartialFeeCollection(uint128 _liquidity, uint256 _swapAmount) public {
     _liquidity = _boundLiquidity(_liquidity);
     // 3 same-direction swaps, cap each at 90 bips so total stays within 300-_tick range
