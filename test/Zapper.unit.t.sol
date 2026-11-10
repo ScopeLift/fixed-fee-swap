@@ -10,6 +10,7 @@ import {Zapper} from "src/Zapper.sol";
 import {FixedFeeSwap} from "src/FixedFeeSwap.sol";
 import {FixedFeeSwapMarket} from "src/FixedFeeSwapMarket.sol";
 import {FixedFeeSwapMarketMock} from "test/mock/FixedFeeSwapMarketMock.sol";
+import {FixedFeeSwapMarketHarness} from "test/harness/FixedFeeSwapMarketHarness.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
 import {PrincipalToken} from "src/PrincipalToken.sol";
 import {YieldToken} from "src/YieldToken.sol";
@@ -19,6 +20,7 @@ import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.so
 import {VaultShareTokenHarness} from "test/harness/VaultShareTokenHarness.sol";
 import {FeeTracking} from "src/lib/FeeTracking.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 
 contract ZapperTest is Test {
   Zapper internal zapper;
@@ -28,11 +30,43 @@ contract ZapperTest is Test {
   ERC20Mock internal token0;
   ERC20Mock internal token1;
 
+  // The real market, with fees and price impact, and a Zapper that trades through it. The mock
+  // above fills at its set price with no slippage.
+  FixedFeeSwapMarketHarness internal market;
+  Zapper internal marketZapper;
+
   address internal user;
+  address internal liquidityProvider;
   uint256 internal maturity;
 
   // Flash loan return value constant
   bytes32 internal constant FLASH_LOAN_RETURN_VALUE = keccak256("ERC3156FlashBorrower.onFlashLoan");
+
+  /// @notice Term of the real market, and of the FixedFeeSwap it trades, so both mature together.
+  uint48 internal constant MARKET_LENGTH = 365 days;
+
+  /// @notice The real market's swap fee: 0.3%, in hundredths of a bip.
+  uint24 internal constant MARKET_FEE_RATE = 3000;
+
+  /// @notice One tick of the real market is 1 bip of yield.
+  int24 internal constant MARKET_YIELD_PER_TICK = 1;
+
+  /// @notice The real market starts at a 5% yield, inside the LP's range.
+  int24 internal constant MARKET_INITIAL_TICK = 500;
+
+  /// @notice The LP's position spans yields of 0% to 10%, around the initial tick, so it holds both
+  /// PT and cash and every zap in these tests stays in range.
+  int24 internal constant LP_TICK_LOWER = 0;
+  int24 internal constant LP_TICK_UPPER = 1000;
+
+  /// @notice Liquidity the LP mints across its range.
+  uint128 internal constant LP_LIQUIDITY = 2_000_000e18;
+
+  /// @notice VST the LP splits into PT; it also keeps as much VST, so it can fund `LP_LIQUIDITY`.
+  uint256 internal constant LP_SPLIT_AMOUNT = 10_000_000e18;
+
+  /// @notice YT sold, or VST spent, by each zap through the real market.
+  uint256 internal constant MARKET_ZAP_AMOUNT = 1000e18;
 
   function setUp() public virtual {
     // Underlying fee tokens for the VaultShareToken
@@ -44,8 +78,8 @@ contract ZapperTest is Test {
     vaultShareToken =
       new VaultShareTokenHarness("Vault Share Token", "VST", address(token0), address(token1));
 
-    // Choose a maturity strictly in the future
-    maturity = block.timestamp + 30 days;
+    // Matures with the real market below.
+    maturity = block.timestamp + MARKET_LENGTH;
 
     fixedFeeSwap = new FixedFeeSwap(vaultShareToken, maturity);
 
@@ -63,7 +97,25 @@ contract ZapperTest is Test {
 
     zapper = new Zapper(fixedFeeSwap, FixedFeeSwapMarket(address(fixedFeeSwapMarketMock)));
 
+    // The real market trades the same PT and VST. The harness only skips the hook address check,
+    // and swaps through `swap` never reach the pool manager, so a made-up address will do.
+    market = new FixedFeeSwapMarketHarness(
+      MARKET_LENGTH,
+      address(_pt),
+      address(vaultShareToken),
+      MARKET_FEE_RATE,
+      MARKET_YIELD_PER_TICK,
+      IPoolManager(makeAddr("poolManager")),
+      MARKET_INITIAL_TICK
+    );
+    marketZapper = new Zapper(fixedFeeSwap, FixedFeeSwapMarket(address(market)));
+
     user = makeAddr("user");
+    liquidityProvider = makeAddr("liquidityProvider");
+
+    // Moves 30 days into the term, so the market has time elapsed and PT trades below par. The
+    // real-market tests depend on the price this gives; the mock tests don't.
+    vm.warp(block.timestamp + 30 days);
   }
 
   function _assumeSafeAddress(address _addr) internal pure {
@@ -147,6 +199,23 @@ contract ZapperTest is Test {
       token0.balanceOf(address(vaultShareToken)) + _feeToken0
     );
     VaultShareTokenHarness(address(vaultShareToken)).exposed_updateFees(_feeToken0, 0);
+  }
+
+  // Mints vault shares to the LP, splits half into PT, and mints `LP_LIQUIDITY` across the LP's
+  // range in the real market. The shares count in the vault's total supply, so tests that need
+  // their user to hold every vault share must not call this.
+  function _mintMarketLiquidity() internal {
+    VaultShareTokenHarness(address(vaultShareToken))
+      .exposed_mint(liquidityProvider, 2 * LP_SPLIT_AMOUNT);
+    vm.startPrank(liquidityProvider);
+    vaultShareToken.approve(address(fixedFeeSwap), LP_SPLIT_AMOUNT);
+    fixedFeeSwap.deposit(LP_SPLIT_AMOUNT);
+    IERC20(address(fixedFeeSwap.PRINCIPAL_TOKEN())).approve(address(market), type(uint256).max);
+    vaultShareToken.approve(address(market), type(uint256).max);
+    market.mintLiquidity(
+      LP_TICK_LOWER, LP_TICK_UPPER, LP_LIQUIDITY, type(uint256).max, type(uint256).max
+    );
+    vm.stopPrank();
   }
 
   /// @notice Helper function to set up fees on YT.
@@ -328,6 +397,19 @@ contract SellYieldToken is ZapperTest {
   function test_RevertIf_AmountIsZero() public {
     vm.expectRevert(Zapper.Zapper_InvalidAmount.selector);
     zapper.sellYieldToken(0);
+  }
+
+  function test_SellsYieldTokensThroughTheRealMarket() public {
+    _mintMarketLiquidity();
+    _mintVstAndDepositForUser(user, MARKET_ZAP_AMOUNT);
+    YieldToken _yt = fixedFeeSwap.YIELD_TOKEN();
+    vm.prank(user);
+    _yt.approve(address(marketZapper), MARKET_ZAP_AMOUNT);
+
+    vm.prank(user);
+    marketZapper.sellYieldToken(MARKET_ZAP_AMOUNT);
+
+    assertEq(_yt.balanceOf(user), 0);
   }
 
   function testFuzz_PaysTheSellerTheFeesTheirYieldTokensEarned(
@@ -659,6 +741,19 @@ contract BuyYieldToken is ZapperTest {
   function test_RevertIf_AmountIsZero() public {
     vm.expectRevert(Zapper.Zapper_InvalidAmount.selector);
     zapper.buyYieldToken(0);
+  }
+
+  function test_BuysYieldTokensThroughTheRealMarket() public {
+    _mintMarketLiquidity();
+    VaultShareTokenHarness(address(vaultShareToken)).exposed_mint(user, MARKET_ZAP_AMOUNT);
+    vm.prank(user);
+    vaultShareToken.approve(address(marketZapper), MARKET_ZAP_AMOUNT);
+
+    vm.prank(user);
+    marketZapper.buyYieldToken(MARKET_ZAP_AMOUNT);
+
+    // Leverage: the buyer gets more YT than the VST it spent.
+    assertGt(fixedFeeSwap.YIELD_TOKEN().balanceOf(user), MARKET_ZAP_AMOUNT);
   }
 }
 
