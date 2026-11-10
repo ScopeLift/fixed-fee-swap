@@ -248,6 +248,25 @@ contract LPVaultTest is Test, Deployers {
     return swap(defaultPoolKey, _zeroForOne, _amountSpecified, "");
   }
 
+  // Swaps exact input from this test contract until `_amountSpecified` is spent or the price
+  // reaches `_sqrtPriceLimitX96`, whichever comes first.
+  function _performSwapUpToPrice(
+    bool _zeroForOne,
+    int256 _amountSpecified,
+    uint160 _sqrtPriceLimitX96
+  ) internal {
+    swapRouter.swap(
+      defaultPoolKey,
+      SwapParams({
+        zeroForOne: _zeroForOne,
+        amountSpecified: _amountSpecified,
+        sqrtPriceLimitX96: _sqrtPriceLimitX96
+      }),
+      PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+      ""
+    );
+  }
+
   // Adds `_liquidity` to `[_tickLower, _tickUpper]` from this test contract, acting as a
   // third-party LP that is not the vault.
   function _addThirdPartyLiquidity(int24 _tickLower, int24 _tickUpper, int256 _liquidity) internal {
@@ -306,15 +325,8 @@ contract LPVaultTest is Test, Deployers {
     vm.prank(_initializer);
     (_shares,,) = vault.initializeLiquidity(0, INIT_MAX_VALUE);
 
-    swapRouter.swap(
-      defaultPoolKey,
-      SwapParams({
-        zeroForOne: true,
-        amountSpecified: -int256(INIT_MAX_VALUE),
-        sqrtPriceLimitX96: TickMath.getSqrtPriceAtTick(WRAP_RANGE_SWAP_TARGET_TICK)
-      }),
-      PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
-      ""
+    _performSwapUpToPrice(
+      true, -int256(INIT_MAX_VALUE), TickMath.getSqrtPriceAtTick(WRAP_RANGE_SWAP_TARGET_TICK)
     );
 
     (uint256 _feeGrowthInside0AfterX128,) = manager.getFeeGrowthInside(
@@ -565,6 +577,33 @@ contract InitializeLiquidity is LPVaultTest {
     assertEq(_shares, _position0Liquidity);
     assertEq(vault.balanceOf(_caller), _shares);
     assertTrue(vault.liquidityInitialized());
+  }
+
+  function testFuzz_CreditsNoFeesThatAccruedBeforeItsLiquidityWasAdded(
+    address _caller,
+    uint256 _swapAmount
+  ) public {
+    _assumeSafeAddress(_caller);
+    _fundAndApproveInitializer(_caller);
+    // At least 1e6 so the swap pays a nonzero fee, and at most 1e18 so the price stays inside the
+    // vault's (-120, 120) position, whose ticks stay uninitialized while fees accrue.
+    _swapAmount = bound(_swapAmount, 1e6, 1e18);
+    _addThirdPartyLiquidity(
+      FULL_RANGE_TICK_LOWER, FULL_RANGE_TICK_UPPER, THIRD_PARTY_FULL_RANGE_LIQUIDITY
+    );
+    _performSwap(true, -int256(_swapAmount));
+    // Swaps back to exactly 1:1, the price the half-and-half initialization amounts below fit.
+    _performSwapUpToPrice(false, -int256(INIT_MAX_VALUE), SQRT_PRICE_1_1);
+
+    (uint256 _amount0Max, uint256 _amount1Max) = vault.getMaxInitAmounts();
+    _amount0Max = _amount0Max / 2;
+    _amount1Max = _amount1Max / 2;
+    vm.prank(_caller);
+    vault.initializeLiquidity(_amount0Max, _amount1Max);
+    vault.collectFees();
+
+    assertEq(vault.globalFeeIndex0Scaled(), 0);
+    assertEq(vault.globalFeeIndex1Scaled(), 0);
   }
 
   function test_RevertIf_AlreadyInitialized() public {

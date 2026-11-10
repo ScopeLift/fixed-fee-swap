@@ -249,9 +249,6 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     uint256 _totalValue = _amount0AsValue1 + _amount1Max;
     if (_totalValue > INIT_MAX_VALUE) revert LPVault__ExceedsMaxValue();
 
-    // Sync checkpoints before first liquidity add so pre-existing pool fees are not attributed.
-    _syncFees();
-
     (uint128[] memory _liquidityPerPosition, uint128 _liquidity0) =
       _calculateInitialLiquidity(_sqrtPriceX96);
 
@@ -270,6 +267,12 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     );
 
     (_amount0Used, _amount1Used) = abi.decode(_result, (uint256, uint256));
+
+    // Checkpoint fee growth while the recorded liquidity is still zero, so fees that accrued
+    // before this add are not attributed. This runs after the add, not before, because adding
+    // liquidity can initialize a range's ticks, which changes Uniswap's fee growth inside it. The
+    // checkpoint then matches the fee growth Uniswap records for the vault's new positions.
+    _syncFees();
 
     // Update position liquidity tracking
     for (uint256 _i = 0; _i < _liquidityPerPosition.length; _i++) {
@@ -820,6 +823,7 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   /// @notice View-only fee checkpointing based on Uniswap v4 fee growth inside each position range.
   /// @dev
   ///  - Reads fee growth via `getFeeGrowthInside` without calling `unlock` or modifying pool state.
+  ///  - Takes fee growth deltas modulo 2^256, since Uniswap's fee growth inside a range wraps.
   ///  - Converts fee growth deltas into token amounts using position liquidity and Q128 math.
   ///  - Updates `VaultShareToken` fee indexes via `_updateFees`.
   function _syncFees() internal {
@@ -842,9 +846,16 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
         uint256 _feeGrowthInside0LastX128 = checkpoint.feeGrowthInside0LastX128;
         uint256 _feeGrowthInside1LastX128 = checkpoint.feeGrowthInside1LastX128;
 
-        // Compute growth deltas since last checkpoint.
-        uint256 _deltaFeeGrowth0X128 = _feeGrowthInside0NowX128 - _feeGrowthInside0LastX128;
-        uint256 _deltaFeeGrowth1X128 = _feeGrowthInside1NowX128 - _feeGrowthInside1LastX128;
+        // Compute growth deltas since last checkpoint. Uniswap's fee growth inside a range is
+        // only meaningful modulo 2^256: it starts near 2^256 when the range's ticks were
+        // initialized at different fee growth, and later wraps past zero. Subtract without
+        // overflow checks so the delta stays correct across the wrap, as v4's `Position` does.
+        uint256 _deltaFeeGrowth0X128;
+        uint256 _deltaFeeGrowth1X128;
+        unchecked {
+          _deltaFeeGrowth0X128 = _feeGrowthInside0NowX128 - _feeGrowthInside0LastX128;
+          _deltaFeeGrowth1X128 = _feeGrowthInside1NowX128 - _feeGrowthInside1LastX128;
+        }
 
         if (_deltaFeeGrowth0X128 > 0) {
           _newFees0 += Math.mulDiv(_deltaFeeGrowth0X128, _liquidity, FixedPoint128.Q128);
