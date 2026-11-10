@@ -2888,6 +2888,28 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     assertGe(token0.balanceOf(alice), _balance0Before, "LP should receive token0");
     assertGe(token1.balanceOf(alice), _balance1Before, "LP should receive token1");
   }
+
+  function test_PositionMintedAtStartTimeReturnsNoMoreCashThanItCost() public {
+    (FixedFeeSwapMarketHarness _localHook,,) = _deployHookForSolvency(0, "startTimeMint");
+
+    // Alice mints in the market's deployment block, where block.timestamp == START_TIME. The range
+    // sits above the initial tick 0, so the position holds only cash.
+    _warpFromHookStart(_localHook, 0);
+    uint256 _balance1BeforeMint = token1.balanceOf(alice);
+    bytes32 _positionId = _mintOnHook(_localHook, alice, 100, 600, 1e24);
+    uint256 _cashPaid = _balance1BeforeMint - token1.balanceOf(alice);
+
+    // Bob deposits into the same range a day later, so the market holds cash Alice could take.
+    _warpFromHookStart(_localHook, 1 days);
+    _mintOnHook(_localHook, bob, 100, 600, 1e24);
+
+    uint256 _balance1BeforeWithdraw = token1.balanceOf(alice);
+    vm.prank(alice);
+    _localHook.decreaseLiquidity(_positionId, -int128(1e24), 0, 0);
+    uint256 _cashReceived = token1.balanceOf(alice) - _balance1BeforeWithdraw;
+
+    assertLe(_cashReceived, _cashPaid, "LP withdrew more cash than deposited");
+  }
 }
 
 contract _BeforeSwap is FixedFeeSwapMarketTest {
