@@ -1464,3 +1464,37 @@ contract FeesAcrossMaturity is FixedFeeSwapTest {
     );
   }
 }
+
+contract YieldTokenTransfer is FixedFeeSwapTest {
+  function testFuzz_LeavesFeesEarnedBeforeATransferWithTheSender(
+    uint256 _depositAmount,
+    uint256 _otherDepositAmount,
+    uint256 _feeToken0
+  ) public {
+    _depositAmount = _boundToFeeEarningDeposit(_depositAmount);
+    _otherDepositAmount = _boundToFeeEarningDeposit(_otherDepositAmount);
+    _feeToken0 = _boundToFeeAboveRounding(_feeToken0);
+    address _recipient = makeAddr("recipient");
+    YieldToken _yieldToken = fixedFeeSwap.YIELD_TOKEN();
+    _mintVstAndDepositForUser(user, _depositAmount);
+    _mintVstAndDepositForUser(userB, _otherDepositAmount);
+    // The vault earns while the user holds YT, and nothing syncs it into YT before the transfer.
+    _updateYieldTokenFees(_feeToken0, 0);
+    uint256 _earnedByUser = Math.mulDiv(
+      _depositAmount,
+      Math.mulDiv(_feeToken0, FeeTracking.PRECISION, _depositAmount + _otherDepositAmount),
+      FeeTracking.PRECISION
+    );
+
+    vm.prank(user);
+    _yieldToken.transfer(_recipient, _depositAmount);
+    vm.warp(maturity);
+    vm.prank(_recipient);
+    fixedFeeSwap.claimYTFeesAfterMaturity();
+
+    (,, uint256 _userAccrued0,) = _yieldToken.userFees(user);
+    // YieldToken rounds its fee index down by up to 1 per 1e18 shares.
+    assertApproxEqAbs(_userAccrued0, _earnedByUser, _depositAmount / FeeTracking.PRECISION + 2);
+    assertEq(token0.balanceOf(_recipient), 0);
+  }
+}
