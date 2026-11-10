@@ -1025,6 +1025,23 @@ contract Withdraw is LPVaultTest {
 }
 
 contract CollectFees is LPVaultTest {
+  function testFuzz_CollectsFeesAfterEveryShareIsWithdrawn(uint256 _swapAbs0, uint256 _swapAbs1)
+    public
+  {
+    address _initializer = makeAddr("initializer");
+    (uint256 _shares,,) = _initializeLiquidity(_initializer);
+    _performSwap(true, _boundSwapAbs(_swapAbs0));
+    _performSwap(false, _boundSwapAbs(_swapAbs1));
+    vm.prank(_initializer);
+    vault.withdraw(_shares, _initializer);
+
+    // Every position is empty now, which v4 won't modify, so collecting has to skip them.
+    (uint256 _collected0, uint256 _collected1) = vault.collectFees();
+
+    assertEq(_collected0, 0);
+    assertEq(_collected1, 0);
+  }
+
   function testFuzz_ClaimPaysAccruedFeesAfterEveryShareIsWithdrawn(
     uint256 _swapAbs0,
     uint256 _swapAbs1

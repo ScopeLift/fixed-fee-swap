@@ -17,6 +17,8 @@ import {FeeTracking} from "src/lib/FeeTracking.sol";
 /// @dev
 ///  - The VST this contract holds keeps earning vault fees. Fees earned before `MATURITY` go to YT
 ///    holders, and fees earned after it go to PT holders.
+///  - VST sent here directly, rather than split through `deposit`, backs no PT or YT. Neither it
+/// nor the fees it earns is paid to anyone, and both stay in the contract.
 ///  - The vault's fee index only moves when the vault records new fees, so the contract settles
 ///    the switch once, at the first action at or after `MATURITY` (or a call to `settle`). It
 ///    records the vault fee index at `MATURITY`, interpolating by time when the first reading

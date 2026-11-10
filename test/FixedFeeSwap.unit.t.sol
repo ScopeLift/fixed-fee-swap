@@ -1235,6 +1235,28 @@ contract Settle is FixedFeeSwapTest {
     return Math.mulDiv(_feeIndexNow, maturity - _checkpointTime, block.timestamp - _checkpointTime);
   }
 
+  function testFuzz_RevertIf_MaturityIndexIsReadBeforeSettlement(uint256 _secondsAfterStart)
+    public
+  {
+    // Any time up to a year past maturity, with nothing having settled.
+    _secondsAfterStart = bound(_secondsAfterStart, 0, maturity - block.timestamp + 365 days);
+    vm.warp(block.timestamp + _secondsAfterStart);
+
+    vm.expectRevert(FixedFeeSwap.FixedFeeSwap_NotSettled.selector);
+    fixedFeeSwap.maturityFeeIndex0Scaled();
+  }
+
+  function testFuzz_RevertIf_MaturityIndex1IsReadBeforeSettlement(uint256 _secondsAfterStart)
+    public
+  {
+    // Any time up to a year past maturity, with nothing having settled.
+    _secondsAfterStart = bound(_secondsAfterStart, 0, maturity - block.timestamp + 365 days);
+    vm.warp(block.timestamp + _secondsAfterStart);
+
+    vm.expectRevert(FixedFeeSwap.FixedFeeSwap_NotSettled.selector);
+    fixedFeeSwap.maturityFeeIndex1Scaled();
+  }
+
   function testFuzz_RevertIf_CalledBeforeMaturity(uint256 _secondsBeforeMaturity) public {
     _secondsBeforeMaturity = bound(_secondsBeforeMaturity, 1, maturity - block.timestamp);
     vm.warp(maturity - _secondsBeforeMaturity);
