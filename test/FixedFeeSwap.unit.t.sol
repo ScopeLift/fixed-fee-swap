@@ -11,6 +11,7 @@ import {FixedFeeSwap} from "src/FixedFeeSwap.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
 import {PrincipalToken} from "src/PrincipalToken.sol";
 import {YieldToken} from "src/YieldToken.sol";
+import {FeeTracking} from "src/lib/FeeTracking.sol";
 import {ERC20Mock} from "test/mock/ERC20Mock.sol";
 import {NonPayableContractMock} from "test/mock/NonPayableContractMock.sol";
 import {VaultShareTokenHarness} from "test/harness/VaultShareTokenHarness.sol";
@@ -82,6 +83,28 @@ contract FixedFeeSwapTest is Test {
     vaultShareToken.approve(address(fixedFeeSwap), _depositAmount);
     vm.prank(_user);
     fixedFeeSwap.deposit(_depositAmount);
+  }
+
+  // Mints vault shares through the harness and splits them for `_user`. Unlike
+  // `_depositVstForUser`, which uses `deal`, this counts the shares in the vault's total supply,
+  // which fee index updates divide by, so vault fees reach FixedFeeSwap.
+  function _mintVstAndDepositForUser(address _user, uint256 _depositAmount) internal {
+    VaultShareTokenHarness(address(vaultShareToken)).exposed_mint(_user, _depositAmount);
+    vm.prank(_user);
+    vaultShareToken.approve(address(fixedFeeSwap), _depositAmount);
+    vm.prank(_user);
+    fixedFeeSwap.deposit(_depositAmount);
+  }
+
+  // At most 1e30 so that a fee of at least 1e18 raises the vault's fee index by at least 1e6 per
+  // share, and the fee owed on these shares never rounds to zero.
+  function _boundToFeeEarningDeposit(uint256 _amount) internal pure returns (uint256) {
+    return bound(_amount, 1, 1e30);
+  }
+
+  // At least 1e18 so that the fee index rises on any deposit `_boundToFeeEarningDeposit` allows.
+  function _boundToFeeAboveRounding(uint256 _fee) internal pure returns (uint256) {
+    return bound(_fee, 1e18, type(uint128).max);
   }
 
   /// @notice Helper to fund the vault and update its fee indexes so collectFeesToYT can pull fees
@@ -538,6 +561,38 @@ contract ClaimYTFeesAfterMaturity is FixedFeeSwapTest {
     assertEq(token0.balanceOf(user), _initialUserToken0Balance + _accruedToken0);
     assertEq(token1.balanceOf(user), _initialUserToken1Balance + _accruedToken1);
   }
+
+  function testFuzz_PaysPreMaturityFeesAfterAnotherHolderRedeemsAtMaturity(
+    uint256 _depositAmount,
+    uint256 _otherDepositAmount,
+    uint256 _feeToken0,
+    uint256 _feeToken1
+  ) public {
+    _depositAmount = _boundToFeeEarningDeposit(_depositAmount);
+    _otherDepositAmount = _boundToFeeEarningDeposit(_otherDepositAmount);
+    _feeToken0 = _boundToFeeAboveRounding(_feeToken0);
+    _feeToken1 = _boundToFeeAboveRounding(_feeToken1);
+    _mintVstAndDepositForUser(user, _depositAmount);
+    _mintVstAndDepositForUser(userB, _otherDepositAmount);
+    _updateYieldTokenFees(_feeToken0, _feeToken1);
+    fixedFeeSwap.collectFeesToYT();
+    YieldToken _yieldToken = fixedFeeSwap.YIELD_TOKEN();
+    // A zero transfer checkpoints the user's accrued fees so the test can read them.
+    vm.prank(user);
+    _yieldToken.transfer(user, 0);
+    (,, uint256 _accruedToken0, uint256 _accruedToken1) = _yieldToken.userFees(user);
+    vm.warp(maturity);
+
+    vm.prank(userB);
+    fixedFeeSwap.redeem(_otherDepositAmount);
+    uint256 _token0Before = token0.balanceOf(user);
+    uint256 _token1Before = token1.balanceOf(user);
+    vm.prank(user);
+    fixedFeeSwap.claimYTFeesAfterMaturity();
+
+    assertEq(token0.balanceOf(user), _token0Before + _accruedToken0);
+    assertEq(token1.balanceOf(user), _token1Before + _accruedToken1);
+  }
 }
 
 contract TransferFeesToUser is FixedFeeSwapTest {
@@ -810,6 +865,32 @@ contract CollectFeesToYT is FixedFeeSwapTest {
     assertEq(token0.balanceOf(userB), _userB0Before + _expected0);
     assertEq(token1.balanceOf(userB), _userB1Before + _expected1);
   }
+
+  function testFuzz_CreditsNoFeeEarnedAfterMaturityToTheYieldToken(
+    uint256 _depositAmount,
+    uint256 _feeToken0,
+    uint256 _feeToken1,
+    uint256 _secondsAfterMaturity
+  ) public {
+    _depositAmount = _boundToFeeEarningDeposit(_depositAmount);
+    _feeToken0 = _boundToFeeAboveRounding(_feeToken0);
+    _feeToken1 = _boundToFeeAboveRounding(_feeToken1);
+    _secondsAfterMaturity = bound(_secondsAfterMaturity, 0, 365 days);
+    _mintVstAndDepositForUser(user, _depositAmount);
+    // Someone acts at maturity, so every fee the vault reports afterwards was earned after it.
+    vm.warp(maturity);
+    fixedFeeSwap.collectFeesToYT();
+    YieldToken _yieldToken = fixedFeeSwap.YIELD_TOKEN();
+    uint256 _index0Before = _yieldToken.globalFeeIndex0Scaled();
+    uint256 _index1Before = _yieldToken.globalFeeIndex1Scaled();
+
+    vm.warp(maturity + _secondsAfterMaturity);
+    _updateYieldTokenFees(_feeToken0, _feeToken1);
+    fixedFeeSwap.collectFeesToYT();
+
+    assertEq(_yieldToken.globalFeeIndex0Scaled(), _index0Before);
+    assertEq(_yieldToken.globalFeeIndex1Scaled(), _index1Before);
+  }
 }
 
 contract Redeem is FixedFeeSwapTest {
@@ -995,6 +1076,54 @@ contract Redeem is FixedFeeSwapTest {
 
     assertEq(userB.balance, _userB0Before + _expectedFee0);
     assertEq(token1.balanceOf(userB), _userB1Before + _expectedFee1);
+  }
+
+  function testFuzz_RedeemsPrincipalWithoutYieldTokensAfterEveryYieldTokenIsBurned(
+    uint256 _depositAmount,
+    uint256 _secondsAfterMaturity
+  ) public {
+    _depositAmount = _boundToRealisticAmount(_depositAmount);
+    _secondsAfterMaturity = bound(_secondsAfterMaturity, 0, 365 days);
+    _mintVstAndDepositForUser(user, _depositAmount);
+    PrincipalToken _principalToken = fixedFeeSwap.PRINCIPAL_TOKEN();
+    // The user keeps the YT and sells the PT, which a transfer stands in for.
+    vm.prank(user);
+    _principalToken.transfer(userB, _depositAmount);
+    vm.warp(maturity + _secondsAfterMaturity);
+    vm.prank(user);
+    fixedFeeSwap.claimYTFeesAfterMaturity();
+
+    vm.prank(userB);
+    fixedFeeSwap.redeem(_depositAmount);
+
+    assertEq(vaultShareToken.balanceOf(userB), _depositAmount);
+  }
+
+  function testFuzz_PaysTheLastRedeemerEveryFeeEarnedAfterMaturity(
+    uint256 _depositAmount,
+    uint256 _otherDepositAmount,
+    uint256 _feeToken0
+  ) public {
+    _depositAmount = _boundToFeeEarningDeposit(_depositAmount);
+    _otherDepositAmount = _boundToFeeEarningDeposit(_otherDepositAmount);
+    _feeToken0 = _boundToFeeAboveRounding(_feeToken0);
+    _mintVstAndDepositForUser(user, _depositAmount);
+    _mintVstAndDepositForUser(userB, _otherDepositAmount);
+    vm.warp(maturity);
+    vm.prank(userB);
+    fixedFeeSwap.redeem(_otherDepositAmount);
+    // Fees the vault earns after maturity, spread over every share, including userB's redeemed
+    // ones.
+    _updateYieldTokenFees(_feeToken0, 0);
+    uint256 _feeIndexIncrease =
+      Math.mulDiv(_feeToken0, FeeTracking.PRECISION, vaultShareToken.totalSupply());
+
+    vm.prank(user);
+    fixedFeeSwap.redeem(_depositAmount);
+
+    assertEq(
+      token0.balanceOf(user), Math.mulDiv(_depositAmount, _feeIndexIncrease, FeeTracking.PRECISION)
+    );
   }
 
   function testFuzz_EmitsRedeemEvent(uint256 _depositAmount, uint256 _redeemAmount) public {
