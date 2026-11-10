@@ -388,6 +388,15 @@ abstract contract FixedFeeSwapMarketTest is Test {
     internal
     returns (FixedFeeSwapMarketHarness _localHook, PoolKey memory _localPoolKey)
   {
+    return _deployHookForBeforeSwapTestsWithSpacing(_feeRate, YIELD_PER_TICK, _managerLabel);
+  }
+
+  // Same as `_deployHookForBeforeSwapTests`, with `_yieldPerTick` as the tick spacing.
+  function _deployHookForBeforeSwapTestsWithSpacing(
+    uint24 _feeRate,
+    int24 _yieldPerTick,
+    string memory _managerLabel
+  ) internal returns (FixedFeeSwapMarketHarness _localHook, PoolKey memory _localPoolKey) {
     uint256 _currentTimestamp = block.timestamp;
     vm.warp(1);
 
@@ -396,7 +405,7 @@ abstract contract FixedFeeSwapMarketTest is Test {
       address(token0),
       address(token1),
       _feeRate,
-      YIELD_PER_TICK,
+      _yieldPerTick,
       IPoolManager(makeAddr(_managerLabel)),
       0
     );
@@ -4058,6 +4067,54 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
         + _inRangeLiquidity(_tick, _scenario.lowerB, _scenario.upperB, _scenario.liquidityB),
       "Active liquidity should equal the liquidity of in-range positions"
     );
+  }
+
+  function testFuzz_DownwardSwapFromAnUnalignedTickCrossesTheInitializedTickBelowIt(
+    uint128 _baseLiquidity,
+    uint128 _rangeLiquidity,
+    int24 _upTick,
+    int24 _downTick
+  ) public {
+    _baseLiquidity = _boundLiquidity(_baseLiquidity);
+    _rangeLiquidity = _boundLiquidity(_rangeLiquidity);
+    // With a spacing of 10, ticks 11 to 29 lie inside [10, 30] and 1 to 9 below it, so both
+    // swap targets can sit off the spacing.
+    _upTick = int24(bound(_upTick, 11, 29));
+    _downTick = int24(bound(_downTick, 1, 9));
+    (FixedFeeSwapMarketHarness _localHook,) =
+      _deployHookForBeforeSwapTestsWithSpacing(FEE_RATE, 10, "unalignedDownwardSwapManager");
+    _mintOnHook(_localHook, alice, 0, 100, _baseLiquidity);
+    _mintOnHook(_localHook, alice, 10, 30, _rangeLiquidity);
+    // With a spacing above 1, LP deposits are sized as if the spacing were 1 while swaps pay out
+    // at the real spacing, a separate bug. Topping up the hook lets the swaps pay out, so this
+    // test checks only active liquidity.
+    token0.mint(address(_localHook), INITIAL_BALANCE);
+    token1.mint(address(_localHook), INITIAL_BALANCE);
+    _swapToTick(_localHook, _upTick, true);
+
+    _swapToTick(_localHook, _downTick, false);
+
+    assertEq(
+      _localHook.getActiveLiquidity(), _baseLiquidity, "Only the base range should stay active"
+    );
+  }
+
+  function testFuzz_CashForPrincipalSwapTradesAgainstARangeEndingAtTheCurrentTick(
+    uint128 _liquidity,
+    int24 _downTick
+  ) public {
+    _liquidity = _boundLiquidity(_liquidity);
+    _downTick = int24(bound(_downTick, 1, 9));
+    (FixedFeeSwapMarketHarness _localHook,) =
+      _deployHookForBeforeSwapTests(FEE_RATE, "rangeEndingAtCurrentTickManager");
+    _mintOnHook(_localHook, alice, 0, 10, _liquidity);
+    // At tick 10 the only range [0, 10] is out of range, so no liquidity is active.
+    _swapToTick(_localHook, 10, true);
+    assertEq(_localHook.getActiveLiquidity(), 0, "Setup: no liquidity should be active");
+
+    _swapToTick(_localHook, _downTick, false);
+
+    assertEq(_localHook.getActiveLiquidity(), _liquidity, "The range should be active again");
   }
 
   // ============ Direct Swap Tests (FixedFeeSwapMarket.swap) ============

@@ -30,21 +30,24 @@ contract FixedFeeSwapMarketHarness is FixedFeeSwapMarket {
     int24 nextTick,
     bool principalToCash
   ) external returns (uint256, uint256, int256, int24) {
-    return _calculateSwap(amountIn, price, nextTick, principalToCash, NO_TICK_LIMIT);
+    (uint128 _liquidity,) = _stepLiquidity(!principalToCash);
+    return _calculateSwap(amountIn, price, _liquidity, nextTick, principalToCash, NO_TICK_LIMIT);
   }
 
   function exposed_getCashSwapAmount(int256 amountIn, int256 price, int24 nextTick)
     external
     returns (uint256, uint256, int256, int24)
   {
-    return _getCashSwapAmount(amountIn, price, nextTick, NO_TICK_LIMIT);
+    (uint128 _liquidity,) = _stepLiquidity(false);
+    return _getCashSwapAmount(amountIn, price, _liquidity, nextTick, NO_TICK_LIMIT);
   }
 
   function exposed_getPrincipalSwapAmount(int256 amountIn, int256 price, int24 nextTick)
     external
     returns (uint256, uint256, int256, int24)
   {
-    return _getPrincipalSwapAmount(amountIn, price, nextTick, NO_TICK_LIMIT);
+    (uint128 _liquidity,) = _stepLiquidity(true);
+    return _getPrincipalSwapAmount(amountIn, price, _liquidity, nextTick, NO_TICK_LIMIT);
   }
 
   function exposed_getAmountPrincipalDelta(int24 lowerYield, int24 upperYield, int128 liquidity)
