@@ -379,10 +379,11 @@ contract FixedFeeSwap is IFixedFeeSwap {
 
     _amount0 = Math.min(_amount0, _getTokenBalance(FEE_TOKEN0));
     _amount1 = Math.min(_amount1, _getTokenBalance(FEE_TOKEN1));
+    // Lowers each token's reserve just before sending it, so a native-ETH callback never sees the
+    // other token's reserve already lowered for tokens not yet sent.
     yieldTokenFeesOwed0 = Math.saturatingSub(yieldTokenFeesOwed0, _amount0);
-    yieldTokenFeesOwed1 = Math.saturatingSub(yieldTokenFeesOwed1, _amount1);
-
     if (_amount0 > 0) _transferFeeToken(FEE_TOKEN0, _user, _amount0);
+    yieldTokenFeesOwed1 = Math.saturatingSub(yieldTokenFeesOwed1, _amount1);
     if (_amount1 > 0) _transferFeeToken(FEE_TOKEN1, _user, _amount1);
   }
 
