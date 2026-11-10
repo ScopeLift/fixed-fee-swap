@@ -100,10 +100,13 @@ contract Zapper is IERC3156FlashBorrower {
 
   /// @notice Sells YT tokens for VST.
   /// @param _ytAmount The amount of YT tokens to sell.
+  /// @dev Also pays the seller every fee their YT has earned, including on YT they keep.
   function sellYieldToken(uint256 _ytAmount) external {
     if (_ytAmount == 0) revert Zapper_InvalidAmount();
 
-    // 1. User sends YT to zapper
+    // 1. Pay the seller the fees their YT has earned, then take the YT. Otherwise the fees would go
+    //    to whoever burns the YT, which is this contract.
+    FIXED_FEE_SWAP.claimYTFees(msg.sender);
     YIELD_TOKEN.transferFrom(msg.sender, address(this), _ytAmount);
 
     // 2. Request flash loan of PT equal to YT amount
