@@ -8,6 +8,7 @@ import {Deployers} from "lib/v4-periphery/lib/v4-core/test/utils/Deployers.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {LPVault} from "src/LPVault.sol";
 import {FixedFeeSwap} from "src/FixedFeeSwap.sol";
+import {FixedFeeSwapMarketHarness} from "test/harness/FixedFeeSwapMarketHarness.sol";
 import {LPVaultHarness} from "test/harness/LPVaultHarness.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {IUnlockCallback} from "v4-core/interfaces/callback/IUnlockCallback.sol";
@@ -1613,5 +1614,37 @@ contract FixedFeeSwapOnTheVault is LPVaultTest {
     assertGt(MockERC20(Currency.unwrap(currency1)).balanceOf(_principalBuyer), 0);
     assertEq(_token0.balanceOf(_principalBuyer), 0);
     assertGt(_token0.balanceOf(_splitter), _splitterToken0Before);
+  }
+
+  function testFuzz_ForwardsVaultFeesTheMarketsCashEarnedSinceTheVaultLastRecordedThem(
+    uint256 _swapAbs0,
+    uint256 _swapAbs1
+  ) public {
+    address _initializer = makeAddr("initializer");
+    address _recipient = makeAddr("vaultYieldRecipient");
+    (uint256 _shares,,) = _initializeLiquidity(_initializer);
+    // A market whose cash is this vault's shares. Its principal token only needs to differ from
+    // the vault's fee tokens.
+    FixedFeeSwapMarketHarness _market = new FixedFeeSwapMarketHarness(
+      365 days,
+      address(new MockERC20("Principal", "PT", 18)),
+      address(vault),
+      0,
+      1,
+      IPoolManager(makeAddr("marketPoolManager")),
+      500,
+      _recipient
+    );
+    // The market holds half the shares, as LP cash would. Nothing records the swaps' fees in the
+    // vault's index before the forward.
+    vm.prank(_initializer);
+    vault.transfer(address(_market), _shares / 2);
+    _performSwap(true, _boundSwapAbs(_swapAbs0));
+    _performSwap(false, _boundSwapAbs(_swapAbs1));
+
+    _market.forwardVaultYield();
+
+    assertGt(MockERC20(Currency.unwrap(currency0)).balanceOf(_recipient), 0);
+    assertGt(MockERC20(Currency.unwrap(currency1)).balanceOf(_recipient), 0);
   }
 }

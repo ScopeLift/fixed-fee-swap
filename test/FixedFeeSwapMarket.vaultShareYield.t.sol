@@ -11,6 +11,7 @@ import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {FixedFeeSwapMarketHarness} from "test/harness/FixedFeeSwapMarketHarness.sol";
 import {VaultShareTokenHarness} from "test/harness/VaultShareTokenHarness.sol";
 import {ERC20Mock} from "test/mock/ERC20Mock.sol";
+import {NonPayableContractMock} from "test/mock/NonPayableContractMock.sol";
 
 /// @notice Tests a FixedFeeSwapMarket whose cash token is the VaultShareToken, as the Zapper wires
 /// it, so the market's cash earns vault fees.
@@ -95,7 +96,7 @@ abstract contract FixedFeeSwapMarketVaultShareYieldTest is Test {
   }
 }
 
-contract VaultShareYield is FixedFeeSwapMarketVaultShareYieldTest {
+contract ForwardVaultYield is FixedFeeSwapMarketVaultShareYieldTest {
   function testFuzz_LeavesNoVaultShareYieldInTheMarketAfterTheLastLiquidityProviderExits(uint256 _vaultFees)
     public
   {
@@ -184,21 +185,22 @@ contract VaultShareYield is FixedFeeSwapMarketVaultShareYieldTest {
   }
 }
 
-contract VaultShareYieldInNativeEth is Test {
-  function testFuzz_SendsNativeEthVaultFeesToTheRecipient(uint256 _shares, uint256 _vaultFees)
-    public
-  {
-    _shares = bound(_shares, 1, 1e30);
-    // At least 1e18 per share so the market's fees don't round to zero.
-    _vaultFees = bound(_vaultFees, 1e18, 1e30);
-    address _recipient = makeAddr("vaultYieldRecipient");
-    ERC20Mock _principal = new ERC20Mock("Principal", "PT");
-    // A cash token whose token0 fees are native ETH.
+contract ForwardVaultYieldInNativeEth is Test {
+  // Deploys a cash token whose token0 fees are native ETH and token1 fees are `_feeToken1`, and a
+  // market over it that forwards to `_recipient`. Mints `_shares` of the cash to the market, so
+  // the market is the only holder and earns every fee, then credits `_feeEth` and `_fee1` of fees.
+  function _deployMarketEarningNativeEth(
+    address _recipient,
+    ERC20Mock _feeToken1,
+    uint256 _shares,
+    uint256 _feeEth,
+    uint256 _fee1
+  ) internal returns (FixedFeeSwapMarketHarness _market) {
     VaultShareTokenHarness _cash =
-      new VaultShareTokenHarness("Cash", "CASH", address(0), address(new ERC20Mock("T1", "T1")));
-    FixedFeeSwapMarketHarness _market = new FixedFeeSwapMarketHarness(
+      new VaultShareTokenHarness("Cash", "CASH", address(0), address(_feeToken1));
+    _market = new FixedFeeSwapMarketHarness(
       365 days,
-      address(_principal),
+      address(new ERC20Mock("Principal", "PT")),
       address(_cash),
       0,
       1,
@@ -206,14 +208,63 @@ contract VaultShareYieldInNativeEth is Test {
       500,
       _recipient
     );
-    // The market is the only holder, so it earns every fee.
     _cash.exposed_mint(address(_market), _shares);
-    vm.deal(address(_cash), _vaultFees);
-    _cash.exposed_updateFees(_vaultFees, 0);
+    vm.deal(address(_cash), _feeEth);
+    _feeToken1.mint(address(_cash), _fee1);
+    _cash.exposed_updateFees(_feeEth, _fee1);
+  }
+
+  function testFuzz_SendsNativeEthVaultFeesToTheRecipient(uint256 _shares, uint256 _vaultFees)
+    public
+  {
+    _shares = bound(_shares, 1, 1e30);
+    // At least 1e18 per share so the market's fees don't round to zero.
+    _vaultFees = bound(_vaultFees, 1e18, 1e30);
+    address _recipient = makeAddr("vaultYieldRecipient");
+    FixedFeeSwapMarketHarness _market =
+      _deployMarketEarningNativeEth(_recipient, new ERC20Mock("T1", "T1"), _shares, _vaultFees, 0);
 
     _market.forwardVaultYield();
 
     assertEq(_recipient.balance, Math.mulDiv(_shares, Math.mulDiv(_vaultFees, 1e18, _shares), 1e18));
     assertEq(address(_market).balance, 0);
+  }
+
+  function testFuzz_SendsTheOtherFeeTokenWhenTheRecipientRejectsNativeEth(
+    uint256 _shares,
+    uint256 _vaultFeesEth,
+    uint256 _vaultFees1
+  ) public {
+    _shares = bound(_shares, 1, 1e30);
+    _vaultFeesEth = bound(_vaultFeesEth, 1e18, 1e30);
+    _vaultFees1 = bound(_vaultFees1, 1e18, 1e30);
+    address _recipient = address(new NonPayableContractMock());
+    ERC20Mock _feeToken1 = new ERC20Mock("T1", "T1");
+    FixedFeeSwapMarketHarness _market =
+      _deployMarketEarningNativeEth(_recipient, _feeToken1, _shares, _vaultFeesEth, _vaultFees1);
+
+    (uint256 _forwardedEth, uint256 _forwarded1) = _market.forwardVaultYield();
+
+    assertEq(_forwardedEth, 0);
+    assertGt(address(_market).balance, 0);
+    assertGt(_forwarded1, 0);
+    assertEq(_feeToken1.balanceOf(_recipient), _forwarded1);
+  }
+
+  function testFuzz_RevertIf_NativeEthComesFromAnyoneButTheCashToken(
+    address _sender,
+    uint256 _amount
+  ) public {
+    FixedFeeSwapMarketHarness _market = _deployMarketEarningNativeEth(
+      makeAddr("vaultYieldRecipient"), new ERC20Mock("T1", "T1"), 1, 0, 0
+    );
+    VaultShareTokenHarness _cash = VaultShareTokenHarness(_market.getToken1());
+    vm.assume(_sender != address(_cash));
+    vm.deal(_sender, _amount);
+
+    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwapMarket_UnexpectedEth.selector);
+    vm.prank(_sender);
+    (bool _success,) = address(_market).call{value: _amount}("");
+    _success;
   }
 }

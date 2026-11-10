@@ -99,8 +99,8 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @notice Thrown when one of the cash token's fee tokens is one of the market's own tokens
   error FixedFeeSwapMarket_FeeTokenIsAMarketToken();
 
-  /// @notice Thrown when sending native ETH vault fees to the recipient fails
-  error FixedFeeSwapMarket_TransferFailed();
+  /// @notice Thrown when native ETH arrives from anyone but the cash token
+  error FixedFeeSwapMarket_UnexpectedEth();
 
   /// @notice Thrown when the fee rate is 100% or higher
   error FixedFeeSwapMarket_FeeRateTooHigh();
@@ -424,8 +424,11 @@ contract FixedFeeSwapMarket is BaseHook {
 
   /// @notice Sends the vault fees earned on the market's cash to `VAULT_YIELD_RECIPIENT`
   /// @dev
-  ///  - Callable by anyone. Claims the market's fees from the cash token, then sends the market's
-  ///    whole balance of each fee token, including fees someone else already claimed for it.
+  ///  - Callable by anyone. Has the cash token record the fees it has earned, claims the market's
+  ///    share, then sends the market's whole balance of each fee token, including fees someone
+  ///    else already claimed for it.
+  ///  - If the recipient can't receive native ETH, the ETH stays in the market and the other fee
+  ///    token is still sent, so one token can't block the other.
   ///  - Never touches TOKEN0 or TOKEN1, so LP liquidity and swap reserves stay put. Reverts if a
   ///    fee token is one of them, since sending it would take reserves.
   /// @return _feeToken0Amount The amount of the cash token's fee token0 sent
@@ -441,6 +444,7 @@ contract FixedFeeSwapMarket is BaseHook {
       revert FixedFeeSwapMarket_FeeTokenIsAMarketToken();
     }
 
+    _cash.syncFees();
     _cash.claim(address(this));
     _feeToken0Amount = _sendWholeBalance(_feeToken0, VAULT_YIELD_RECIPIENT);
     _feeToken1Amount = _sendWholeBalance(_feeToken1, VAULT_YIELD_RECIPIENT);
@@ -449,7 +453,10 @@ contract FixedFeeSwapMarket is BaseHook {
   }
 
   /// @notice Accepts native ETH vault fees, which the cash token pays when its fee token is ETH
-  receive() external payable {}
+  /// @dev Rejects ETH from anyone else, since nothing could send it on.
+  receive() external payable {
+    if (msg.sender != address(TOKEN1)) revert FixedFeeSwapMarket_UnexpectedEth();
+  }
 
   /// @notice Returns the current market price, computing from tick if not yet initialized
   /// @return The current price in WAD precision
@@ -1308,13 +1315,13 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @notice Sends the market's whole balance of `_token` to `_to`
   /// @param _token The token, or address(0) for native ETH
   /// @param _to The recipient
-  /// @return _amount The amount sent
+  /// @return _amount The amount sent, which is zero when `_to` rejects native ETH
   function _sendWholeBalance(address _token, address _to) internal returns (uint256 _amount) {
     if (_token == address(0)) {
       _amount = address(this).balance;
       if (_amount == 0) return 0;
       (bool _success,) = payable(_to).call{value: _amount}("");
-      if (!_success) revert FixedFeeSwapMarket_TransferFailed();
+      if (!_success) return 0;
     } else {
       _amount = IERC20(_token).balanceOf(address(this));
       if (_amount > 0) IERC20(_token).safeTransfer(_to, _amount);
