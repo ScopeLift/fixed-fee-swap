@@ -54,6 +54,9 @@ abstract contract FixedFeeSwapMarketTest is Test {
   uint24 internal constant LP_FEE_RATE = 3000; // 0.30%
   int24 public constant YIELD_PER_TICK = 1;
   int24 public constant NO_TICK_LIMIT = type(int24).max;
+  // Five 12-second blocks after START_TIME. This is when elapsed time is smallest, so a wei of
+  // rounding in the price difference moves the cash amount the most.
+  uint256 internal constant EARLY_MARKET_WINDOW = 60;
 
   enum RangeScenario {
     BelowCurrent,
@@ -193,12 +196,34 @@ abstract contract FixedFeeSwapMarketTest is Test {
     _warpFromStart(1);
   }
 
+  // Returns the token amounts a mint of `_liquidity` in the range costs at the current time and
+  // tick. Mints round up.
   function _expectedMintAmounts(int24 _tickLower, int24 _tickUpper, uint128 _liquidity)
     internal
     returns (int256 expected0, int256 expected1)
   {
+    return _expectedTokenDeltas(_tickLower, _tickUpper, int128(_liquidity));
+  }
+
+  // Returns the token amounts a burn of `_liquidity` from the range pays out at the current time
+  // and tick, as positive numbers. Burns round down, so these can be below what
+  // `_expectedMintAmounts` returns for the same liquidity.
+  function _expectedBurnAmounts(int24 _tickLower, int24 _tickUpper, uint128 _liquidity)
+    internal
+    returns (int256 expected0, int256 expected1)
+  {
+    (int256 _delta0, int256 _delta1) =
+      _expectedTokenDeltas(_tickLower, _tickUpper, -int128(_liquidity));
+    return (-_delta0, -_delta1);
+  }
+
+  // Returns the token deltas the market computes for a liquidity change of `_liq` in the range at
+  // the current time and tick: positive amounts are owed by the LP, negative ones paid to it.
+  function _expectedTokenDeltas(int24 _tickLower, int24 _tickUpper, int128 _liq)
+    internal
+    returns (int256 expected0, int256 expected1)
+  {
     int24 _currentTick = hook.getCurrentTick();
-    int128 _liq = int128(uint128(_liquidity));
 
     if (_currentTick < _tickLower) {
       expected1 = hook.exposed_getAmountCashDelta(_tickLower, _tickUpper, _liq);
@@ -1134,6 +1159,22 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
 
   // ============ Revert Tests ============
 
+  function testFuzz_RevertIf_NoTimeHasElapsedSinceStartTime(
+    int24 _tickLower,
+    int24 _tickUpper,
+    uint128 _liquidity
+  ) public {
+    // Ranges fall below, across and above the initial tick 500, so mints of only principal, of
+    // both tokens and of only cash all revert.
+    (_tickLower, _tickUpper) = _boundTickRange(_tickLower, _tickUpper);
+    _liquidity = uint128(bound(_liquidity, 1, uint128(type(int128).max)));
+    _warpFromStart(0);
+
+    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwapMarket_NoTimeElapsed.selector);
+    vm.prank(alice);
+    hook.mintLiquidity(_tickLower, _tickUpper, _liquidity, type(uint256).max, type(uint256).max);
+  }
+
   function testFuzz_RevertIf_TickRangeIsInvalid(
     int24 _tickLower,
     int24 _tickUpper,
@@ -1571,6 +1612,22 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
     hook.increaseLiquidity(_missingPositionId, 1e18, type(uint256).max, type(uint256).max);
   }
 
+  function testFuzz_RevertIf_NoTimeHasElapsedSinceStartTime(
+    int24 _tickLower,
+    int24 _tickUpper,
+    uint128 _additionalLiquidity
+  ) public {
+    (_tickLower, _tickUpper) = _boundTickRange(_tickLower, _tickUpper);
+    _additionalLiquidity = uint128(bound(_additionalLiquidity, 1, uint128(type(int128).max)));
+    _warpFromStart(0);
+    // A mint of zero liquidity prices no tokens, so it creates the position even at START_TIME.
+    bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, 0);
+
+    vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwapMarket_NoTimeElapsed.selector);
+    vm.prank(alice);
+    hook.increaseLiquidity(_positionId, _additionalLiquidity, type(uint256).max, type(uint256).max);
+  }
+
   function testFuzz_RevertIf_NotCalledByPositionOwner(
     uint128 _initialLiquidity,
     uint128 _additionalLiquidity
@@ -1990,7 +2047,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, _initialLiquidity);
 
     (int256 expected0, int256 expected1) =
-      _expectedMintAmounts(_tickLower, _tickUpper, _removeAmount);
+      _expectedBurnAmounts(_tickLower, _tickUpper, _removeAmount);
 
     uint256 _user0Before = token0.balanceOf(alice);
     uint256 _user1Before = token1.balanceOf(alice);
@@ -2102,7 +2159,10 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
   }
 
   /// @dev Decrease then increase is symmetric (same token amounts)
-  function testFuzz_DecreaseIncreaseSymmetry(uint128 _baseAmount, uint128 _deltaAmount) public {
+  function testFuzz_DecreaseThenIncreaseCostsOnlyTheRoundingDifference(
+    uint128 _baseAmount,
+    uint128 _deltaAmount
+  ) public {
     // Need at least 2e17 so that _baseAmount / 2 >= 1e17
     _baseAmount = uint128(bound(_baseAmount, 2e17, 3e24));
     _deltaAmount = uint128(bound(_deltaAmount, 1e17, _baseAmount / 2));
@@ -2111,6 +2171,8 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     (int24 _tickLower, int24 _tickUpper) = _standardRange(RangeScenario.InRange);
 
     bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, _baseAmount);
+    (int256 _burn0, int256 _burn1) = _expectedBurnAmounts(_tickLower, _tickUpper, _deltaAmount);
+    (int256 _mint0, int256 _mint1) = _expectedMintAmounts(_tickLower, _tickUpper, _deltaAmount);
 
     uint256 _balance0Before = token0.balanceOf(alice);
     uint256 _balance1Before = token1.balanceOf(alice);
@@ -2121,8 +2183,12 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     vm.stopPrank();
 
     (,,, int128 finalLiquidity) = hook.getPositionInfo(_positionId);
-    assertEq(token0.balanceOf(alice), _balance0Before, "token0 symmetric");
-    assertEq(token1.balanceOf(alice), _balance1Before, "token1 symmetric");
+    assertEq(
+      int256(_balance0Before - token0.balanceOf(alice)), _mint0 - _burn0, "token0 rounding cost"
+    );
+    assertEq(
+      int256(_balance1Before - token1.balanceOf(alice)), _mint1 - _burn1, "token1 rounding cost"
+    );
     assertEq(uint128(finalLiquidity), _baseAmount, "_liquidity restored");
   }
 
@@ -2175,7 +2241,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, _initialLiquidity);
 
     (int256 expected0, int256 expected1) =
-      _expectedMintAmounts(_tickLower, _tickUpper, _removeAmount);
+      _expectedBurnAmounts(_tickLower, _tickUpper, _removeAmount);
 
     uint256 _balance0Before = token0.balanceOf(alice);
     uint256 _balance1Before = token1.balanceOf(alice);
@@ -2203,7 +2269,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, _initialLiquidity);
 
     (int256 expected0, int256 expected1) =
-      _expectedMintAmounts(_tickLower, _tickUpper, _removeAmount);
+      _expectedBurnAmounts(_tickLower, _tickUpper, _removeAmount);
 
     uint256 _balance0Before = token0.balanceOf(alice);
     uint256 _balance1Before = token1.balanceOf(alice);
@@ -2231,7 +2297,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, _initialLiquidity);
 
     (int256 expected0, int256 expected1) =
-      _expectedMintAmounts(_tickLower, _tickUpper, _removeAmount);
+      _expectedBurnAmounts(_tickLower, _tickUpper, _removeAmount);
 
     uint256 _balance0Before = token0.balanceOf(alice);
     uint256 _balance1Before = token1.balanceOf(alice);
@@ -2260,7 +2326,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     _warpFromStart(1);
     Amounts memory _expectedAtT1;
     {
-      (int256 e0, int256 e1) = _expectedMintAmounts(_tickLower, _tickUpper, _removeAmount);
+      (int256 e0, int256 e1) = _expectedBurnAmounts(_tickLower, _tickUpper, _removeAmount);
       _expectedAtT1.amount0 = e0;
       _expectedAtT1.amount1 = e1;
     }
@@ -2276,7 +2342,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     _warpFromStart(30 days);
     Amounts memory _expectedAtT2;
     {
-      (int256 e0, int256 e1) = _expectedMintAmounts(_tickLower, _tickUpper, _removeAmount);
+      (int256 e0, int256 e1) = _expectedBurnAmounts(_tickLower, _tickUpper, _removeAmount);
       _expectedAtT2.amount0 = e0;
       _expectedAtT2.amount1 = e1;
     }
@@ -2311,7 +2377,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
     bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, _initialLiquidity);
 
     (int256 expected0, int256 expected1) =
-      _expectedMintAmounts(_tickLower, _tickUpper, _removeAmount);
+      _expectedBurnAmounts(_tickLower, _tickUpper, _removeAmount);
 
     vm.prank(alice);
     hook.decreaseLiquidity(
@@ -2362,7 +2428,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
     bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, _initialLiquidity);
 
-    (int256 expected0,) = _expectedMintAmounts(_tickLower, _tickUpper, _removeAmount);
+    (int256 expected0,) = _expectedBurnAmounts(_tickLower, _tickUpper, _removeAmount);
 
     vm.prank(alice);
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwapMarket_InvalidLiquidityAmount.selector);
@@ -2382,7 +2448,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
     bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, _initialLiquidity);
 
-    (, int256 expected1) = _expectedMintAmounts(_tickLower, _tickUpper, _removeAmount);
+    (, int256 expected1) = _expectedBurnAmounts(_tickLower, _tickUpper, _removeAmount);
 
     vm.prank(alice);
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwapMarket_InvalidLiquidityAmount.selector);
@@ -2402,7 +2468,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
     bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, _initialLiquidity);
 
-    (int256 expected0,) = _expectedMintAmounts(_tickLower, _tickUpper, _removeAmount);
+    (int256 expected0,) = _expectedBurnAmounts(_tickLower, _tickUpper, _removeAmount);
 
     vm.prank(alice);
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwapMarket_InvalidLiquidityAmount.selector);
@@ -2422,7 +2488,7 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
     bytes32 _positionId = _mintLiquidityAtTicks(alice, _tickLower, _tickUpper, _initialLiquidity);
 
-    (, int256 expected1) = _expectedMintAmounts(_tickLower, _tickUpper, _removeAmount);
+    (, int256 expected1) = _expectedBurnAmounts(_tickLower, _tickUpper, _removeAmount);
 
     vm.prank(alice);
     vm.expectRevert(FixedFeeSwapMarket.FixedFeeSwapMarket_InvalidLiquidityAmount.selector);
@@ -2887,6 +2953,61 @@ contract DecreaseLiquidity is FixedFeeSwapMarketTest {
 
     assertGe(token0.balanceOf(alice), _balance0Before, "LP should receive token0");
     assertGe(token1.balanceOf(alice), _balance1Before, "LP should receive token1");
+  }
+
+  function test_PositionMintedInTheFirstSecondReturnsNoMoreCashThanItCost() public {
+    (FixedFeeSwapMarketHarness _localHook,,) = _deployHookForSolvency(0, "startTimeMint");
+
+    // Alice mints one second after START_TIME, the earliest the market allows, when elapsed-time
+    // pricing is closest to the 1 wei of elapsed time that once made this mint free. The range
+    // sits above the initial tick 0, so the position holds only cash.
+    _warpFromHookStart(_localHook, 1);
+    uint256 _balance1BeforeMint = token1.balanceOf(alice);
+    bytes32 _positionId = _mintOnHook(_localHook, alice, 100, 600, 1e24);
+    uint256 _cashPaid = _balance1BeforeMint - token1.balanceOf(alice);
+
+    // Bob deposits into the same range a day later, so the market holds cash Alice could take.
+    _warpFromHookStart(_localHook, 1 days);
+    _mintOnHook(_localHook, bob, 100, 600, 1e24);
+
+    uint256 _balance1BeforeWithdraw = token1.balanceOf(alice);
+    vm.prank(alice);
+    _localHook.decreaseLiquidity(_positionId, -int128(1e24), 0, 0);
+    uint256 _cashReceived = token1.balanceOf(alice) - _balance1BeforeWithdraw;
+
+    assertLe(_cashReceived, _cashPaid, "LP withdrew more cash than deposited");
+  }
+
+  function testFuzz_PositionMintedInTheFirstBlocksReturnsNoMoreCashThanItCost(
+    int24 _tickLower,
+    int24 _tickUpper,
+    uint128 _liquidity,
+    uint256 _mintDelay,
+    uint256 _burnDelay
+  ) public {
+    (FixedFeeSwapMarketHarness _localHook,,) = _deployHookForSolvency(0, "earlyMintBurn");
+    // Every range starts at or above the initial tick 0, so its liquidity is priced in cash.
+    (_tickLower, _tickUpper) = _boundTickRange(_tickLower, _tickUpper);
+    // At most half of INITIAL_BALANCE: a range of up to 10_000 bps costs at most about its
+    // liquidity in cash early in the market, so both mints below stay within the users' balances.
+    _liquidity = uint128(bound(_liquidity, 1, INITIAL_BALANCE / 2));
+    _mintDelay = bound(_mintDelay, 1, EARLY_MARKET_WINDOW);
+    _burnDelay = bound(_burnDelay, 0, EARLY_MARKET_WINDOW);
+
+    _warpFromHookStart(_localHook, _mintDelay);
+    // Bob's deposit is cash that a burn paying out too much could take.
+    _mintOnHook(_localHook, bob, _tickLower, _tickUpper, _liquidity);
+    uint256 _balance1BeforeMint = token1.balanceOf(alice);
+    bytes32 _positionId = _mintOnHook(_localHook, alice, _tickLower, _tickUpper, _liquidity);
+    uint256 _cashPaid = _balance1BeforeMint - token1.balanceOf(alice);
+
+    _warpFromHookStart(_localHook, _mintDelay + _burnDelay);
+    uint256 _balance1BeforeWithdraw = token1.balanceOf(alice);
+    vm.prank(alice);
+    _localHook.decreaseLiquidity(_positionId, -int128(_liquidity), 0, 0);
+    uint256 _cashReceived = token1.balanceOf(alice) - _balance1BeforeWithdraw;
+
+    assertLe(_cashReceived, _cashPaid, "LP withdrew more cash than deposited");
   }
 }
 

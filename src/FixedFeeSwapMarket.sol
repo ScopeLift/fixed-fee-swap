@@ -132,6 +132,10 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @notice Thrown when liquidity is added or removed via PoolManager instead of this hook
   error FixedFeeSwapMarket_LiquidityOnlyViaHook();
 
+  /// @notice Thrown when liquidity is added, or its cash priced, before any time has elapsed
+  /// since START_TIME
+  error FixedFeeSwapMarket_NoTimeElapsed();
+
   // ============ Constants ============
 
   int24 constant NO_TICK_LIMIT = type(int24).max;
@@ -144,6 +148,14 @@ contract FixedFeeSwapMarket is BaseHook {
 
   /// @notice Q128 fixed-point multiplier for fee growth calculations
   uint256 constant Q128 = 1 << 128;
+
+  /// @notice Upper bound, in wei, on how far `expWad` can be from the exact value for inputs at
+  /// or below zero
+  /// @dev Solady documents `expWad` only as an approximation. Against exact values for about 1.2
+  /// million inputs spread over the whole range where it returns nonzero, (-41.45e18, 0], it was at
+  /// most about 1.001 wei low and 0.012 wei high, so 2 wei bounds the error either way. Below that
+  /// range it returns 0 for a true value under 0.5 wei.
+  uint256 constant EXP_WAD_MAX_ERROR = 2;
 
   // ============ Immutables ============
 
@@ -246,7 +258,9 @@ contract FixedFeeSwapMarket is BaseHook {
   // ============ External Functions ============
 
   /// @notice Creates a new liquidity position or adds to an existing one at the same tick range
-  /// @dev Position ID is derived from tickUpper, tickLower, and msg.sender
+  /// @dev Position ID is derived from tickUpper, tickLower, and msg.sender. Reverts with
+  /// `FixedFeeSwapMarket_NoTimeElapsed` for nonzero liquidity at START_TIME, before any time has
+  /// elapsed to price it.
   /// @param _tickLower The lower tick boundary of the position, representing the lower yield
   /// @param _tickUpper The upper tick boundary of the position, representing the higher yield
   /// @param _liquidity The amount of liquidity to mint
@@ -293,6 +307,8 @@ contract FixedFeeSwapMarket is BaseHook {
 
   /// @notice Increases liquidity for an existing position
   /// @dev Caller must be the position owner. Accrues pending fees before adding liquidity.
+  /// Reverts with `FixedFeeSwapMarket_NoTimeElapsed` at START_TIME, before any time has elapsed
+  /// to price the liquidity.
   /// @param _positionId The unique identifier of the position
   /// @param _liquidity The amount of liquidity to add
   /// @param _amount0Max Maximum TOKEN0 principal tokens willing to deposit
@@ -903,6 +919,9 @@ contract FixedFeeSwapMarket is BaseHook {
   {
     if (_tickLower >= _tickUpper) revert FixedFeeSwapMarket_InvalidTickRange();
     if (_liquidity == 0) return TokenDelta({amount0: 0, amount1: 0});
+    // Cash is priced over the time elapsed since START_TIME, which is undefined until a second has
+    // passed.
+    if (_liquidity > 0 && block.timestamp == START_TIME) revert FixedFeeSwapMarket_NoTimeElapsed();
 
     bytes32 _positionId = _getPositionId(_owner, _tickUpper, _tickLower);
     PositionInfo storage position = positions[_positionId];
@@ -1020,7 +1039,8 @@ contract FixedFeeSwapMarket is BaseHook {
   // ============ Internal Functions - Token Amount Calculations ============
 
   /// @notice Calculates the principal token amount for a liquidity position across a tick range
-  /// @dev Amount = liquidity * (upperYield - lowerYield) / BIPS, consistent with swap math
+  /// @dev Amount = liquidity * (upperYield - lowerYield) / BIPS, consistent with swap math.
+  /// Rounds in the pool's favor: up when minting, down when burning.
   /// @param _lowerYield The lower tick boundary of the range
   /// @param _upperYield The upper tick boundary of the range
   /// @param _liquidity The liquidity amount, positive for mint and negative for burn
@@ -1033,9 +1053,9 @@ contract FixedFeeSwapMarket is BaseHook {
   {
     int256 _liq = int256(_liquidity);
     uint256 _absLiquidity = _liq.abs();
-    uint256 _amount =
-      FixedPointMathLib.mulDiv(_absLiquidity, uint256(uint24(_upperYield - _lowerYield)), BIPS);
-    return _liq < 0 ? -int256(_amount) : int256(_amount);
+    uint256 _yieldRange = uint256(uint24(_upperYield - _lowerYield));
+    if (_liq < 0) return -int256(FixedPointMathLib.mulDiv(_absLiquidity, _yieldRange, BIPS));
+    return int256(FixedPointMathLib.mulDivUp(_absLiquidity, _yieldRange, BIPS));
   }
 
   /// @notice Calculates the cash token amount for a liquidity position across a tick range
@@ -1043,7 +1063,12 @@ contract FixedFeeSwapMarket is BaseHook {
   /// cash component decreases over time, ensuring the contract always holds enough cash to
   /// cover withdrawals. Swap pricing uses remaining-time independently.
   /// amount = liquidity * (priceLower - priceUpper) / scaledTimeElapsed
-  /// @param _lowerYield The lower tick boundary of the range
+  /// Every step after the scaled elapsed time rounds in the pool's favor: a mint pays at least,
+  /// and a burn receives at most, the exact amount for that scaled time. The scaled time never
+  /// decreases and the exact amount falls as it grows, so burning never returns more cash than the
+  /// same liquidity cost to mint at the same time or earlier.
+  /// Reverts with `FixedFeeSwapMarket_NoTimeElapsed` at START_TIME.
+  /// @param _lowerYield The lower tick boundary of the range, at least 0
   /// @param _upperYield The upper tick boundary of the range
   /// @param _liquidity The liquidity amount, positive for mint and negative for burn
   /// @return The cash token delta: positive values indicate deposit required, negative values
@@ -1055,32 +1080,50 @@ contract FixedFeeSwapMarket is BaseHook {
   {
     int256 _liq = int256(_liquidity);
     uint256 _absLiquidity = _liq.abs();
+    bool _isMint = _liq > 0;
     uint256 _scaledTimeWad = _scaledTimeElapsedWad();
-    int256 _upperTickPrice = _priceElapsed(int256(_upperYield) * int256(WAD), _scaledTimeWad);
-    int256 _lowerTickPrice = _priceElapsed(int256(_lowerYield) * int256(WAD), _scaledTimeWad);
-    if (_lowerTickPrice < _upperTickPrice) revert FixedFeeSwapMarket_InvalidPriceDirection();
-    uint256 _priceDiff = uint256(_lowerTickPrice - _upperTickPrice);
-    uint256 _amount = FixedPointMathLib.mulDiv(_absLiquidity, _priceDiff, _scaledTimeWad);
-    return _liq < 0 ? -int256(_amount) : int256(_amount);
+    // A mint bounds the price difference from above, a burn from below.
+    uint256 _lowerTickPrice = _priceElapsed(_lowerYield, _scaledTimeWad, _isMint);
+    uint256 _upperTickPrice = _priceElapsed(_upperYield, _scaledTimeWad, !_isMint);
+    uint256 _priceDiff = _lowerTickPrice > _upperTickPrice ? _lowerTickPrice - _upperTickPrice : 0;
+    if (_isMint) {
+      return int256(FixedPointMathLib.mulDivUp(_absLiquidity, _priceDiff, _scaledTimeWad));
+    }
+    return -int256(FixedPointMathLib.mulDiv(_absLiquidity, _priceDiff, _scaledTimeWad));
   }
 
   /// @notice Calculates the scaled time elapsed since market start as a fraction of total duration
-  /// @dev Used exclusively for LP accounting to ensure solvency. Returns WAD at maturity.
+  /// @dev Used exclusively for LP accounting to ensure solvency. Returns WAD at maturity, and
+  /// reverts with `FixedFeeSwapMarket_NoTimeElapsed` at START_TIME, where cash has no price.
   /// @return The scaled time elapsed in WAD precision
   function _scaledTimeElapsedWad() internal view returns (uint256) {
     uint256 _elapsed = block.timestamp - START_TIME;
-    if (_elapsed == 0) return 1; // Avoid division by zero; 1 wei of elapsed time
+    if (_elapsed == 0) revert FixedFeeSwapMarket_NoTimeElapsed();
     uint256 _duration = MATURITY - START_TIME;
     if (_elapsed > _duration) _elapsed = _duration;
     return (_elapsed * WAD) / _duration;
   }
 
-  /// @notice Computes elapsed-time price for LP accounting: exp(-yield / BIPS * scaledTimeElapsed)
-  /// @param _yieldWad The yield in WAD-scaled basis points
+  /// @notice Bounds the elapsed-time price exp(-tick / BIPS * scaledTimeElapsed) used for LP
+  /// accounting from above or below
+  /// @dev LP accounting reads the tick as a yield in basis points. `_priceFromYieldWad` rounds the
+  /// exponent toward zero, which for a tick at or above 0 can only raise the price, and by at most
+  /// 1 wei because the price is at most 1e18. Widening by that and by `EXP_WAD_MAX_ERROR` covers
+  /// every rounding step. A lower bound stops at 0.
+  /// @param _tick The tick boundary, at least 0. Callers pass a position's ticks, which
+  /// `mintLiquidity` keeps at or above 0, or the current tick inside such a position.
   /// @param _scaledTime The scaled elapsed time
+  /// @param _roundUp True for a price at or above the exact one, false for one at or below it
   /// @return The discount factor price in WAD
-  function _priceElapsed(int256 _yieldWad, uint256 _scaledTime) internal pure returns (int256) {
-    return _priceFromYieldWad(_yieldWad, _scaledTime);
+  function _priceElapsed(int24 _tick, uint256 _scaledTime, bool _roundUp)
+    internal
+    pure
+    returns (uint256)
+  {
+    uint256 _price = uint256(_priceFromYieldWad(int256(_tick) * int256(WAD), _scaledTime));
+    if (_roundUp) return _price + EXP_WAD_MAX_ERROR;
+    uint256 _maxOverestimate = EXP_WAD_MAX_ERROR + 1;
+    return _price > _maxOverestimate ? _price - _maxOverestimate : 0;
   }
 
   // ============ Internal Functions - Fee Tracking ============
