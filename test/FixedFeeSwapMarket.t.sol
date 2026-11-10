@@ -3301,6 +3301,14 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertEq(hook.getCurrentPrice(), boundaryPrice, "Price should move to boundary _price");
     assertEq(hook.getCurrentTick(), _belowUpper, "Moving left leaves _tick at boundary");
     assertEq(
+      hook.getActiveLiquidity(), _activeBefore, "Stopping on the _upper _tick should not cross it"
+    );
+
+    // Far more cash than one tick needs, so the swap stops at its tick limit just below.
+    _swap(bob, 1e24, false, _belowUpper - 1);
+
+    assertEq(hook.getCurrentTick(), _belowUpper - 1, "Should move one _tick below the boundary");
+    assertEq(
       uint256(hook.getActiveLiquidity()),
       uint256(_activeBefore) + uint256(_belowRangeLiquidity),
       "Active _liquidity should increase"
@@ -3331,6 +3339,14 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     );
     assertEq(hook.getCurrentPrice(), boundaryPrice, "Price should move to boundary _price");
     assertEq(hook.getCurrentTick(), _narrowLower, "Moving left leaves _tick at boundary");
+    assertEq(
+      hook.getActiveLiquidity(), _activeBefore, "Stopping on the _lower _tick should not cross it"
+    );
+
+    // Far more cash than one tick needs, so the swap stops at its tick limit just below.
+    _swap(bob, 1e24, false, _narrowLower - 1);
+
+    assertEq(hook.getCurrentTick(), _narrowLower - 1, "Should move one _tick below the boundary");
     assertEq(
       uint256(hook.getActiveLiquidity()),
       uint256(_activeBefore) - uint256(_narrowLiquidity),

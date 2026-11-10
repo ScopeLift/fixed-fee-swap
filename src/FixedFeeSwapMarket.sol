@@ -571,6 +571,11 @@ contract FixedFeeSwapMarket is BaseHook {
   }
 
   /// @notice Executes a single swap step: calculates amounts, updates fees, crosses tick if needed
+  /// @dev Active liquidity is always the liquidity of positions with
+  ///      `tickLower <= currentTick < tickUpper`, so tick k is crossed when the price moves from k
+  ///      down to k - 1, or from k - 1 up to k. An upward step crosses the initialized tick it
+  ///      reaches. A downward step crosses the initialized tick it leaves, before pricing the step
+  ///      with the liquidity below that tick, and stops on the next one without crossing it.
   /// @param _amountInNet Net input amount (after fees) available for this step
   /// @param _nextTick The next initialized tick boundary
   /// @param _initialized Whether _nextTick is an initialized tick with liquidity changes
@@ -581,11 +586,25 @@ contract FixedFeeSwapMarket is BaseHook {
     bool _initialized,
     SwapContext memory _ctx
   ) internal returns (uint256, uint256, int24) {
+    // A downward step leaves the current tick, so it moves to the liquidity below that tick first.
+    bool _leavesInitializedTick = _ctx.tickMovingLeft && ticks[currentTick].liquidityGross != 0;
+    if (_leavesInitializedTick) {
+      activeLiquidity = LiquidityMath.addDelta(activeLiquidity, -ticks[currentTick].liquidityNet);
+    }
+
     (uint256 _netConsumed, uint256 _amountOut, int256 _stepPrice, int24 _stepTick) = _calculateSwap(
       _amountInNet.toInt256(), currentPrice, _nextTick, _ctx.principalForCash, _ctx.tickLimit
     );
-    // If the swap step couldn't move a full tick (sub-tick snap to zero), stop gracefully.
-    if (_netConsumed == 0 || _amountOut == 0) return (0, 0, currentTick);
+    // If the swap step couldn't move a full tick (sub-tick snap to zero), stop gracefully. The
+    // price stays on the current tick, so it is not crossed after all.
+    if (_netConsumed == 0 || _amountOut == 0) {
+      if (_leavesInitializedTick) {
+        activeLiquidity = LiquidityMath.addDelta(activeLiquidity, ticks[currentTick].liquidityNet);
+      }
+      return (0, 0, currentTick);
+    }
+    // Flip the departed tick's fee growth outside before this step's fees accrue below it.
+    if (_leavesInitializedTick) _crossTick(currentTick);
 
     // Compute fee for this step directly from net consumed and attribute to LPs.
     // Per-step tracking is needed because activeLiquidity changes at tick crossings.
@@ -600,13 +619,11 @@ contract FixedFeeSwapMarket is BaseHook {
       }
     }
 
-    // Cross tick if needed
-    bool _hitBoundary = _stepTick == _nextTick;
-    if (_hitBoundary && _initialized) {
+    // An upward step crosses the initialized tick it reaches. A downward step that reaches one
+    // stops on it uncrossed, since the ranges starting there stay in range.
+    if (!_ctx.tickMovingLeft && _stepTick == _nextTick && _initialized) {
       _crossTick(_nextTick);
-      int128 _liquidityNet = ticks[_nextTick].liquidityNet;
-      if (_ctx.tickMovingLeft) _liquidityNet = -_liquidityNet;
-      activeLiquidity = LiquidityMath.addDelta(activeLiquidity, _liquidityNet);
+      activeLiquidity = LiquidityMath.addDelta(activeLiquidity, ticks[_nextTick].liquidityNet);
     }
 
     // Update price and calculate new tick.
