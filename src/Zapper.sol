@@ -37,6 +37,12 @@ contract Zapper is IERC3156FlashBorrower {
   /// @notice Thrown when flash loan callback is called with invalid caller.
   error Zapper_NotAuthorized();
 
+  /// @notice Thrown when YT is sold at or after maturity, when the market no longer trades.
+  error Zapper_AfterMaturity();
+
+  /// @notice Thrown when forwarding native ETH fees to the seller fails.
+  error Zapper_TransferFailed();
+
   /*//////////////////////////////////////////////////////////////
                         EVENTS
   //////////////////////////////////////////////////////////////*/
@@ -100,10 +106,20 @@ contract Zapper is IERC3156FlashBorrower {
 
   /// @notice Sells YT tokens for VST.
   /// @param _ytAmount The amount of YT tokens to sell.
+  /// @dev
+  ///  - Also pays the seller every fee their YT has earned, including on YT they keep, when that
+  ///    payout succeeds. If it can't, for example because the seller can't receive native ETH,
+  ///    the sale still goes ahead and the fees stay credited to the seller.
+  ///  - Forwards to the seller any fee tokens this contract holds afterwards, such as fees earned
+  ///    by YT someone sent here directly, which the redeem pays to this contract.
   function sellYieldToken(uint256 _ytAmount) external {
     if (_ytAmount == 0) revert Zapper_InvalidAmount();
+    if (block.timestamp >= FIXED_FEE_SWAP.MATURITY()) revert Zapper_AfterMaturity();
 
-    // 1. User sends YT to zapper
+    // 1. Pay the seller the fees their YT has earned, as a convenience: the YT transfer below
+    //    credits them to the seller anyway. A failed payout leaves them credited, and a missing
+    //    approval reverts in the transfer below with the token's own error.
+    try FIXED_FEE_SWAP.claimYTFees(msg.sender) {} catch {}
     YIELD_TOKEN.transferFrom(msg.sender, address(this), _ytAmount);
 
     // 2. Request flash loan of PT equal to YT amount
@@ -122,8 +138,14 @@ contract Zapper is IERC3156FlashBorrower {
     uint256 _ptRemaining = PRINCIPAL_TOKEN.balanceOf(address(this));
     if (_ptRemaining > 0) IERC20(address(PRINCIPAL_TOKEN)).transfer(msg.sender, _ptRemaining);
 
+    _forwardFeeTokens(msg.sender);
+
     emit YieldTokenSold(msg.sender, _ytAmount, _vstReceived);
   }
+
+  /// @notice Accepts native ETH fees that FixedFeeSwap pays this contract when its YT is burned.
+  /// @dev Without it, one wei of ETH fees owed to this contract would make every sale revert.
+  receive() external payable {}
 
   /// @notice Buys YT by supplying VST.
   /// @param _vstAmount The amount of VST to supply.
@@ -254,5 +276,29 @@ contract Zapper is IERC3156FlashBorrower {
 
     // Note: If we get less PT than needed, the flash loan repayment will fail
     // The caller should ensure sufficient VST is available for the swap
+  }
+
+  /// @notice Sends this contract's whole balance of each fee token to `_to`.
+  /// @param _to The recipient.
+  /// @dev The Zapper never keeps fee tokens. It only receives them when burning YT whose fees were
+  /// credited to it, such as YT sent here directly.
+  function _forwardFeeTokens(address _to) internal {
+    _forwardFeeToken(VAULT_SHARE_TOKEN.FEE_TOKEN0(), _to);
+    _forwardFeeToken(VAULT_SHARE_TOKEN.FEE_TOKEN1(), _to);
+  }
+
+  /// @notice Sends this contract's whole balance of one fee token to `_to`.
+  /// @param _token The fee token, or address(0) for native ETH.
+  /// @param _to The recipient.
+  function _forwardFeeToken(address _token, address _to) internal {
+    if (_token == address(0)) {
+      uint256 _balance = address(this).balance;
+      if (_balance == 0) return;
+      (bool _success,) = payable(_to).call{value: _balance}("");
+      if (!_success) revert Zapper_TransferFailed();
+    } else {
+      uint256 _balance = IERC20(_token).balanceOf(address(this));
+      if (_balance > 0) IERC20(_token).safeTransfer(_to, _balance);
+    }
   }
 }
