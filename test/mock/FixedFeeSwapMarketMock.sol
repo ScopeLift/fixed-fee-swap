@@ -24,14 +24,9 @@ contract FixedFeeSwapMarketMock {
     mockPrice = 0.98e18; // Default: 0.98 price
   }
 
-  /// @notice Set the mock price returned by getCurrentPrice()
+  /// @notice Set the price the mock's swaps fill at
   function setMockPrice(int256 _price) external {
     mockPrice = _price;
-  }
-
-  /// @notice Returns the mock current price
-  function getCurrentPrice() external view returns (int256) {
-    return mockPrice;
   }
 
   /// @notice Mock swap function with direction-dependent pricing based on mockPrice
@@ -61,15 +56,5 @@ contract FixedFeeSwapMarketMock {
       TOKEN1.safeTransferFrom(msg.sender, address(this), amountInUsed);
       TOKEN0.safeTransfer(msg.sender, amountOut);
     }
-  }
-
-  /// @notice Convert tick to price (simplified mock - just returns mockPrice)
-  function tickToPrice(int24) external view returns (int256) {
-    return mockPrice;
-  }
-
-  /// @notice Returns mock current tick (always 0 in mock)
-  function currentTick() external pure returns (int24) {
-    return 0;
   }
 }
