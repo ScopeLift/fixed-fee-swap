@@ -313,6 +313,29 @@ contract FixedFeeSwap {
     return vstFeeCheckpoint.timestamp == MATURITY;
   }
 
+  /// @notice Brings fee accounting up to date with the vault, without claiming any fees.
+  /// @dev
+  ///  - Callable by anyone. YieldToken calls it before every transfer, so the sender keeps the
+  ///    fees they earned.
+  ///  - Before maturity, credits YT holders with the vault fees earned since the last sync. At or
+  ///    after maturity, settles if nobody has yet.
+  function syncFees() external {
+    _syncFees();
+  }
+
+  /// @notice Pays a YT holder the fees their YT has earned, without burning it.
+  /// @param _user The holder to pay. The fees always go to `_user`, so anyone can call this.
+  /// @return _claimedToken0 Amount of fee token0 paid.
+  /// @return _claimedToken1 Amount of fee token1 paid.
+  /// @dev The only way to collect fees credited to an account that no longer holds YT, such as one
+  /// that transferred all of it.
+  function claimYTFees(address _user)
+    external
+    returns (uint256 _claimedToken0, uint256 _claimedToken1)
+  {
+    (_claimedToken0, _claimedToken1) = YIELD_TOKEN.claim(_user);
+  }
+
   /// @notice Brings fee accounting up to date and claims this hook's vault fees into it.
   /// @dev
   ///  - Before maturity, credits YT holders with the vault fees earned since the last sync.

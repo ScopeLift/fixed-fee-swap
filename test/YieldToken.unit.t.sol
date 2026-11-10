@@ -11,6 +11,7 @@ import {ERC20Mock} from "test/mock/ERC20Mock.sol";
 import {FixedFeeSwapMock} from "test/mock/FixedFeeSwapMock.sol";
 import {NonPayableContractMock} from "test/mock/NonPayableContractMock.sol";
 import {IFeeTrackingToken} from "src/interface/IFeeTrackingToken.sol";
+import {IFixedFeeSwap} from "src/interface/IFixedFeeSwap.sol";
 
 contract YieldTokenTest is Test {
   /// @notice Native ETH address following Uniswap v4 `Currency` convention.
@@ -458,6 +459,22 @@ contract UpdateFees is YieldTokenTest {
 }
 
 contract Transfer is YieldTokenTest {
+  function testFuzz_SyncsFixedFeeSwapFeesBeforeTransferring(
+    address _from,
+    address _to,
+    uint256 _amount
+  ) public {
+    _assumeSafeAddress(_from);
+    _assumeSafeAddress(_to);
+    _amount = _boundMintAmount(_amount);
+    vm.prank(hook);
+    yieldToken.mint(_from, _amount);
+
+    vm.expectCall(hook, abi.encodeCall(IFixedFeeSwap.syncFees, ()));
+    vm.prank(_from);
+    yieldToken.transfer(_to, _amount);
+  }
+
   function testFuzz_TransfersTokens(address _from, address _to, uint256 _amount) public {
     _assumeSafeAddress(_from);
     _assumeSafeAddress(_to);

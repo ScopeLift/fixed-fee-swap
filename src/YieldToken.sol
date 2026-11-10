@@ -130,8 +130,13 @@ contract YieldToken is ERC20, IFeeTrackingToken {
   }
 
   /// @inheritdoc ERC20
-  /// @dev Updates user fee accounting for both the sender and the recipient.
+  /// @dev
+  ///  - Updates user fee accounting for both the sender and the recipient.
+  ///  - On a transfer, first has FixedFeeSwap credit the vault fees earned so far, so the sender
+  ///    keeps what they earned and the recipient earns only from now on. Mints and burns don't
+  ///    need it, since FixedFeeSwap syncs before both.
   function _update(address _from, address _to, uint256 _value) internal override {
+    if (_from != NATIVE && _to != NATIVE) IFixedFeeSwap(FIXED_FEE_SWAP).syncFees();
     if (_from != NATIVE) _updateUserFees(_from);
     if (_to != NATIVE) _updateUserFees(_to);
     ERC20._update(_from, _to, _value);

@@ -1393,6 +1393,22 @@ contract Settle is FixedFeeSwapTest {
     assertTrue(fixedFeeSwap.settled());
   }
 
+  function testFuzz_SettlesWhenAYieldTokenTransferIsTheFirstActionAfterMaturity(
+    uint256 _depositAmount,
+    uint256 _secondsAfterMaturity
+  ) public {
+    _depositAmount = _boundToRealisticAmount(_depositAmount);
+    _secondsAfterMaturity = bound(_secondsAfterMaturity, 0, 365 days);
+    YieldToken _yieldToken = fixedFeeSwap.YIELD_TOKEN();
+    _mintVstAndDepositForUser(user, _depositAmount);
+    vm.warp(maturity + _secondsAfterMaturity);
+
+    vm.prank(user);
+    _yieldToken.transfer(userB, _depositAmount);
+
+    assertTrue(fixedFeeSwap.settled());
+  }
+
   function testFuzz_CreditsYieldTokenHoldersWithFeesUpToTheMaturityIndex(
     uint256 _depositAmount,
     uint256 _feeToken0,
@@ -1496,5 +1512,52 @@ contract YieldTokenTransfer is FixedFeeSwapTest {
     // YieldToken rounds its fee index down by up to 1 per 1e18 shares.
     assertApproxEqAbs(_userAccrued0, _earnedByUser, _depositAmount / FeeTracking.PRECISION + 2);
     assertEq(token0.balanceOf(_recipient), 0);
+  }
+}
+
+contract ClaimYTFees is FixedFeeSwapTest {
+  function testFuzz_PaysTheHolderTheFeesTheirYieldTokensEarned(
+    address _caller,
+    uint256 _depositAmount,
+    uint256 _feeToken0,
+    uint256 _feeToken1
+  ) public {
+    _depositAmount = _boundToFeeEarningDeposit(_depositAmount);
+    _feeToken0 = _boundToFeeAboveRounding(_feeToken0);
+    _feeToken1 = _boundToFeeAboveRounding(_feeToken1);
+    YieldToken _yieldToken = fixedFeeSwap.YIELD_TOKEN();
+    _mintVstAndDepositForUser(user, _depositAmount);
+    _updateYieldTokenFees(_feeToken0, _feeToken1);
+    fixedFeeSwap.syncFees();
+    // A zero transfer checkpoints the user's accrued fees so the test can read them.
+    vm.prank(user);
+    _yieldToken.transfer(user, 0);
+    (,, uint256 _accrued0, uint256 _accrued1) = _yieldToken.userFees(user);
+
+    vm.prank(_caller);
+    fixedFeeSwap.claimYTFees(user);
+
+    assertEq(token0.balanceOf(user), _accrued0);
+    assertEq(token1.balanceOf(user), _accrued1);
+    assertEq(_yieldToken.balanceOf(user), _depositAmount);
+  }
+
+  function testFuzz_PaysAnAccountThatTransferredAllItsYieldTokens(
+    uint256 _depositAmount,
+    uint256 _feeToken0
+  ) public {
+    _depositAmount = _boundToFeeEarningDeposit(_depositAmount);
+    _feeToken0 = _boundToFeeAboveRounding(_feeToken0);
+    YieldToken _yieldToken = fixedFeeSwap.YIELD_TOKEN();
+    _mintVstAndDepositForUser(user, _depositAmount);
+    _updateYieldTokenFees(_feeToken0, 0);
+    vm.prank(user);
+    _yieldToken.transfer(userB, _depositAmount);
+    (,, uint256 _accrued0,) = _yieldToken.userFees(user);
+
+    fixedFeeSwap.claimYTFees(user);
+
+    assertGt(_accrued0, 0);
+    assertEq(token0.balanceOf(user), _accrued0);
   }
 }

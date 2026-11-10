@@ -20,6 +20,10 @@ contract FixedFeeSwapMock is IFixedFeeSwap {
     yieldToken = _yt;
   }
 
+  /// @notice Called by YieldToken before a transfer. No-op in mock since we don't simulate the
+  ///         full VST fee accounting.
+  function syncFees() external override {}
+
   /// @notice Called by YieldToken to sync fee accounting. No-op in mock since
   ///         we don't simulate the full VST fee accounting.
   function collectFeesToYT() external override {}
