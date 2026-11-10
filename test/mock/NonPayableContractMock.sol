@@ -7,6 +7,5 @@ pragma solidity ^0.8.26;
 ///      scenarios where native ETH transfers fail.
 contract NonPayableContractMock {
   // Intentionally no receive() or fallback() payable functions
-
-  }
+}
 
