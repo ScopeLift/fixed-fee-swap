@@ -280,12 +280,11 @@ contract LPVaultTest is Test, Deployers {
   }
 
   // Replaces `vault` with a vault holding one position over the wrap range, has `_initializer`
-  // initialize it, and returns the shares minted. Before the vault exists, third-party LPs
+  // initialize it, and returns the shares minted. Before the vault adds liquidity, third-party LPs
   // initialize the range's upper tick, trade to accrue fees, then initialize its lower tick, so
-  // Uniswap's fee
-  // growth inside the range starts just below 2^256. A swap into the range then accrues fees inside
-  // it until that value wraps past zero. Asserts both of those states so a test can't pass without
-  // the wrap happening.
+  // Uniswap's fee growth inside the range starts just below 2^256. A swap into the range then
+  // accrues fees inside it until that value wraps past zero. Asserts both of those states so a test
+  // can't pass without the wrap happening.
   function _initializeVaultAndWrapFeeGrowthInsidePastZero(address _initializer)
     internal
     returns (uint256 _shares)
@@ -1521,6 +1520,19 @@ contract CollectFees is LPVaultTest {
 
     _claimAndAssert(_depositor1, _globalIndex0, _globalIndex1);
     _claimAndAssert(_depositor2, _globalIndex0, _globalIndex1);
+  }
+
+  function testFuzz_CreditsFeesEarnedWhileFeeGrowthInsideWrapsPastZero(address _initializer)
+    public
+  {
+    _assumeSafeAddress(_initializer);
+    _initializeVaultAndWrapFeeGrowthInsidePastZero(_initializer);
+    uint256 _totalSupply = vault.totalSupply();
+
+    (uint256 _collectedFee0,) = _collectFeesAndAssertVaultDelta();
+
+    assertGt(_collectedFee0, 0);
+    assertEq(vault.globalFeeIndex0Scaled(), _expectedIndexDelta(_collectedFee0, _totalSupply));
   }
 
   /// @notice Tests that fees are attributed to the original holder when shares are transferred.

@@ -455,7 +455,7 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
       _settleDeltas(_totalDelta0, _totalDelta1, _callbackData.sender);
 
     // Collect fee tokens from the pool. Fee-per-share indexes are updated separately
-    // by _syncFees() (called before unlock and in _update on mint/burn/transfer).
+    // by _syncFees() (called outside the unlock and in _update on mint/burn/transfer).
     _collectFees(_totalFeeDelta0, _totalFeeDelta1);
 
     return abi.encode(_amount0Used, _amount1Used);
@@ -820,7 +820,7 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     }
   }
 
-  /// @notice View-only fee checkpointing based on Uniswap v4 fee growth inside each position range.
+  /// @notice Checkpoints fees based on Uniswap v4 fee growth inside each position range.
   /// @dev
   ///  - Reads fee growth via `getFeeGrowthInside` without calling `unlock` or modifying pool state.
   ///  - Takes fee growth deltas modulo 2^256, since Uniswap's fee growth inside a range wraps.
