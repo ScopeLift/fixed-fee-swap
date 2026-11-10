@@ -6,6 +6,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Deployers} from "lib/v4-periphery/lib/v4-core/test/utils/Deployers.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {LPVault} from "src/LPVault.sol";
+import {FixedFeeSwap} from "src/FixedFeeSwap.sol";
 import {LPVaultHarness} from "test/harness/LPVaultHarness.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {ImmutableState} from "v4-periphery/src/base/ImmutableState.sol";
@@ -1468,5 +1469,31 @@ contract CollectFees is LPVaultTest {
 
     // Fee index should have increased even though we didn't call collectFees()
     assertApproxEqRel(_feeIndex0After - _feeIndex0Before, _expectedIndexDelta0, FEE_TOLERANCE);
+  }
+}
+
+contract FixedFeeSwapOnTheVault is LPVaultTest {
+  function testFuzz_PaysYieldTokenFeesTheVaultHasNotCollectedYet(
+    uint256 _swapAbs0,
+    uint256 _swapAbs1
+  ) public {
+    address _splitter = makeAddr("splitter");
+    (uint256 _shares,,) = _initializeLiquidity(_splitter);
+    FixedFeeSwap _fixedFeeSwap = new FixedFeeSwap(vault, block.timestamp + 30 days);
+    vm.startPrank(_splitter);
+    vault.approve(address(_fixedFeeSwap), _shares);
+    _fixedFeeSwap.deposit(_shares);
+    vm.stopPrank();
+    // The swaps earn the vault's positions fees, which stay in the PoolManager until the vault
+    // collects them.
+    _performSwap(true, _boundSwapAbs(_swapAbs0));
+    _performSwap(false, _boundSwapAbs(_swapAbs1));
+    MockERC20 _token0 = MockERC20(Currency.unwrap(currency0));
+    uint256 _token0Before = _token0.balanceOf(_splitter);
+
+    vm.prank(_splitter);
+    _fixedFeeSwap.redeem(_shares);
+
+    assertGt(_token0.balanceOf(_splitter), _token0Before);
   }
 }

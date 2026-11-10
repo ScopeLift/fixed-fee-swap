@@ -105,6 +105,17 @@ contract VaultShareToken is ERC20, IFeeTrackingToken {
   /// collects them. LPVault overrides it to checkpoint the fee growth of its Uniswap positions.
   function syncFees() external virtual {}
 
+  /// @notice Moves the fees behind the fee indexes into this contract, so claims can be paid.
+  /// @return _collectedFee0 The amount of token0 fees collected.
+  /// @return _collectedFee1 The amount of token1 fees collected.
+  /// @dev Does nothing in this base token, whose fees arrive when the inheriting contract adds
+  /// them. LPVault overrides it to collect from its Uniswap positions.
+  function collectFees()
+    external
+    virtual
+    returns (uint256 _collectedFee0, uint256 _collectedFee1)
+  {}
+
   /*//////////////////////////////////////////////////////////////
                         INTERNAL FUNCTIONS
   //////////////////////////////////////////////////////////////*/

@@ -8,6 +8,7 @@ import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {BalanceDelta, toBalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
+import {TransientStateLibrary} from "v4-core/libraries/TransientStateLibrary.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {SqrtPriceMath} from "v4-core/libraries/SqrtPriceMath.sol";
 import {SafeCast} from "v4-core/libraries/SafeCast.sol";
@@ -402,12 +403,21 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   }
 
   /// @notice Collects accumulated fees from all positions without modifying liquidity.
-  /// @dev Callable by anyone. Fees are kept in the vault and distributed to share holders.
+  /// @dev
+  ///  - Callable by anyone. Fees are kept in the vault and distributed to share holders.
+  ///  - While the PoolManager is already unlocked it can't unlock again, so it only records the
+  ///    fees in the fee indexes and returns zero.
   /// @return _collectedFee0 The amount of token0 fees collected.
   /// @return _collectedFee1 The amount of token1 fees collected.
-  function collectFees() external virtual returns (uint256 _collectedFee0, uint256 _collectedFee1) {
+  function collectFees()
+    external
+    virtual
+    override
+    returns (uint256 _collectedFee0, uint256 _collectedFee1)
+  {
     // Sync fee accounting before physically collecting tokens from the pool.
     _syncFees();
+    if (TransientStateLibrary.isUnlocked(POOL_MANAGER)) return (0, 0);
 
     bytes memory _result =
       POOL_MANAGER.unlock(abi.encode(CallbackAction.CollectFees, abi.encode("")));
