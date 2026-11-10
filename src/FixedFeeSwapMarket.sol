@@ -590,11 +590,13 @@ contract FixedFeeSwapMarket is BaseHook {
     // Compute fee for this step directly from net consumed and attribute to LPs.
     // Per-step tracking is needed because activeLiquidity changes at tick crossings.
     uint256 _stepFee = FixedPointMathLib.mulDiv(_netConsumed, FEE_RATE, FEE_DENOMINATOR - FEE_RATE);
+    // Fee growth wraps modulo 2^256 by design, as in Uniswap v3 and v4; only differences between
+    // fee growth values are ever used.
     if (_stepFee > 0 && activeLiquidity > 0) {
-      if (_ctx.principalForCash) {
-        feeGrowthGlobal0X128 += FixedPointMathLib.mulDiv(_stepFee, Q128, activeLiquidity);
-      } else {
-        feeGrowthGlobal1X128 += FixedPointMathLib.mulDiv(_stepFee, Q128, activeLiquidity);
+      uint256 _stepFeeGrowthX128 = FixedPointMathLib.mulDiv(_stepFee, Q128, activeLiquidity);
+      unchecked {
+        if (_ctx.principalForCash) feeGrowthGlobal0X128 += _stepFeeGrowthX128;
+        else feeGrowthGlobal1X128 += _stepFeeGrowthX128;
       }
     }
 
@@ -1086,6 +1088,8 @@ contract FixedFeeSwapMarket is BaseHook {
   // ============ Internal Functions - Fee Tracking ============
 
   /// @notice Accrues pending fees for a position and updates its fee growth snapshots
+  /// @dev The fee growth inside the range since the last snapshot is computed modulo 2^256, as in
+  ///      Uniswap v3's `Position.update`, because fee growth values wrap by design.
   /// @param position The position storage pointer to update
   function _accruePositionFees(PositionInfo storage position) internal {
     if (position.liquidity <= 0) return;
@@ -1093,14 +1097,17 @@ contract FixedFeeSwapMarket is BaseHook {
     (uint256 _fg0, uint256 _fg1) = _getFeeGrowthInside(position.tickLower, position.tickUpper);
     uint256 _liq = uint256(uint128(position.liquidity));
 
+    uint256 _fgDelta0;
+    uint256 _fgDelta1;
+    unchecked {
+      _fgDelta0 = _fg0 - position.feeGrowthInside0LastX128;
+      _fgDelta1 = _fg1 - position.feeGrowthInside1LastX128;
+    }
+
     // Note: Cast to uint128 assumes fee amounts won't exceed type(uint128).max.
     // This is safe in practice as it would require mass fee accumulation beyond realistic volumes.
-    position.tokensOwed0 += uint128(
-      FixedPointMathLib.mulDiv(_fg0 - position.feeGrowthInside0LastX128, _liq, Q128)
-    );
-    position.tokensOwed1 += uint128(
-      FixedPointMathLib.mulDiv(_fg1 - position.feeGrowthInside1LastX128, _liq, Q128)
-    );
+    position.tokensOwed0 += uint128(FixedPointMathLib.mulDiv(_fgDelta0, _liq, Q128));
+    position.tokensOwed1 += uint128(FixedPointMathLib.mulDiv(_fgDelta1, _liq, Q128));
 
     position.feeGrowthInside0LastX128 = _fg0;
     position.feeGrowthInside1LastX128 = _fg1;
@@ -1116,6 +1123,9 @@ contract FixedFeeSwapMarket is BaseHook {
   }
 
   /// @notice Calculates fee growth inside a tick range
+  /// @dev Computed modulo 2^256, as in Uniswap v3's `Tick.getFeeGrowthInside`. The result can wrap
+  ///      past zero, for example when a tick is initialized after fees accrued on its far side, and
+  ///      only has meaning as a difference from an earlier snapshot of the same range.
   /// @param _tickLower The lower tick boundary
   /// @param _tickUpper The upper tick boundary
   /// @return _fg0 Fee growth for TOKEN0 inside the range
@@ -1131,31 +1141,36 @@ contract FixedFeeSwapMarket is BaseHook {
     bool _belowLower = currentTick < _tickLower;
     bool _aboveUpper = currentTick >= _tickUpper;
 
-    uint256 _below0 = _belowLower
-      ? feeGrowthGlobal0X128 - lower.feeGrowthOutside0X128
-      : lower.feeGrowthOutside0X128;
-    uint256 _below1 = _belowLower
-      ? feeGrowthGlobal1X128 - lower.feeGrowthOutside1X128
-      : lower.feeGrowthOutside1X128;
-    uint256 _above0 = _aboveUpper
-      ? feeGrowthGlobal0X128 - upper.feeGrowthOutside0X128
-      : upper.feeGrowthOutside0X128;
-    uint256 _above1 = _aboveUpper
-      ? feeGrowthGlobal1X128 - upper.feeGrowthOutside1X128
-      : upper.feeGrowthOutside1X128;
+    unchecked {
+      uint256 _below0 = _belowLower
+        ? feeGrowthGlobal0X128 - lower.feeGrowthOutside0X128
+        : lower.feeGrowthOutside0X128;
+      uint256 _below1 = _belowLower
+        ? feeGrowthGlobal1X128 - lower.feeGrowthOutside1X128
+        : lower.feeGrowthOutside1X128;
+      uint256 _above0 = _aboveUpper
+        ? feeGrowthGlobal0X128 - upper.feeGrowthOutside0X128
+        : upper.feeGrowthOutside0X128;
+      uint256 _above1 = _aboveUpper
+        ? feeGrowthGlobal1X128 - upper.feeGrowthOutside1X128
+        : upper.feeGrowthOutside1X128;
 
-    _fg0 = feeGrowthGlobal0X128 - _below0 - _above0;
-    _fg1 = feeGrowthGlobal1X128 - _below1 - _above1;
+      _fg0 = feeGrowthGlobal0X128 - _below0 - _above0;
+      _fg1 = feeGrowthGlobal1X128 - _below1 - _above1;
+    }
   }
 
   /// @notice Updates fee growth outside values when crossing a tick
   /// @dev Crossing a tick flips the meaning of "outside" - subtracting from global inverts
-  ///      the above/below perspective. This is the standard Uniswap v3 tick crossing pattern.
+  ///      the above/below perspective. This is the standard Uniswap v3 tick crossing pattern,
+  ///      computed modulo 2^256 because fee growth values wrap by design.
   /// @param _tick The tick being crossed
   function _crossTick(int24 _tick) internal {
     TickInfo storage info = ticks[_tick];
-    info.feeGrowthOutside0X128 = feeGrowthGlobal0X128 - info.feeGrowthOutside0X128;
-    info.feeGrowthOutside1X128 = feeGrowthGlobal1X128 - info.feeGrowthOutside1X128;
+    unchecked {
+      info.feeGrowthOutside0X128 = feeGrowthGlobal0X128 - info.feeGrowthOutside0X128;
+      info.feeGrowthOutside1X128 = feeGrowthGlobal1X128 - info.feeGrowthOutside1X128;
+    }
   }
 
   // ============ Internal Functions - Fee Helpers ============
