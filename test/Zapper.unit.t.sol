@@ -14,6 +14,9 @@ import {VaultShareToken} from "src/VaultShareToken.sol";
 import {PrincipalToken} from "src/PrincipalToken.sol";
 import {YieldToken} from "src/YieldToken.sol";
 import {ERC20Mock} from "test/mock/ERC20Mock.sol";
+import {VaultShareTokenHarness} from "test/harness/VaultShareTokenHarness.sol";
+import {FeeTracking} from "src/lib/FeeTracking.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 contract ZapperTest is Test {
   Zapper internal zapper;
@@ -34,9 +37,10 @@ contract ZapperTest is Test {
     token0 = new ERC20Mock("Token 0", "T0");
     token1 = new ERC20Mock("Token 1", "T1");
 
-    // Underlying VaultShareToken whose shares are being split
+    // Underlying VaultShareToken whose shares are being split. The harness lets tests accrue vault
+    // fees; it behaves like VaultShareToken otherwise.
     vaultShareToken =
-      new VaultShareToken("Vault Share Token", "VST", address(token0), address(token1));
+      new VaultShareTokenHarness("Vault Share Token", "VST", address(token0), address(token1));
 
     // Choose a maturity strictly in the future
     maturity = block.timestamp + 30 days;
@@ -87,6 +91,28 @@ contract ZapperTest is Test {
     vaultShareToken.approve(address(fixedFeeSwap), _depositAmount);
     vm.prank(_user);
     fixedFeeSwap.deposit(_depositAmount);
+  }
+
+  // Mints vault shares through the harness and splits them for `_user`. Unlike
+  // `_depositVstForUser`, which uses `deal`, this counts the shares in the vault's total supply,
+  // which fee index updates divide by, so vault fees reach FixedFeeSwap.
+  function _mintVstAndDepositForUser(address _user, uint256 _depositAmount) internal {
+    VaultShareTokenHarness(address(vaultShareToken)).exposed_mint(_user, _depositAmount);
+    vm.prank(_user);
+    vaultShareToken.approve(address(fixedFeeSwap), _depositAmount);
+    vm.prank(_user);
+    fixedFeeSwap.deposit(_depositAmount);
+  }
+
+  // Credits `_feeToken0` of token0 fees to every vault share holder, as LPVault does when it
+  // collects pool fees, and funds the vault to pay them.
+  function _accrueVaultFees(uint256 _feeToken0) internal {
+    deal(
+      address(token0),
+      address(vaultShareToken),
+      token0.balanceOf(address(vaultShareToken)) + _feeToken0
+    );
+    VaultShareTokenHarness(address(vaultShareToken)).exposed_updateFees(_feeToken0, 0);
   }
 
   /// @notice Helper function to set up fees on YT.
@@ -280,6 +306,35 @@ contract SellYieldToken is ZapperTest {
   function test_RevertIf_AmountIsZero() public {
     vm.expectRevert(Zapper.Zapper_InvalidAmount.selector);
     zapper.sellYieldToken(0);
+  }
+
+  function testFuzz_PaysTheSellerTheFeesTheirYieldTokensEarned(
+    uint256 _ytAmount,
+    uint256 _feeToken0,
+    uint256 _mockPrice
+  ) public {
+    // At least 1e18 for the same rounding reason as the sell profit tests above; at most 1e24 so a
+    // fee of at least 1e18 raises the vault fee index on every share.
+    _ytAmount = bound(_ytAmount, 1e18, 1e24);
+    _feeToken0 = bound(_feeToken0, 1e18, type(uint128).max);
+    _boundAndSetMockPrice(_mockPrice);
+    _mintVstAndDepositForUser(user, _ytAmount);
+    // The user's YT earns fees, and nothing syncs them into YT before the sale.
+    _accrueVaultFees(_feeToken0);
+    // The user's split VST is every vault share, so their YT earns the whole fee index increase.
+    uint256 _earnedByUser = Math.mulDiv(
+      _ytAmount, Math.mulDiv(_feeToken0, FeeTracking.PRECISION, _ytAmount), FeeTracking.PRECISION
+    );
+    YieldToken _yt = fixedFeeSwap.YIELD_TOKEN();
+    vm.prank(user);
+    _yt.approve(address(zapper), _ytAmount);
+
+    vm.prank(user);
+    zapper.sellYieldToken(_ytAmount);
+
+    // YieldToken rounds its fee index down by up to 1 per 1e18 shares.
+    assertApproxEqAbs(token0.balanceOf(user), _earnedByUser, _ytAmount / FeeTracking.PRECISION + 2);
+    assertEq(token0.balanceOf(address(zapper)), 0);
   }
 }
 
