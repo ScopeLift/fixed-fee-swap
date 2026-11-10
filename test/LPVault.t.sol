@@ -3,11 +3,14 @@ pragma solidity ^0.8.26;
 
 import {Test, stdError} from "forge-std/Test.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Deployers} from "lib/v4-periphery/lib/v4-core/test/utils/Deployers.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {LPVault} from "src/LPVault.sol";
+import {FixedFeeSwap} from "src/FixedFeeSwap.sol";
 import {LPVaultHarness} from "test/harness/LPVaultHarness.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {IUnlockCallback} from "v4-core/interfaces/callback/IUnlockCallback.sol";
 import {ImmutableState} from "v4-periphery/src/base/ImmutableState.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {Currency} from "v4-core/types/Currency.sol";
@@ -1022,6 +1025,45 @@ contract Withdraw is LPVaultTest {
 }
 
 contract CollectFees is LPVaultTest {
+  function testFuzz_CollectsFeesAfterEveryShareIsWithdrawn(uint256 _swapAbs0, uint256 _swapAbs1)
+    public
+  {
+    address _initializer = makeAddr("initializer");
+    (uint256 _shares,,) = _initializeLiquidity(_initializer);
+    _performSwap(true, _boundSwapAbs(_swapAbs0));
+    _performSwap(false, _boundSwapAbs(_swapAbs1));
+    vm.prank(_initializer);
+    vault.withdraw(_shares, _initializer);
+
+    // Every position is empty now, which v4 won't modify, so collecting has to skip them.
+    (uint256 _collected0, uint256 _collected1) = vault.collectFees();
+
+    assertEq(_collected0, 0);
+    assertEq(_collected1, 0);
+  }
+
+  function testFuzz_ClaimPaysAccruedFeesAfterEveryShareIsWithdrawn(
+    uint256 _swapAbs0,
+    uint256 _swapAbs1
+  ) public {
+    address _initializer = makeAddr("initializer");
+    (uint256 _shares,,) = _initializeLiquidity(_initializer);
+    _performSwap(true, _boundSwapAbs(_swapAbs0));
+    _performSwap(false, _boundSwapAbs(_swapAbs1));
+    vm.prank(_initializer);
+    vault.withdraw(_shares, _initializer);
+    (,, uint256 _accrued0, uint256 _accrued1) = vault.userFees(_initializer);
+    MockERC20 _token0 = MockERC20(Currency.unwrap(currency0));
+    MockERC20 _token1 = MockERC20(Currency.unwrap(currency1));
+    uint256 _token0Before = _token0.balanceOf(_initializer);
+    uint256 _token1Before = _token1.balanceOf(_initializer);
+
+    vault.claim(_initializer);
+
+    assertEq(_token0.balanceOf(_initializer), _token0Before + _accrued0);
+    assertEq(_token1.balanceOf(_initializer), _token1Before + _accrued1);
+  }
+
   function _collectFeesAndAssertVaultDelta()
     internal
     returns (uint256 _collectedFee0, uint256 _collectedFee1)
@@ -1468,5 +1510,108 @@ contract CollectFees is LPVaultTest {
 
     // Fee index should have increased even though we didn't call collectFees()
     assertApproxEqRel(_feeIndex0After - _feeIndex0Before, _expectedIndexDelta0, FEE_TOLERANCE);
+  }
+}
+
+// Calls `collectFeesToYT` on a FixedFeeSwap from inside a PoolManager unlock, as a router that
+// combines a v4 action with FixedFeeSwap would.
+contract CollectFeesToYTInsideUnlock is IUnlockCallback {
+  IPoolManager internal immutable POOL_MANAGER;
+  FixedFeeSwap internal immutable FIXED_FEE_SWAP;
+
+  constructor(IPoolManager _poolManager, FixedFeeSwap _fixedFeeSwap) {
+    POOL_MANAGER = _poolManager;
+    FIXED_FEE_SWAP = _fixedFeeSwap;
+  }
+
+  function collectFeesToYTInsideUnlock() external {
+    POOL_MANAGER.unlock("");
+  }
+
+  function unlockCallback(bytes calldata) external returns (bytes memory) {
+    FIXED_FEE_SWAP.collectFeesToYT();
+    return "";
+  }
+}
+
+contract FixedFeeSwapOnTheVault is LPVaultTest {
+  // Splits every share `_initializeLiquidity` mints for `_splitter` into PT and YT, so FixedFeeSwap
+  // holds nearly all of the vault, and returns the new FixedFeeSwap and the share count.
+  function _splitInitialShares(address _splitter)
+    internal
+    returns (FixedFeeSwap _fixedFeeSwap, uint256 _shares)
+  {
+    (_shares,,) = _initializeLiquidity(_splitter);
+    _fixedFeeSwap = new FixedFeeSwap(vault, block.timestamp + 30 days);
+    vm.startPrank(_splitter);
+    vault.approve(address(_fixedFeeSwap), _shares);
+    _fixedFeeSwap.deposit(_shares);
+    vm.stopPrank();
+  }
+
+  function testFuzz_CollectsFeesToYTFromInsideAnUnlock(uint256 _swapAbs0, uint256 _swapAbs1)
+    public
+  {
+    (FixedFeeSwap _fixedFeeSwap,) = _splitInitialShares(makeAddr("splitter"));
+    CollectFeesToYTInsideUnlock _router = new CollectFeesToYTInsideUnlock(manager, _fixedFeeSwap);
+    // The swaps earn the vault's positions fees, which stay in the PoolManager until the vault
+    // collects them.
+    _performSwap(true, _boundSwapAbs(_swapAbs0));
+    _performSwap(false, _boundSwapAbs(_swapAbs1));
+
+    _router.collectFeesToYTInsideUnlock();
+
+    assertGt(MockERC20(Currency.unwrap(currency0)).balanceOf(address(_fixedFeeSwap)), 0);
+  }
+
+  function testFuzz_PaysYieldTokenFeesTheVaultHasNotCollectedYet(
+    uint256 _swapAbs0,
+    uint256 _swapAbs1
+  ) public {
+    address _splitter = makeAddr("splitter");
+    (FixedFeeSwap _fixedFeeSwap, uint256 _shares) = _splitInitialShares(_splitter);
+    // The swaps earn the vault's positions fees, which stay in the PoolManager until the vault
+    // collects them.
+    _performSwap(true, _boundSwapAbs(_swapAbs0));
+    _performSwap(false, _boundSwapAbs(_swapAbs1));
+    MockERC20 _token0 = MockERC20(Currency.unwrap(currency0));
+    uint256 _token0Before = _token0.balanceOf(_splitter);
+
+    vm.prank(_splitter);
+    _fixedFeeSwap.redeem(_shares);
+
+    assertGt(_token0.balanceOf(_splitter), _token0Before);
+  }
+
+  function testFuzz_PaysYieldTokenAndPrincipalHoldersTheFeesOnEachSideOfMaturity(
+    uint256 _swapAbsBeforeMaturity,
+    uint256 _swapAbsAfterMaturity
+  ) public {
+    address _splitter = makeAddr("splitter");
+    address _principalBuyer = makeAddr("principalBuyer");
+    (FixedFeeSwap _fixedFeeSwap, uint256 _shares) = _splitInitialShares(_splitter);
+    MockERC20 _token0 = MockERC20(Currency.unwrap(currency0));
+    IERC20 _principalToken = IERC20(address(_fixedFeeSwap.PRINCIPAL_TOKEN()));
+    // The splitter keeps the YT and sells the PT, which a transfer stands in for.
+    vm.prank(_splitter);
+    _principalToken.transfer(_principalBuyer, _shares);
+    // A token0-in swap before maturity earns the positions only token0 fees, and a token1-in swap
+    // after it earns only token1 fees. Settling at maturity puts the first on the YT side and the
+    // second on the PT side.
+    _performSwap(true, _boundSwapAbs(_swapAbsBeforeMaturity));
+    vm.warp(_fixedFeeSwap.MATURITY());
+    _fixedFeeSwap.settle();
+    _performSwap(false, _boundSwapAbs(_swapAbsAfterMaturity));
+    uint256 _splitterToken0Before = _token0.balanceOf(_splitter);
+
+    vm.prank(_principalBuyer);
+    _fixedFeeSwap.redeem(_shares);
+    vm.prank(_splitter);
+    _fixedFeeSwap.claimYTFeesAfterMaturity();
+
+    assertEq(vault.balanceOf(_principalBuyer), _shares);
+    assertGt(MockERC20(Currency.unwrap(currency1)).balanceOf(_principalBuyer), 0);
+    assertEq(_token0.balanceOf(_principalBuyer), 0);
+    assertGt(_token0.balanceOf(_splitter), _splitterToken0Before);
   }
 }

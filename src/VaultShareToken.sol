@@ -100,6 +100,11 @@ contract VaultShareToken is ERC20, IFeeTrackingToken {
     (_claimedToken0, _claimedToken1) = _claim(_user);
   }
 
+  /// @notice Records fees the vault has earned but not yet added to the fee indexes.
+  /// @dev Does nothing in this base token, whose fees are added by the inheriting contract when it
+  /// collects them. LPVault overrides it to checkpoint the fee growth of its Uniswap positions.
+  function syncFees() external virtual {}
+
   /*//////////////////////////////////////////////////////////////
                         INTERNAL FUNCTIONS
   //////////////////////////////////////////////////////////////*/
@@ -143,7 +148,11 @@ contract VaultShareToken is ERC20, IFeeTrackingToken {
   /// @param _user The address to claim fees for.
   /// @return _claimedToken0 Amount of `FEE_TOKEN_0` that was transferred.
   /// @return _claimedToken1 Amount of `FEE_TOKEN_1` that was transferred.
-  function _claim(address _user) internal returns (uint256 _claimedToken0, uint256 _claimedToken1) {
+  function _claim(address _user)
+    internal
+    virtual
+    returns (uint256 _claimedToken0, uint256 _claimedToken1)
+  {
     // Update user fees to ensure we're syncing to the latest global indices
     _updateUserFees(_user);
 

@@ -8,6 +8,7 @@ import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {BalanceDelta, toBalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
+import {TransientStateLibrary} from "v4-core/libraries/TransientStateLibrary.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {SqrtPriceMath} from "v4-core/libraries/SqrtPriceMath.sol";
 import {SafeCast} from "v4-core/libraries/SafeCast.sol";
@@ -20,6 +21,7 @@ import {SlippageCheck} from "v4-periphery/src/libraries/SlippageCheck.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
+import {FeeTracking} from "src/lib/FeeTracking.sol";
 
 /// @title LPVault
 /// @author [ScopeLift](https://scopelift.co)
@@ -406,15 +408,14 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   /// @return _collectedFee0 The amount of token0 fees collected.
   /// @return _collectedFee1 The amount of token1 fees collected.
   function collectFees() external virtual returns (uint256 _collectedFee0, uint256 _collectedFee1) {
-    // Sync fee accounting before physically collecting tokens from the pool.
+    (_collectedFee0, _collectedFee1) = _syncAndCollectFees();
+  }
+
+  /// @inheritdoc VaultShareToken
+  /// @dev Callable by anyone. Updates the fee indexes from the positions' fee growth without
+  /// collecting tokens from the pool, so it works while the PoolManager is unlocked.
+  function syncFees() external override {
     _syncFees();
-
-    bytes memory _result =
-      POOL_MANAGER.unlock(abi.encode(CallbackAction.CollectFees, abi.encode("")));
-
-    (_collectedFee0, _collectedFee1) = abi.decode(_result, (uint256, uint256));
-
-    emit FeesCollected(_collectedFee0, _collectedFee1);
   }
 
   /// @inheritdoc SafeCallback
@@ -424,6 +425,45 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     if (_action == CallbackAction.Deposit) return _handleDepositCallback(_actionData);
     if (_action == CallbackAction.Withdraw) return _handleWithdrawCallback(_actionData);
     return _handleCollectFeesCallback();
+  }
+
+  /// @notice Records the positions' fees in the fee indexes and moves them from the pool into the
+  /// vault.
+  /// @return _collectedFee0 The amount of token0 fees collected.
+  /// @return _collectedFee1 The amount of token1 fees collected.
+  /// @dev While the PoolManager is already unlocked, collects inside that unlock instead of
+  /// unlocking again; the vault's own deltas net to zero either way.
+  function _syncAndCollectFees() internal returns (uint256 _collectedFee0, uint256 _collectedFee1) {
+    // Sync fee accounting before physically collecting tokens from the pool.
+    _syncFees();
+
+    bytes memory _result = TransientStateLibrary.isUnlocked(POOL_MANAGER)
+      ? _handleCollectFeesCallback()
+      : POOL_MANAGER.unlock(abi.encode(CallbackAction.CollectFees, abi.encode("")));
+
+    (_collectedFee0, _collectedFee1) = abi.decode(_result, (uint256, uint256));
+
+    emit FeesCollected(_collectedFee0, _collectedFee1);
+  }
+
+  /// @inheritdoc VaultShareToken
+  /// @dev Collects the positions' fees from the pool first when the vault doesn't hold enough to
+  /// pay this claim. Syncing the fee indexes counts fees still in the PoolManager, so without it
+  /// the claim would revert. A claim the vault's balance covers can still be paid from tokens other
+  /// holders are owed; the first later claim the balance can't cover collects, and since collecting
+  /// brings in every fee the indexes count, that claim and the rest are paid in full.
+  function _claim(address _user)
+    internal
+    override
+    returns (uint256 _claimedToken0, uint256 _claimedToken1)
+  {
+    _updateUserFees(_user);
+    FeeTracking.UserFees storage owed = userFees[_user];
+    if (
+      targetPoolKey.currency0.balanceOfSelf() < owed.userAccruedToken0
+        || targetPoolKey.currency1.balanceOfSelf() < owed.userAccruedToken1
+    ) _syncAndCollectFees();
+    (_claimedToken0, _claimedToken1) = super._claim(_user);
   }
 
   /// @inheritdoc VaultShareToken
@@ -511,6 +551,8 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   {
     for (uint256 _i = 0; _i < positions.length; _i++) {
       LiquidityPosition memory _position = positions[_i];
+      // An empty position has no fees to collect, and v4 rejects a zero change to it.
+      if (_position.liquidity == 0) continue;
 
       (, BalanceDelta _feeDelta) = POOL_MANAGER.modifyLiquidity(
         targetPoolKey,
