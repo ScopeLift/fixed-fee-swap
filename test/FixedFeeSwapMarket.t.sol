@@ -501,6 +501,23 @@ abstract contract FixedFeeSwapMarketTest is Test {
       * ((1 << 128) / uint256(_liquidity) + 1);
   }
 
+  // Mints Bob's ranges [0, 10] and [0, 40] on `_localHook`, then swaps the tick from 0 up to 30
+  // and back down to 8. Tick 10's fee growth outside then holds the fees earned above it, so a
+  // range [3, 10] whose tick 3 is initialized afterward has fee growth inside that wraps below
+  // zero. `_localHook` must charge LP fees, start at tick 0, and have no other liquidity.
+  function _crossTickTenUpAndBack(FixedFeeSwapMarketHarness _localHook) internal {
+    _mintOnHook(_localHook, bob, 0, 10, 1000e18);
+    _mintOnHook(_localHook, bob, 0, 40, 1000e18);
+
+    // The amounts are more than enough to reach each tick limit, so each swap stops at its limit.
+    vm.startPrank(bob);
+    _localHook.swap(1000e18, true, 30);
+    assertEq(_localHook.getCurrentTick(), 30, "Setup: tick should cross above tick 10");
+    _localHook.swap(1000e18, false, 8);
+    vm.stopPrank();
+    assertEq(_localHook.getCurrentTick(), 8, "Setup: tick should end between ticks 3 and 10");
+  }
+
   function _assertApproxEqRelBps(uint256 _a, uint256 _b, uint256 _toleranceBps, string memory _err)
     internal
     pure
@@ -1136,25 +1153,10 @@ contract MintLiquidity is FixedFeeSwapMarketTest {
     public
   {
     _liquidity = _boundLiquidity(_liquidity);
-    // LP fees must be on, so the swaps below grow fee growth on both sides of tick 10.
     (FixedFeeSwapMarketHarness _feeHook,) =
       _deployHookForBeforeSwapTests(LP_FEE_RATE, "sharedCrossedTickManager");
-    // Bob's ranges initialize tick 10, which Alice's position shares, and keep liquidity active
-    // above it up to tick 40.
-    _mintOnHook(_feeHook, bob, 0, 10, 1000e18);
-    _mintOnHook(_feeHook, bob, 0, 40, 1000e18);
+    _crossTickTenUpAndBack(_feeHook);
 
-    // The amounts are more than enough to reach each tick limit, so each swap stops at its limit.
-    // Crossing tick 10 up and back sets its fee growth outside to the fees earned above it.
-    vm.startPrank(bob);
-    _feeHook.swap(1000e18, true, 30);
-    assertEq(_feeHook.getCurrentTick(), 30, "Setup: tick should cross above tick 10");
-    _feeHook.swap(1000e18, false, 8);
-    vm.stopPrank();
-    assertEq(_feeHook.getCurrentTick(), 8, "Setup: tick should end between ticks 3 and 10");
-
-    // Tick 3 is fresh and below the current tick, so minting sets its fee growth outside to the
-    // global fee growth.
     bytes32 _positionId = _mintOnHook(_feeHook, alice, 3, 10, _liquidity);
 
     (,,, int128 _positionLiquidity) = _feeHook.getPositionInfo(_positionId);
@@ -1590,6 +1592,25 @@ contract IncreaseLiquidity is FixedFeeSwapMarketTest {
     assertEq(
       uint128(totalLiquidity), _initialLiquidity + _additionalLiquidity, "_liquidity increased"
     );
+  }
+
+  function testFuzz_ReAddsLiquidityToAnEmptyPositionSharingAnUpperTickThatSwapsCrossedBothWays(uint128 _liquidity)
+    public
+  {
+    _liquidity = _boundLiquidity(_liquidity);
+    (FixedFeeSwapMarketHarness _feeHook,) =
+      _deployHookForBeforeSwapTests(LP_FEE_RATE, "reAddSharedCrossedTickManager");
+    bytes32 _positionId = _mintOnHook(_feeHook, alice, 3, 10, _liquidity);
+    // Emptying the position leaves tick 3 with no liquidity, so the re-add initializes it again.
+    vm.prank(alice);
+    _feeHook.decreaseLiquidity(_positionId, -int128(_liquidity), 0, 0);
+    _crossTickTenUpAndBack(_feeHook);
+
+    vm.prank(alice);
+    _feeHook.increaseLiquidity(_positionId, _liquidity, type(uint256).max, type(uint256).max);
+
+    (,,, int128 _positionLiquidity) = _feeHook.getPositionInfo(_positionId);
+    assertEq(uint128(_positionLiquidity), _liquidity, "Position should hold the re-added liquidity");
   }
 
   function test_RevertIf_PositionNotFound() public {
@@ -4080,6 +4101,32 @@ contract CollectFees is FixedFeeSwapMarketTest {
   function _feeSwap(address _sender, int256 _amountIn, bool _principalForCash) internal {
     bytes memory _hookParams = abi.encode(_amountIn, _principalForCash, int24(type(int24).max));
     feeHook.exposed_beforeSwap(_sender, feePoolKey, defaultSwapParams, _hookParams);
+  }
+
+  function testFuzz_CollectsTheFeesEarnedByAPositionWhoseFeeGrowthInsideWrapped(
+    uint128 _liquidity,
+    uint256 _swapAmount
+  ) public {
+    _liquidity = _boundLiquidity(_liquidity);
+    _crossTickTenUpAndBack(feeHook);
+    bytes32 _positionId = _mintOnHook(feeHook, alice, 3, 10, _liquidity);
+    _swapAmount = _boundFeeSwapAmount(_swapAmount, feeHook.getActiveLiquidity());
+    uint256 _feeGrowthBefore = feeHook.feeGrowthGlobal0X128();
+
+    // The tick limit keeps the tick inside Alice's range, so all of this swap's fees are earned
+    // inside it.
+    vm.prank(bob);
+    feeHook.swap(_swapAmount, true, 9);
+    uint256 _expectedFees0 = FixedPointMathLib.mulDiv(
+      feeHook.feeGrowthGlobal0X128() - _feeGrowthBefore, _liquidity, 1 << 128
+    );
+
+    vm.prank(alice);
+    (uint128 _fees0, uint128 _fees1) = feeHook.collectFees(_positionId, alice, 0, 0);
+
+    assertGt(_fees0, 0, "Position should earn TOKEN0 fees");
+    assertEq(_fees0, _expectedFees0, "Position should earn its share of the swap's TOKEN0 fees");
+    assertEq(_fees1, 0, "Position should earn no TOKEN1 fees");
   }
 
   function testFuzz_PartialFeeCollection(uint128 _liquidity, uint256 _swapAmount) public {
