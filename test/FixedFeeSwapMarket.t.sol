@@ -4117,6 +4117,28 @@ contract _BeforeSwap is FixedFeeSwapMarketTest {
     assertEq(_localHook.getActiveLiquidity(), _liquidity, "The range should be active again");
   }
 
+  function testFuzz_CashForPrincipalSwapIsANoOpWhenTheTickLimitIsAlreadyReached(
+    uint128 _liquidity,
+    uint256 _amount,
+    int24 _tickLimit
+  ) public {
+    _liquidity = _boundLiquidity(_liquidity);
+    _amount = bound(_amount, 1, 1e27);
+    // Any limit at or above the starting tick 0 is already reached; 0 itself means no limit.
+    _tickLimit = int24(bound(_tickLimit, 1, 100));
+    (FixedFeeSwapMarketHarness _localHook,) =
+      _deployHookForBeforeSwapTests(FEE_RATE, "tickLimitReachedManager");
+    // The range starts at the current tick 0, so nothing lies below it.
+    _mintOnHook(_localHook, alice, 0, 100, _liquidity);
+
+    vm.prank(bob);
+    (uint256 _amountInUsed, uint256 _amountOut) = _localHook.swap(_amount, false, _tickLimit);
+
+    assertEq(_amountInUsed, 0, "Swap should consume no input");
+    assertEq(_amountOut, 0, "Swap should produce no output");
+    assertEq(_localHook.getCurrentTick(), 0, "Tick should not move");
+  }
+
   // ============ Direct Swap Tests (FixedFeeSwapMarket.swap) ============
 
   function testFuzz_DirectSwapPrincipalForCashTransfersCorrectTokens(uint256 _amount) public {

@@ -520,25 +520,22 @@ contract FixedFeeSwapMarket is BaseHook {
     internal
     returns (uint256 _amountInUsed, uint256 _amountOutCalculated)
   {
-    // The first step trades against the liquidity below the current tick when moving down.
-    (uint128 _firstStepLiquidity,) = _stepLiquidity(!_principalForCash);
-    if (_firstStepLiquidity == 0) revert FixedFeeSwapMarket_NoActiveLiquidity();
-
     uint256 _amountInNet = _netOfFee(_amountInGross);
     uint256 _amountInRemainingNet = _amountInNet;
     SwapContext memory _ctx = SwapContext({
       principalForCash: _principalForCash, tickMovingLeft: !_principalForCash, tickLimit: _tickLimit
     });
 
+    // A swap that takes a step needs liquidity for it. The first step trades against the
+    // liquidity below the current tick when moving down.
+    if (!_tickLimitReached(_ctx)) {
+      (uint128 _firstStepLiquidity,) = _stepLiquidity(_ctx.tickMovingLeft);
+      if (_firstStepLiquidity == 0) revert FixedFeeSwapMarket_NoActiveLiquidity();
+    }
+
     while (_amountInRemainingNet != 0) {
       // Slippage protection: stop the swap if the tick has moved past the caller's limit.
-      // For principal→cash swaps, tick increases so we stop when tick reaches the limit.
-      // For cash→principal swaps, tick decreases so we stop when tick reaches the limit.
-      if (_ctx.tickLimit != NO_TICK_LIMIT) {
-        if (_ctx.principalForCash ? currentTick >= _ctx.tickLimit : currentTick <= _ctx.tickLimit) {
-          break;
-        }
-      }
+      if (_tickLimitReached(_ctx)) break;
 
       // Find next initialized tick
       int24 _nextTick;
@@ -570,6 +567,17 @@ contract FixedFeeSwapMarket is BaseHook {
     _amountInUsed =
       FixedPointMathLib.mulDivUp(_totalNetUsed, FEE_DENOMINATOR, FEE_DENOMINATOR - FEE_RATE);
     if (_amountInUsed > _amountInGross) _amountInUsed = _amountInGross;
+  }
+
+  /// @notice Returns whether the current tick has reached the swap's tick limit
+  /// @dev For principal→cash swaps the tick increases, so the limit is reached at or above it.
+  /// For
+  ///      cash→principal swaps the tick decreases, so the limit is reached at or below it.
+  /// @param _ctx Swap context containing the direction and tick limit
+  /// @return Whether the swap must stop
+  function _tickLimitReached(SwapContext memory _ctx) internal view returns (bool) {
+    if (_ctx.tickLimit == NO_TICK_LIMIT) return false;
+    return _ctx.principalForCash ? currentTick >= _ctx.tickLimit : currentTick <= _ctx.tickLimit;
   }
 
   /// @notice Executes a single swap step: calculates amounts, updates fees, crosses tick if needed
