@@ -21,6 +21,7 @@ import {SlippageCheck} from "v4-periphery/src/libraries/SlippageCheck.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {VaultShareToken} from "src/VaultShareToken.sol";
+import {FeeTracking} from "src/lib/FeeTracking.sol";
 
 /// @title LPVault
 /// @author [ScopeLift](https://scopelift.co)
@@ -407,7 +408,7 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   /// @return _collectedFee0 The amount of token0 fees collected.
   /// @return _collectedFee1 The amount of token1 fees collected.
   function collectFees() external virtual returns (uint256 _collectedFee0, uint256 _collectedFee1) {
-    (_collectedFee0, _collectedFee1) = _collectFees();
+    (_collectedFee0, _collectedFee1) = _syncAndCollectFees();
   }
 
   /// @inheritdoc VaultShareToken
@@ -432,7 +433,7 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   /// @return _collectedFee1 The amount of token1 fees collected.
   /// @dev While the PoolManager is already unlocked, collects inside that unlock instead of
   /// unlocking again; the vault's own deltas net to zero either way.
-  function _collectFees() internal returns (uint256 _collectedFee0, uint256 _collectedFee1) {
+  function _syncAndCollectFees() internal returns (uint256 _collectedFee0, uint256 _collectedFee1) {
     // Sync fee accounting before physically collecting tokens from the pool.
     _syncFees();
 
@@ -446,16 +447,28 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   }
 
   /// @inheritdoc VaultShareToken
-  /// @dev Collects the positions' fees from the pool first. Syncing the fee indexes counts fees
-  /// still in the PoolManager, so without collecting, the vault could be paying a claim with tokens
-  /// it doesn't hold yet.
+  /// @dev Collects the positions' fees from the pool first when the vault doesn't hold enough to
+  /// pay the claim. Syncing the fee indexes counts fees still in the PoolManager, so without
+  /// collecting, the claim would revert or be paid with tokens other holders are owed.
   function _claim(address _user)
     internal
     override
     returns (uint256 _claimedToken0, uint256 _claimedToken1)
   {
-    _collectFees();
+    _updateUserFees(_user);
+    FeeTracking.UserFees storage owed = userFees[_user];
+    if (
+      _feeTokenBalance(FEE_TOKEN0) < owed.userAccruedToken0
+        || _feeTokenBalance(FEE_TOKEN1) < owed.userAccruedToken1
+    ) _syncAndCollectFees();
     (_claimedToken0, _claimedToken1) = super._claim(_user);
+  }
+
+  /// @notice The vault's balance of a fee token.
+  /// @param _token The fee token, or address(0) for native ETH.
+  /// @return The balance.
+  function _feeTokenBalance(address _token) internal view returns (uint256) {
+    return _token == address(0) ? address(this).balance : IERC20(_token).balanceOf(address(this));
   }
 
   /// @inheritdoc VaultShareToken

@@ -72,7 +72,7 @@ The core contract that enables splitting VaultShareTokens into Principal and Yie
 - **Deposit**: Before maturity, users can deposit VST and receive 1:1 PT and YT
 - **Redeem (before maturity)**: Users must burn equal amounts of PT and YT to receive VST back
 - **Settlement at maturity**: The first action at or after maturity, or a call to the permissionless `settle()`, records the vault fee index at maturity. When the first reading after maturity covers time on both sides of it, the fees in that reading are split by time.
-  - Fees earned up to that index belong to YT holders, who can claim them at any time
+  - Fees earned up to that index belong to YT holders, who can claim them after maturity whatever anyone else has done
   - Fees earned after it belong to PT holders
 - **Redeem (at/after maturity)**: Users burn only PT to receive VST back, plus the fees the vault earned on that VST since maturity. No YT is needed.
 - Deploys new PT and YT contracts for each maturity period

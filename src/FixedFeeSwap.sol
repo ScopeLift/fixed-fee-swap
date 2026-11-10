@@ -21,7 +21,8 @@ import {FeeTracking} from "src/lib/FeeTracking.sol";
 ///    the switch once, at the first action at or after `MATURITY` (or a call to `settle`). It
 ///    records the vault fee index at `MATURITY`, interpolating by time when the first reading
 ///    after maturity covers time on both sides of it.
-///  - YT holders earn vault fees up to that index and can claim them at any time. PT holders earn
+///  - YT holders earn vault fees up to that index and can claim them after maturity whatever anyone
+///    else has done. PT holders earn
 ///    every fee after it, paid per PT when they redeem, and need no YT to redeem after maturity.
 ///  - The split by time assumes fees accrued evenly between the last checkpoint and settlement.
 ///    Anyone can shrink that window by calling `collectFeesToYT` shortly before maturity and
@@ -139,14 +140,6 @@ contract FixedFeeSwap {
   /// @notice The last vault fee indexes credited to YT holders, and when they were read.
   VstFeeCheckpoint public vstFeeCheckpoint;
 
-  /// @notice The vault's token0 fee index at maturity. YT earns up to it and PT earns after it.
-  /// @dev Zero until `settled()`.
-  uint256 public maturityFeeIndex0Scaled;
-
-  /// @notice The vault's token1 fee index at maturity. YT earns up to it and PT earns after it.
-  /// @dev Zero until `settled()`.
-  uint256 public maturityFeeIndex1Scaled;
-
   /// @notice Token0 fees credited to YT holders and not yet paid to them.
   /// @dev Held back from PT redeemers, so PT can't be paid fees that YT holders earned.
   uint256 public yieldTokenFeesOwed0;
@@ -259,14 +252,14 @@ contract FixedFeeSwap {
     if (_maturityReached) {
       // Settles first if nobody has yet, so the fees paid here start at the maturity index.
       (uint256 _feeIndex0Now, uint256 _feeIndex1Now) = _syncFees();
+      // Burns the PT before paying, so the payout can't be re-entered with the same PT.
+      PRINCIPAL_TOKEN.burn(msg.sender, _amount);
       _payFeesEarnedAfterMaturity(msg.sender, _amount, _feeIndex0Now, _feeIndex1Now);
     } else {
       // Burning YT claims its fees, which syncs fees through `collectFeesToYT`.
       _claimAndBurnYieldTokens(msg.sender, _amount);
+      PRINCIPAL_TOKEN.burn(msg.sender, _amount);
     }
-
-    // Burn PT tokens (always required)
-    PRINCIPAL_TOKEN.burn(msg.sender, _amount);
 
     // Transfer VaultShareToken from the hook to the caller
     _vstAmount = _amount;
@@ -290,6 +283,20 @@ contract FixedFeeSwap {
     if (block.timestamp < MATURITY) revert FixedFeeSwap_BeforeMaturity();
     if (settled()) return;
     _syncFees();
+  }
+
+  /// @notice The vault's token0 fee index at maturity. YT earns up to it and PT earns after it.
+  /// @return The index, or zero until `settled()`. Settlement leaves it in the checkpoint, which
+  /// never moves again.
+  function maturityFeeIndex0Scaled() public view returns (uint256) {
+    return settled() ? vstFeeCheckpoint.feeIndex0LastScaled : 0;
+  }
+
+  /// @notice The vault's token1 fee index at maturity. YT earns up to it and PT earns after it.
+  /// @return The index, or zero until `settled()`. Settlement leaves it in the checkpoint, which
+  /// never moves again.
+  function maturityFeeIndex1Scaled() public view returns (uint256) {
+    return settled() ? vstFeeCheckpoint.feeIndex1LastScaled : 0;
   }
 
   /// @notice Whether the contract has recorded the vault fee indexes at maturity.
@@ -389,11 +396,11 @@ contract FixedFeeSwap {
     VAULT_SHARE_TOKEN.claim(address(this));
 
     uint256 _feeToken0Amount = Math.min(
-      _feesEarnedAfterMaturity(_amount, _feeIndex0Now, maturityFeeIndex0Scaled),
+      _feesEarnedAfterMaturity(_amount, _feeIndex0Now, vstFeeCheckpoint.feeIndex0LastScaled),
       _balanceNotOwedToYieldToken(FEE_TOKEN0, yieldTokenFeesOwed0)
     );
     uint256 _feeToken1Amount = Math.min(
-      _feesEarnedAfterMaturity(_amount, _feeIndex1Now, maturityFeeIndex1Scaled),
+      _feesEarnedAfterMaturity(_amount, _feeIndex1Now, vstFeeCheckpoint.feeIndex1LastScaled),
       _balanceNotOwedToYieldToken(FEE_TOKEN1, yieldTokenFeesOwed1)
     );
 
@@ -483,11 +490,10 @@ contract FixedFeeSwap {
     uint256 _maturityIndex1 =
       _interpolateToMaturity(_checkpoint.feeIndex1LastScaled, _feeIndex1Now, _checkpoint.timestamp);
 
-    maturityFeeIndex0Scaled = _maturityIndex0;
-    maturityFeeIndex1Scaled = _maturityIndex1;
     emit Settled(_maturityIndex0, _maturityIndex1);
 
-    // Also moves the checkpoint time to `MATURITY`, which marks the contract settled.
+    // Leaves the maturity indexes in the checkpoint and moves its time to `MATURITY`, which marks
+    // the contract settled.
     _creditYieldTokenUpTo(_maturityIndex0, _maturityIndex1, MATURITY);
   }
 
@@ -534,9 +540,26 @@ contract FixedFeeSwap {
     uint256 _newFees1 = Math.mulDiv(_yieldTokenSupply, _deltaIndex1, FeeTracking.PRECISION);
     if (_newFees0 == 0 && _newFees1 == 0) return;
 
-    yieldTokenFeesOwed0 += _newFees0;
-    yieldTokenFeesOwed1 += _newFees1;
+    yieldTokenFeesOwed0 += _claimableByYieldTokenHolders(_newFees0, _yieldTokenSupply);
+    yieldTokenFeesOwed1 += _claimableByYieldTokenHolders(_newFees1, _yieldTokenSupply);
     YIELD_TOKEN.updateFees(_newFees0, _newFees1);
+  }
+
+  /// @notice How much of `_fees` YT holders can claim once YieldToken adds them to its fee index.
+  /// @param _fees The fees credited to YT.
+  /// @param _yieldTokenSupply The YT supply they're spread over.
+  /// @return The fees YieldToken's index accounts for after rounding its increase down. Only this
+  /// much is held back from PT, so YieldToken's rounding dust isn't reserved forever.
+  function _claimableByYieldTokenHolders(uint256 _fees, uint256 _yieldTokenSupply)
+    internal
+    pure
+    returns (uint256)
+  {
+    return Math.mulDiv(
+      Math.mulDiv(_fees, FeeTracking.PRECISION, _yieldTokenSupply),
+      _yieldTokenSupply,
+      FeeTracking.PRECISION
+    );
   }
 
   /// @notice Accepts native ETH sent by the VaultShareToken when claiming fees.
