@@ -282,8 +282,9 @@ contract FixedFeeSwap {
   /// @notice Records the vault fee indexes at maturity, which switches vault fees from YT holders
   /// to PT holders.
   /// @dev
-  ///  - Callable by anyone at or after maturity. Every other action after maturity settles first
-  ///    too, so calling this is optional; it lets anyone fix the switch close to maturity.
+  ///  - Callable by anyone at or after maturity. Every redeem, YT claim and `collectFeesToYT`
+  ///    after maturity also settles first, so calling this is optional; it lets anyone fix the
+  ///    switch close to maturity.
   ///  - Does nothing once the contract has settled.
   function settle() external {
     if (block.timestamp < MATURITY) revert FixedFeeSwap_BeforeMaturity();
@@ -310,7 +311,7 @@ contract FixedFeeSwap {
     _syncFees();
 
     // Claim fees from the vault into this contract; YT will call transferFeesToUser to pay users
-    _claimVaultFees();
+    VAULT_SHARE_TOKEN.claim(address(this));
   }
 
   /// @notice Transfers fee tokens directly to a user. Called by YieldToken during fee claims.
@@ -320,16 +321,15 @@ contract FixedFeeSwap {
   /// @dev
   ///  - Can only be called by the YieldToken contract.
   ///  - Pays at most this hook's balance of each token. YT is credited only with fees the hook's
-  /// VST earned, so any shortfall is rounding dust from the vault's accounting, and capping it
-  /// keeps
-  ///    a YT claim from reverting over it.
+  ///    VST earned, so any shortfall is rounding dust from the vault's accounting. Capping it keeps
+  ///    a YT claim from reverting over dust.
   function transferFeesToUser(address _user, uint256 _amount0, uint256 _amount1) external {
     if (msg.sender != address(YIELD_TOKEN)) revert FixedFeeSwap_NotAuthorized();
 
     _amount0 = Math.min(_amount0, _getTokenBalance(FEE_TOKEN0));
     _amount1 = Math.min(_amount1, _getTokenBalance(FEE_TOKEN1));
-    yieldTokenFeesOwed0 -= Math.min(_amount0, yieldTokenFeesOwed0);
-    yieldTokenFeesOwed1 -= Math.min(_amount1, yieldTokenFeesOwed1);
+    yieldTokenFeesOwed0 = Math.saturatingSub(yieldTokenFeesOwed0, _amount0);
+    yieldTokenFeesOwed1 = Math.saturatingSub(yieldTokenFeesOwed1, _amount1);
 
     if (_amount0 > 0) _transferFeeToken(FEE_TOKEN0, _user, _amount0);
     if (_amount1 > 0) _transferFeeToken(FEE_TOKEN1, _user, _amount1);
@@ -386,7 +386,7 @@ contract FixedFeeSwap {
     uint256 _feeIndex0Now,
     uint256 _feeIndex1Now
   ) internal {
-    _claimVaultFees();
+    VAULT_SHARE_TOKEN.claim(address(this));
 
     uint256 _feeToken0Amount = Math.min(
       _feesEarnedAfterMaturity(_amount, _feeIndex0Now, maturityFeeIndex0Scaled),
@@ -401,14 +401,6 @@ contract FixedFeeSwap {
     if (_feeToken1Amount > 0) _transferFeeToken(FEE_TOKEN1, _user, _feeToken1Amount);
 
     emit FeesClaimed(_user, FEE_TOKEN0, FEE_TOKEN1, _feeToken0Amount, _feeToken1Amount);
-  }
-
-  /// @notice Claims this hook's fees from the vault into it.
-  /// @dev Has the vault collect its pool fees first, so the tokens behind the vault's fee indexes
-  /// are in the vault when it pays this hook.
-  function _claimVaultFees() internal {
-    VAULT_SHARE_TOKEN.collectFees();
-    VAULT_SHARE_TOKEN.claim(address(this));
   }
 
   /// @notice The fees `_amount` VST earned between the maturity index and the current index.
@@ -433,8 +425,7 @@ contract FixedFeeSwap {
     view
     returns (uint256)
   {
-    uint256 _balance = _getTokenBalance(_token);
-    return _balance > _owedToYieldToken ? _balance - _owedToYieldToken : 0;
+    return Math.saturatingSub(_getTokenBalance(_token), _owedToYieldToken);
   }
 
   /// @notice Gets the balance of a token in the contract.

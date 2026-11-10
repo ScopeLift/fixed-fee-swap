@@ -403,28 +403,11 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   }
 
   /// @notice Collects accumulated fees from all positions without modifying liquidity.
-  /// @dev
-  ///  - Callable by anyone. Fees are kept in the vault and distributed to share holders.
-  ///  - While the PoolManager is already unlocked it can't unlock again, so it only records the
-  ///    fees in the fee indexes and returns zero.
+  /// @dev Callable by anyone. Fees are kept in the vault and distributed to share holders.
   /// @return _collectedFee0 The amount of token0 fees collected.
   /// @return _collectedFee1 The amount of token1 fees collected.
-  function collectFees()
-    external
-    virtual
-    override
-    returns (uint256 _collectedFee0, uint256 _collectedFee1)
-  {
-    // Sync fee accounting before physically collecting tokens from the pool.
-    _syncFees();
-    if (TransientStateLibrary.isUnlocked(POOL_MANAGER)) return (0, 0);
-
-    bytes memory _result =
-      POOL_MANAGER.unlock(abi.encode(CallbackAction.CollectFees, abi.encode("")));
-
-    (_collectedFee0, _collectedFee1) = abi.decode(_result, (uint256, uint256));
-
-    emit FeesCollected(_collectedFee0, _collectedFee1);
+  function collectFees() external virtual returns (uint256 _collectedFee0, uint256 _collectedFee1) {
+    (_collectedFee0, _collectedFee1) = _collectFees();
   }
 
   /// @inheritdoc VaultShareToken
@@ -441,6 +424,38 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     if (_action == CallbackAction.Deposit) return _handleDepositCallback(_actionData);
     if (_action == CallbackAction.Withdraw) return _handleWithdrawCallback(_actionData);
     return _handleCollectFeesCallback();
+  }
+
+  /// @notice Records the positions' fees in the fee indexes and moves them from the pool into the
+  /// vault.
+  /// @return _collectedFee0 The amount of token0 fees collected.
+  /// @return _collectedFee1 The amount of token1 fees collected.
+  /// @dev While the PoolManager is already unlocked, collects inside that unlock instead of
+  /// unlocking again; the vault's own deltas net to zero either way.
+  function _collectFees() internal returns (uint256 _collectedFee0, uint256 _collectedFee1) {
+    // Sync fee accounting before physically collecting tokens from the pool.
+    _syncFees();
+
+    bytes memory _result = TransientStateLibrary.isUnlocked(POOL_MANAGER)
+      ? _handleCollectFeesCallback()
+      : POOL_MANAGER.unlock(abi.encode(CallbackAction.CollectFees, abi.encode("")));
+
+    (_collectedFee0, _collectedFee1) = abi.decode(_result, (uint256, uint256));
+
+    emit FeesCollected(_collectedFee0, _collectedFee1);
+  }
+
+  /// @inheritdoc VaultShareToken
+  /// @dev Collects the positions' fees from the pool first. Syncing the fee indexes counts fees
+  /// still in the PoolManager, so without collecting, the vault could be paying a claim with tokens
+  /// it doesn't hold yet.
+  function _claim(address _user)
+    internal
+    override
+    returns (uint256 _claimedToken0, uint256 _claimedToken1)
+  {
+    _collectFees();
+    (_claimedToken0, _claimedToken1) = super._claim(_user);
   }
 
   /// @inheritdoc VaultShareToken
@@ -528,6 +543,8 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
   {
     for (uint256 _i = 0; _i < positions.length; _i++) {
       LiquidityPosition memory _position = positions[_i];
+      // An empty position has no fees to collect, and v4 rejects a zero change to it.
+      if (_position.liquidity == 0) continue;
 
       (, BalanceDelta _feeDelta) = POOL_MANAGER.modifyLiquidity(
         targetPoolKey,

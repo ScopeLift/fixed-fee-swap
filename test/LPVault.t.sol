@@ -9,6 +9,7 @@ import {LPVault} from "src/LPVault.sol";
 import {FixedFeeSwap} from "src/FixedFeeSwap.sol";
 import {LPVaultHarness} from "test/harness/LPVaultHarness.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {IUnlockCallback} from "v4-core/interfaces/callback/IUnlockCallback.sol";
 import {ImmutableState} from "v4-periphery/src/base/ImmutableState.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {Currency} from "v4-core/types/Currency.sol";
@@ -1023,6 +1024,28 @@ contract Withdraw is LPVaultTest {
 }
 
 contract CollectFees is LPVaultTest {
+  function testFuzz_ClaimPaysAccruedFeesAfterEveryShareIsWithdrawn(
+    uint256 _swapAbs0,
+    uint256 _swapAbs1
+  ) public {
+    address _initializer = makeAddr("initializer");
+    (uint256 _shares,,) = _initializeLiquidity(_initializer);
+    _performSwap(true, _boundSwapAbs(_swapAbs0));
+    _performSwap(false, _boundSwapAbs(_swapAbs1));
+    vm.prank(_initializer);
+    vault.withdraw(_shares, _initializer);
+    (,, uint256 _accrued0, uint256 _accrued1) = vault.userFees(_initializer);
+    MockERC20 _token0 = MockERC20(Currency.unwrap(currency0));
+    MockERC20 _token1 = MockERC20(Currency.unwrap(currency1));
+    uint256 _token0Before = _token0.balanceOf(_initializer);
+    uint256 _token1Before = _token1.balanceOf(_initializer);
+
+    vault.claim(_initializer);
+
+    assertEq(_token0.balanceOf(_initializer), _token0Before + _accrued0);
+    assertEq(_token1.balanceOf(_initializer), _token1Before + _accrued1);
+  }
+
   function _collectFeesAndAssertVaultDelta()
     internal
     returns (uint256 _collectedFee0, uint256 _collectedFee1)
@@ -1472,18 +1495,63 @@ contract CollectFees is LPVaultTest {
   }
 }
 
+// Calls `collectFeesToYT` on a FixedFeeSwap from inside a PoolManager unlock, as a router that
+// combines a v4 action with FixedFeeSwap would.
+contract CollectFeesToYTInsideUnlock is IUnlockCallback {
+  IPoolManager internal immutable POOL_MANAGER;
+  FixedFeeSwap internal immutable FIXED_FEE_SWAP;
+
+  constructor(IPoolManager _poolManager, FixedFeeSwap _fixedFeeSwap) {
+    POOL_MANAGER = _poolManager;
+    FIXED_FEE_SWAP = _fixedFeeSwap;
+  }
+
+  function collectFeesToYTInsideUnlock() external {
+    POOL_MANAGER.unlock("");
+  }
+
+  function unlockCallback(bytes calldata) external returns (bytes memory) {
+    FIXED_FEE_SWAP.collectFeesToYT();
+    return "";
+  }
+}
+
 contract FixedFeeSwapOnTheVault is LPVaultTest {
+  // Splits every share `_initializeLiquidity` mints for `_splitter` into PT and YT, so FixedFeeSwap
+  // holds nearly all of the vault, and returns the new FixedFeeSwap and the share count.
+  function _splitInitialShares(address _splitter)
+    internal
+    returns (FixedFeeSwap _fixedFeeSwap, uint256 _shares)
+  {
+    (_shares,,) = _initializeLiquidity(_splitter);
+    _fixedFeeSwap = new FixedFeeSwap(vault, block.timestamp + 30 days);
+    vm.startPrank(_splitter);
+    vault.approve(address(_fixedFeeSwap), _shares);
+    _fixedFeeSwap.deposit(_shares);
+    vm.stopPrank();
+  }
+
+  function testFuzz_CollectsFeesToYTFromInsideAnUnlock(uint256 _swapAbs0, uint256 _swapAbs1)
+    public
+  {
+    (FixedFeeSwap _fixedFeeSwap,) = _splitInitialShares(makeAddr("splitter"));
+    CollectFeesToYTInsideUnlock _router = new CollectFeesToYTInsideUnlock(manager, _fixedFeeSwap);
+    // The swaps earn the vault's positions fees, which stay in the PoolManager until the vault
+    // collects them.
+    _performSwap(true, _boundSwapAbs(_swapAbs0));
+    _performSwap(false, _boundSwapAbs(_swapAbs1));
+
+    _router.collectFeesToYTInsideUnlock();
+
+    assertGt(MockERC20(Currency.unwrap(currency0)).balanceOf(address(_fixedFeeSwap)), 0);
+  }
+
   function testFuzz_PaysYieldTokenFeesTheVaultHasNotCollectedYet(
     uint256 _swapAbs0,
     uint256 _swapAbs1
   ) public {
     address _splitter = makeAddr("splitter");
-    (uint256 _shares,,) = _initializeLiquidity(_splitter);
-    FixedFeeSwap _fixedFeeSwap = new FixedFeeSwap(vault, block.timestamp + 30 days);
-    vm.startPrank(_splitter);
-    vault.approve(address(_fixedFeeSwap), _shares);
-    _fixedFeeSwap.deposit(_shares);
-    vm.stopPrank();
+    (FixedFeeSwap _fixedFeeSwap, uint256 _shares) = _splitInitialShares(_splitter);
     // The swaps earn the vault's positions fees, which stay in the PoolManager until the vault
     // collects them.
     _performSwap(true, _boundSwapAbs(_swapAbs0));
