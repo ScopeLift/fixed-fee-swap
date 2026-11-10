@@ -133,7 +133,7 @@ The market uses "ticks" that represent yield rates (similar to interest rates). 
 - Provide liquidity across specific yield ranges (similar to concentrated liquidity in Uniswap v3)
 - Earn a share of trading fees proportional to your liquidity
 - Choose your yield range based on where you expect trading activity
-- Add liquidity from one second after the market starts: in the block that deploys the market no time has elapsed to price it, so mints and increases revert
+- Add liquidity from one second after the market starts: at the deploy block's timestamp no time has elapsed to price it, so mints and increases revert
 - Deposits round up and withdrawals round down, so removing liquidity never pays out more than adding the same liquidity cost at that time or earlier
 
 **Key features:**

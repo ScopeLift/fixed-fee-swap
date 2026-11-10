@@ -151,9 +151,10 @@ contract FixedFeeSwapMarket is BaseHook {
 
   /// @notice Upper bound, in wei, on how far `expWad` can be from the exact value for inputs at
   /// or below zero
-  /// @dev Solady documents `expWad` only as an approximation. Measured over the inputs LP
-  /// accounting uses, it is at most about 1.001 wei low and 0.012 wei high, so 2 wei bounds the
-  /// error either way.
+  /// @dev Solady documents `expWad` only as an approximation. Against exact values for about 1.2
+  /// million inputs spread over the whole range where it returns nonzero, (-41.45e18, 0], it was at
+  /// most about 1.001 wei low and 0.012 wei high, so 2 wei bounds the error either way. Below that
+  /// range it returns 0 for a true value under 0.5 wei.
   uint256 constant EXP_WAD_MAX_ERROR = 2;
 
   // ============ Immutables ============
@@ -1062,9 +1063,10 @@ contract FixedFeeSwapMarket is BaseHook {
   /// cash component decreases over time, ensuring the contract always holds enough cash to
   /// cover withdrawals. Swap pricing uses remaining-time independently.
   /// amount = liquidity * (priceLower - priceUpper) / scaledTimeElapsed
-  /// Every step rounds in the pool's favor: a mint pays at least the exact amount and a burn
-  /// receives at most the exact amount at the current time, so burning never returns more cash
-  /// than the same liquidity cost to mint at the same time or earlier.
+  /// Every step after the scaled elapsed time rounds in the pool's favor: a mint pays at least,
+  /// and a burn receives at most, the exact amount for that scaled time. The scaled time never
+  /// decreases and the exact amount falls as it grows, so burning never returns more cash than the
+  /// same liquidity cost to mint at the same time or earlier.
   /// Reverts with `FixedFeeSwapMarket_NoTimeElapsed` at START_TIME.
   /// @param _lowerYield The lower tick boundary of the range, at least 0
   /// @param _upperYield The upper tick boundary of the range
@@ -1102,27 +1104,26 @@ contract FixedFeeSwapMarket is BaseHook {
     return (_elapsed * WAD) / _duration;
   }
 
-  /// @notice Bounds the elapsed-time price exp(-yield / BIPS * scaledTimeElapsed) used for LP
+  /// @notice Bounds the elapsed-time price exp(-tick / BIPS * scaledTimeElapsed) used for LP
   /// accounting from above or below
-  /// @dev Rounds the exponent toward the requested side, then widens the result by
-  /// `EXP_WAD_MAX_ERROR` to cover the approximation error of `expWad`. A lower bound stops at 0.
-  /// @param _yield The yield in basis points, at least 0
+  /// @dev LP accounting reads the tick as a yield in basis points. `_priceFromYieldWad` rounds the
+  /// exponent toward zero, which for a tick at or above 0 can only raise the price, and by at most
+  /// 1 wei because the price is at most 1e18. Widening by that and by `EXP_WAD_MAX_ERROR` covers
+  /// every rounding step. A lower bound stops at 0.
+  /// @param _tick The tick boundary, at least 0. Callers pass a position's ticks, which
+  /// `mintLiquidity` keeps at or above 0, or the current tick inside such a position.
   /// @param _scaledTime The scaled elapsed time
   /// @param _roundUp True for a price at or above the exact one, false for one at or below it
   /// @return The discount factor price in WAD
-  function _priceElapsed(int24 _yield, uint256 _scaledTime, bool _roundUp)
+  function _priceElapsed(int24 _tick, uint256 _scaledTime, bool _roundUp)
     internal
     pure
     returns (uint256)
   {
-    uint256 _yieldWad = uint256(uint24(_yield)) * WAD;
-    // A smaller exponent magnitude gives a higher price.
-    uint256 _exponentWad = _roundUp
-      ? FixedPointMathLib.mulDiv(_yieldWad, _scaledTime, BIPS * WAD)
-      : FixedPointMathLib.mulDivUp(_yieldWad, _scaledTime, BIPS * WAD);
-    uint256 _price = uint256((-int256(_exponentWad)).expWad());
+    uint256 _price = uint256(_priceFromYieldWad(int256(_tick) * int256(WAD), _scaledTime));
     if (_roundUp) return _price + EXP_WAD_MAX_ERROR;
-    return _price > EXP_WAD_MAX_ERROR ? _price - EXP_WAD_MAX_ERROR : 0;
+    uint256 _maxOverestimate = EXP_WAD_MAX_ERROR + 1;
+    return _price > _maxOverestimate ? _price - _maxOverestimate : 0;
   }
 
   // ============ Internal Functions - Fee Tracking ============
