@@ -570,9 +570,8 @@ contract FixedFeeSwapMarket is BaseHook {
   }
 
   /// @notice Returns whether the current tick has reached the swap's tick limit
-  /// @dev For principal→cash swaps the tick increases, so the limit is reached at or above it.
-  /// For
-  ///      cash→principal swaps the tick decreases, so the limit is reached at or below it.
+  /// @dev A principal→cash swap raises the tick, so it reaches the limit at or above it. A
+  ///      cash→principal swap lowers the tick, so it reaches the limit at or below it.
   /// @param _ctx Swap context containing the direction and tick limit
   /// @return Whether the swap must stop
   function _tickLimitReached(SwapContext memory _ctx) internal view returns (bool) {
