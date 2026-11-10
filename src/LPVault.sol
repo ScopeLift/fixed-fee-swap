@@ -847,9 +847,9 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
         uint256 _feeGrowthInside1LastX128 = checkpoint.feeGrowthInside1LastX128;
 
         // Compute growth deltas since last checkpoint. Uniswap's fee growth inside a range is
-        // only meaningful modulo 2^256: it starts near 2^256 when the range's ticks were
-        // initialized at different fee growth, and later wraps past zero. Subtract without
-        // overflow checks so the delta stays correct across the wrap, as v4's `Position` does.
+        // only meaningful modulo 2^256: depending on when the range's ticks were initialized, it
+        // can start near 2^256 and later wrap past zero. Subtract without overflow checks so the
+        // delta stays correct across the wrap, as v4's `Position` does.
         uint256 _deltaFeeGrowth0X128;
         uint256 _deltaFeeGrowth1X128;
         unchecked {
