@@ -168,9 +168,9 @@ contract YieldToken is ERC20, IFeeTrackingToken {
   /// @param _user The address to claim fees for.
   /// @return _claimedToken0 Amount of `FEE_TOKEN_0` that was transferred.
   /// @return _claimedToken1 Amount of `FEE_TOKEN_1` that was transferred.
-  /// @dev
-  ///      - Syncs fees via FixedFeeSwap.collectFeesToYT, then transfers fees from FixedFeeSwap to
-  /// the user. - Reverts if YT fee collection is already closed.
+  /// @dev Syncs fees via FixedFeeSwap.collectFeesToYT, then transfers fees from FixedFeeSwap to
+  /// the user. After maturity the sync credits nothing new, so this pays what the user's YT earned
+  /// up to maturity.
   function _claim(address _user) internal returns (uint256 _claimedToken0, uint256 _claimedToken1) {
     IFixedFeeSwap(FIXED_FEE_SWAP).collectFeesToYT();
 

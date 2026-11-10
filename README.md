@@ -71,9 +71,10 @@ The core contract that enables splitting VaultShareTokens into Principal and Yie
 
 - **Deposit**: Before maturity, users can deposit VST and receive 1:1 PT and YT
 - **Redeem (before maturity)**: Users must burn equal amounts of PT and YT to receive VST back
-- **Redeem (at/after maturity)**:
-  - The first redeem at or after maturity still requires PT + YT (this closes YT fee collection via `ytFeeCollectionClosed`)
-  - Subsequent redeems only require PT; fees accrued after maturity are distributed proportionally to PT holders
+- **Settlement at maturity**: The first action at or after maturity, or a call to the permissionless `settle()`, records the vault fee index at maturity. When the first reading after maturity covers time on both sides of it, the fees in that reading are split by time.
+  - Fees earned up to that index belong to YT holders, who can claim them at any time
+  - Fees earned after it belong to PT holders
+- **Redeem (at/after maturity)**: Users burn only PT to receive VST back, plus the fees the vault earned on that VST since maturity. No YT is needed.
 - Deploys new PT and YT contracts for each maturity period
 
 #### PrincipalToken
@@ -90,7 +91,8 @@ An ERC20 token representing the right to fees earned by the underlying LP positi
 
 - Tracks and distributes fees using the same cumulative index model as VaultShareToken
 - Fees are automatically claimed when tokens are burned
-- After maturity, holders can claim remaining fees and burn their YT via `claimYTFeesAfterMaturity()`
+- Earns fees up to maturity and nothing after it
+- After maturity, holders can claim the fees their YT earned and burn it via `claimYTFeesAfterMaturity()`, whatever other holders have done
 - Can only be minted/burned by the FixedFeeSwap contract
 
 #### FeeTracking Library

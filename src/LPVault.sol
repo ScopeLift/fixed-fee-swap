@@ -417,6 +417,13 @@ contract LPVault is VaultShareToken, SafeCallback, DeltaResolver {
     emit FeesCollected(_collectedFee0, _collectedFee1);
   }
 
+  /// @inheritdoc VaultShareToken
+  /// @dev Callable by anyone. Updates the fee indexes from the positions' fee growth without
+  /// collecting tokens from the pool, so it works while the PoolManager is unlocked.
+  function syncFees() external override {
+    _syncFees();
+  }
+
   /// @inheritdoc SafeCallback
   function _unlockCallback(bytes calldata _data) internal virtual override returns (bytes memory) {
     (CallbackAction _action, bytes memory _actionData) = abi.decode(_data, (CallbackAction, bytes));
