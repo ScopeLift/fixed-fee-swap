@@ -110,8 +110,32 @@ A shared library implementing the cumulative "fee-per-share" index model for pro
 
 A helper contract for buying and selling YT tokens using flash loans.
 
-- **Sell YT**: Flash loan PT, combine with YT to redeem VST, swap portion back to PT to repay loan
-- **Buy YT**: Flash loan PT, swap for VST, deposit to get PT+YT, repay loan with PT, keep YT
+- **Sell YT**: `sellYieldToken(ytAmount, vstForBuyback, minVstOut, deadline)`. Flash loan PT,
+  combine with YT to redeem VST, and swap `vstForBuyback` of it back to PT to repay the loan. The
+  seller gets the VST left and any PT beyond the loan.
+- **Buy YT**: `buyYieldToken(vstAmount, ptLoan, minYtOut, deadline)`. Flash loan `ptLoan` PT, swap
+  it for VST, deposit to get PT+YT, repay the loan with PT, and keep the YT. The buyer gets the YT
+  and any PT left after repaying, including PT the market didn't take.
+
+The market only swaps an exact input and has no quote function, so the caller sizes each swap.
+Simulate the swap off-chain against the current market state. The market pulls the input from its
+caller, so `eth_call` the swap from the Zapper's address with state overrides that give it the input
+and allowance, or search with `eth_call` over the zap itself:
+
+- For a sale, `vstForBuyback` is the least VST whose `swap(vstForBuyback, false, 0)` returns at
+  least `ytAmount` PT. It must be at most `ytAmount`, the VST that redeeming gives; a sale whose
+  buyback needs more can't be done. The market fills only whole ticks, so this can happen for some
+  small sales. The PT price rises toward par every second, so a buyback sized exactly can fall a
+  tick short if the sale lands in a later block. Add a small margin, such as 0.01%. The market can
+  keep it, so it is the seller's slippage tolerance.
+- For a purchase, `ptLoan` is a PT amount whose `swap(ptLoan, true, 0)` returns VST out and takes
+  PT in such that `vstAmount + vstOut >= ptIn`; PT the market leaves untaken counts toward
+  repayment. The buyer gets `vstAmount + vstOut` in YT, so the loan with the most VST out buys the
+  most, and any PT left after repaying is refunded. `minYtOut` doesn't bound that refund.
+
+A zap reverts if the market moves before it runs so that the sized swap can no longer repay the
+loan, if its output is below `minVstOut` or `minYtOut`, if it runs after `deadline`, or if it runs at
+or after maturity.
 
 #### FixedFeeSwapMarket
 
@@ -207,8 +231,8 @@ The market uses "ticks" that represent yield rates (similar to interest rates). 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                                 Zapper                                      │
 │                                                                             │
-│  sellYieldToken(YT) ────► Flash loan PT ────► Redeem ────► Swap ────► VST  │
-│  buyYieldToken(VST) ────► Flash loan PT ────► Swap ────► Deposit ────► YT  │
+│  sellYieldToken(YT, …) ───► Flash loan PT ───► Redeem ───► Swap ────► VST  │
+│  buyYieldToken(VST, …) ───► Flash loan PT ───► Swap ───► Deposit ────► YT  │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```

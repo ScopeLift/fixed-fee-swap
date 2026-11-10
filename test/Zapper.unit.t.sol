@@ -68,6 +68,40 @@ contract ZapperTest is Test {
   /// @notice YT sold, or VST spent, by each zap through the real market.
   uint256 internal constant MARKET_ZAP_AMOUNT = 1000e18;
 
+  /// @notice PT the real market trades per tick across the LP's range: `LP_LIQUIDITY` times one
+  /// bip of yield.
+  uint256 internal constant MARKET_PRINCIPAL_PER_TICK = LP_LIQUIDITY / 10_000;
+
+  /// @notice The real market's fee denominator; `MARKET_FEE_RATE` is in these units.
+  uint256 internal constant MARKET_FEE_DENOMINATOR = 1_000_000;
+
+  /// @notice The last tick of the tick bitmap word holding `MARKET_INITIAL_TICK` (ticks 256 to
+  /// 511). A PT-for-cash swap step stops there, and the market then takes nothing more that moves
+  /// less than a whole tick.
+  int24 internal constant MARKET_WORD_EDGE_TICK = 511;
+
+  /// @notice How close, in wei, the sizing helpers search for the best swap size. A caller doesn't
+  /// need wei precision, and each step of the search is a simulated swap.
+  uint256 internal constant SIZING_PRECISION = 1e12;
+
+  /// @notice The fewest YT a fuzzed sale through the real market sells.
+  /// @dev The market fills cash for PT in whole ticks of `LP_LIQUIDITY` (200 PT each), so the
+  /// buyback can overshoot the loan by up to a tick. From this amount on, the VST that redeeming
+  /// gives always covers that overshoot. Smaller sales can be sized only for some amounts.
+  uint256 internal constant MARKET_MIN_SALE = 5000e18;
+
+  /// @notice The most YT a fuzzed sale through the real market sells, so its buyback stays well
+  /// inside the cash the LP's range holds.
+  uint256 internal constant MARKET_MAX_SALE = 50_000e18;
+
+  /// @notice The least VST a fuzzed purchase through the real market spends, so its loan can sell
+  /// at least one whole tick, the market's smallest fill.
+  uint256 internal constant MARKET_MIN_PURCHASE = 10e18;
+
+  /// @notice The most VST a fuzzed purchase through the real market spends. Its loan is about 20
+  /// times this, which keeps the sale inside the PT the LP's range can take.
+  uint256 internal constant MARKET_MAX_PURCHASE = 4000e18;
+
   function setUp() public virtual {
     // Underlying fee tokens for the VaultShareToken
     token0 = new ERC20Mock("Token 0", "T0");
@@ -174,6 +208,26 @@ contract ZapperTest is Test {
     _zapper = new Zapper(_fixedFeeSwap, FixedFeeSwapMarket(address(_market)));
   }
 
+  // The spot-sized buyback for a sale of `_ytAmount` YT through `_zapper`, whose market must be a
+  // FixedFeeSwapMarketMock, at that mock's price.
+  function _spotVstForBuybackOnMock(Zapper _zapper, uint256 _ytAmount)
+    internal
+    view
+    returns (uint256)
+  {
+    FixedFeeSwapMarketMock _market =
+      FixedFeeSwapMarketMock(address(_zapper.FIXED_FEE_SWAP_MARKET()));
+    return _spotVstForBuyback(_ytAmount, uint256(_market.mockPrice()));
+  }
+
+  // The spot-sized loan for a purchase with `_vstAmount` VST through `_zapper`, whose market must
+  // be a FixedFeeSwapMarketMock, at that mock's price.
+  function _spotPtLoanOnMock(Zapper _zapper, uint256 _vstAmount) internal view returns (uint256) {
+    FixedFeeSwapMarketMock _market =
+      FixedFeeSwapMarketMock(address(_zapper.FIXED_FEE_SWAP_MARKET()));
+    return _spotPtLoan(_vstAmount, uint256(_market.mockPrice()));
+  }
+
   // Mints `_amount` vault shares to `_holder`, splits them, and approves `_zapper` to take the YT.
   function _splitAndApproveZapper(
     VaultShareTokenHarness _vst,
@@ -218,6 +272,131 @@ contract ZapperTest is Test {
     vm.stopPrank();
   }
 
+  // The VST that buys back `_ytAmount` PT at a spot `_price`, as the old Zapper sized it, rounded
+  // up. The mock fills at exactly its set price, so this covers the loan there; the real market's
+  // fee and price impact make it fall short.
+  function _spotVstForBuyback(uint256 _ytAmount, uint256 _price) internal pure returns (uint256) {
+    return Math.mulDiv(_ytAmount, _price, FeeTracking.PRECISION, Math.Rounding.Ceil);
+  }
+
+  // The PT loan `_vstAmount / (1 - _price)` at a spot `_price`, as the old Zapper sized it, rounded
+  // down. The mock's sale of it repays the loan; the real market's sale falls short.
+  function _spotPtLoan(uint256 _vstAmount, uint256 _price) internal pure returns (uint256) {
+    return Math.mulDiv(_vstAmount, FeeTracking.PRECISION, FeeTracking.PRECISION - _price);
+  }
+
+  // The real market's live spot price, from its current tick at the current time. Its
+  // `getCurrentPrice` returns the price stored at the last swap, which goes stale as time passes.
+  function _marketSpotPrice() internal view returns (uint256) {
+    return uint256(market.tickToPrice(market.getCurrentTick()));
+  }
+
+  // Mints `LP_LIQUIDITY` in the real market, then has `user` split `_ytAmount` vault shares and
+  // approve `marketZapper` to take the YT.
+  function _setUpMarketSale(uint256 _ytAmount) internal {
+    _mintMarketLiquidity();
+    _mintVstAndDepositForUser(user, _ytAmount);
+    YieldToken _yt = fixedFeeSwap.YIELD_TOKEN();
+    vm.prank(user);
+    _yt.approve(address(marketZapper), _ytAmount);
+  }
+
+  // Mints `LP_LIQUIDITY` in the real market, then mints `_vstAmount` vault shares to `user` and
+  // approves `marketZapper` to take them.
+  function _setUpMarketPurchase(uint256 _vstAmount) internal {
+    _mintMarketLiquidity();
+    VaultShareTokenHarness(address(vaultShareToken)).exposed_mint(user, _vstAmount);
+    vm.prank(user);
+    vaultShareToken.approve(address(marketZapper), _vstAmount);
+  }
+
+  // Funds `_trader` with `_amountIn` PT or VST, minted rather than dealt so supplies stay
+  // consistent, and swaps it on the real market. Returns the market's amounts.
+  function _fundAndSwapOnMarket(address _trader, uint256 _amountIn, bool _principalForCash)
+    internal
+    returns (uint256 _amountInUsed, uint256 _amountOut)
+  {
+    if (_principalForCash) {
+      PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
+      vm.prank(address(fixedFeeSwap));
+      _pt.mint(_trader, _amountIn);
+    } else {
+      VaultShareTokenHarness(address(vaultShareToken)).exposed_mint(_trader, _amountIn);
+    }
+    vm.startPrank(_trader);
+    IERC20(address(fixedFeeSwap.PRINCIPAL_TOKEN())).approve(address(market), _amountIn);
+    vaultShareToken.approve(address(market), _amountIn);
+    (_amountInUsed, _amountOut) = market.swap(_amountIn, _principalForCash, 0);
+    vm.stopPrank();
+  }
+
+  // Runs a trial swap on the real market and rolls the state back, as an off-chain caller would
+  // with `eth_call`. Returns what the swap would consume and pay out from the current state.
+  function _simulateMarketSwap(uint256 _amountIn, bool _principalForCash)
+    internal
+    returns (uint256 _amountInUsed, uint256 _amountOut)
+  {
+    uint256 _snapshot = vm.snapshotState();
+    (_amountInUsed, _amountOut) =
+      _fundAndSwapOnMarket(makeAddr("simulator"), _amountIn, _principalForCash);
+    vm.revertToStateAndDelete(_snapshot);
+  }
+
+  // Sizes a sale of `_ytAmount` YT the way an off-chain caller would: a binary search over
+  // simulated swaps for the least VST, to within `SIZING_PRECISION`, whose PT out covers the loan,
+  // which leaves the seller the most VST. The search starts above the old Zapper's spot sizing,
+  // which always falls short. Fails the test if even all `_ytAmount` VST from redeeming can't buy
+  // back the loan.
+  function _simulateVstForBuyback(uint256 _ytAmount) internal returns (uint256) {
+    (, uint256 _maxPrincipalOut) = _simulateMarketSwap(_ytAmount, false);
+    assertGe(_maxPrincipalOut, _ytAmount, "the sale can't buy back its loan");
+    uint256 _low = _spotVstForBuyback(_ytAmount, _marketSpotPrice());
+    uint256 _high = _ytAmount;
+    while (_high - _low > SIZING_PRECISION) {
+      uint256 _mid = (_low + _high) / 2;
+      (, uint256 _principalOut) = _simulateMarketSwap(_mid, false);
+      if (_principalOut >= _ytAmount) _high = _mid;
+      else _low = _mid;
+    }
+    return _high;
+  }
+
+  // Sizes a purchase with `_vstAmount` VST the way an off-chain caller would, and returns the loan
+  // and the YT it buys. The YT is `_vstAmount` plus the sale's VST out, so the largest loan the
+  // purchase can repay buys the most YT. The market pays whole ticks, so PT beyond the last whole
+  // tick buys nothing; the loan is then cut to the least PT that gets the same VST, and the PT
+  // saved is refunded to the buyer.
+  function _simulatePtLoan(uint256 _vstAmount)
+    internal
+    returns (uint256 _ptLoan, uint256 _ytBought)
+  {
+    // Starts at the old Zapper's spot sizing, which at a fresh price is usually more than the sale
+    // repays, and replaces the loan with what its sale repays until the sale repays it. The loan
+    // only falls, and every loan whose sale repays it stays below, so when the spot loan is too
+    // much this ends at the largest. When the spot loan already repays, it is kept as is.
+    // PT the market leaves untaken also counts toward repayment, so a caller could borrow a little
+    // more; this sizing doesn't need to.
+    uint256 _spotPrice = _marketSpotPrice();
+    _ptLoan = _spotPtLoan(_vstAmount, _spotPrice);
+    (, uint256 _vstOut) = _simulateMarketSwap(_ptLoan, true);
+    while (_vstAmount + _vstOut < _ptLoan) {
+      _ptLoan = _vstAmount + _vstOut;
+      (, _vstOut) = _simulateMarketSwap(_ptLoan, true);
+    }
+    _ytBought = _vstAmount + _vstOut;
+
+    // Binary search for the least PT, to within `SIZING_PRECISION`, that sells for the same VST.
+    uint256 _low = 0;
+    uint256 _high = _ptLoan;
+    while (_high - _low > SIZING_PRECISION) {
+      uint256 _mid = (_low + _high) / 2;
+      (, uint256 _midVstOut) = _simulateMarketSwap(_mid, true);
+      if (_midVstOut >= _vstOut) _high = _mid;
+      else _low = _mid;
+    }
+    _ptLoan = _high;
+  }
+
   /// @notice Helper function to set up fees on YT.
   /// @param _feeToken0 Amount of token0 fees to add.
   /// @param _feeToken1 Amount of token1 fees to add.
@@ -248,7 +427,7 @@ contract Constructor is ZapperTest {
 contract SellYieldToken is ZapperTest {
   function testFuzz_TransfersYTFromUserToZapper(uint256 _ytAmount, uint256 _mockPrice) public {
     _ytAmount = _boundToRealisticAmount(_ytAmount);
-    _boundAndSetMockPrice(_mockPrice);
+    _mockPrice = _boundAndSetMockPrice(_mockPrice);
 
     // Deposit VST to get PT and YT for the user
     _depositVstForUser(user, _ytAmount);
@@ -267,7 +446,7 @@ contract SellYieldToken is ZapperTest {
 
     // Execute sell
     vm.prank(user);
-    zapper.sellYieldToken(_ytAmount);
+    zapper.sellYieldToken(_ytAmount, _spotVstForBuyback(_ytAmount, _mockPrice), 0, block.timestamp);
 
     // Verify user has no YT after sell
     uint256 _userYTAfter = _yt.balanceOf(user);
@@ -296,7 +475,7 @@ contract SellYieldToken is ZapperTest {
 
     // Execute sell
     vm.prank(user);
-    zapper.sellYieldToken(_ytAmount);
+    zapper.sellYieldToken(_ytAmount, _spotVstForBuyback(_ytAmount, _mockPrice), 0, block.timestamp);
 
     // User should receive VST (amount depends on price)
     uint256 _userVSTAfter = vaultShareToken.balanceOf(user);
@@ -315,7 +494,7 @@ contract SellYieldToken is ZapperTest {
     public
   {
     _ytAmount = _boundToRealisticAmount(_ytAmount);
-    _boundAndSetMockPrice(_mockPrice);
+    _mockPrice = _boundAndSetMockPrice(_mockPrice);
 
     // Deposit VST to get PT and YT for the user
     _depositVstForUser(user, _ytAmount);
@@ -330,7 +509,7 @@ contract SellYieldToken is ZapperTest {
 
     // Execute sell
     vm.prank(user);
-    zapper.sellYieldToken(_ytAmount);
+    zapper.sellYieldToken(_ytAmount, _spotVstForBuyback(_ytAmount, _mockPrice), 0, block.timestamp);
 
     // Zapper should have no remaining VST
     assertEq(
@@ -350,7 +529,7 @@ contract SellYieldToken is ZapperTest {
   function testFuzz_EmitsYieldTokenSoldEvent(uint256 _ytAmount, uint256 _mockPrice) public {
     // Minimum 1e18 so profit survives integer rounding at any price
     _ytAmount = bound(_ytAmount, 1e18, 1e24);
-    _boundAndSetMockPrice(_mockPrice);
+    _mockPrice = _boundAndSetMockPrice(_mockPrice);
 
     // Deposit VST to get PT and YT for the user
     _depositVstForUser(user, _ytAmount);
@@ -368,12 +547,12 @@ contract SellYieldToken is ZapperTest {
     emit Zapper.YieldTokenSold(user, 0, 0);
 
     vm.prank(user);
-    zapper.sellYieldToken(_ytAmount);
+    zapper.sellYieldToken(_ytAmount, _spotVstForBuyback(_ytAmount, _mockPrice), 0, block.timestamp);
   }
 
   function testFuzz_FlashLoanIsRepaidSuccessfully(uint256 _ytAmount, uint256 _mockPrice) public {
     _ytAmount = _boundToRealisticAmount(_ytAmount);
-    _boundAndSetMockPrice(_mockPrice);
+    _mockPrice = _boundAndSetMockPrice(_mockPrice);
 
     // Deposit VST to get PT and YT for the user
     _depositVstForUser(user, _ytAmount);
@@ -388,28 +567,157 @@ contract SellYieldToken is ZapperTest {
 
     // Execute sell - if flash loan isn't repaid, this would revert
     vm.prank(user);
-    zapper.sellYieldToken(_ytAmount);
+    zapper.sellYieldToken(_ytAmount, _spotVstForBuyback(_ytAmount, _mockPrice), 0, block.timestamp);
 
     // If we reach here, flash loan was repaid successfully (no revert)
     assertTrue(true, "Flash loan was repaid successfully (no revert)");
   }
 
-  function test_RevertIf_AmountIsZero() public {
+  function testFuzz_RevertIf_AmountIsZero(uint256 _vstForBuyback) public {
     vm.expectRevert(Zapper.Zapper_InvalidAmount.selector);
-    zapper.sellYieldToken(0);
+    zapper.sellYieldToken(0, _vstForBuyback, 0, block.timestamp);
+  }
+
+  function testFuzz_RevertIf_VstForBuybackIsZero(uint256 _ytAmount) public {
+    _ytAmount = bound(_ytAmount, 1, type(uint256).max);
+    vm.expectRevert(Zapper.Zapper_InvalidAmount.selector);
+    zapper.sellYieldToken(_ytAmount, 0, 0, block.timestamp);
+  }
+
+  function testFuzz_RevertIf_VstForBuybackIsMoreThanTheAmount(
+    uint256 _ytAmount,
+    uint256 _vstForBuyback
+  ) public {
+    _ytAmount = bound(_ytAmount, 1, type(uint256).max - 1);
+    _vstForBuyback = bound(_vstForBuyback, _ytAmount + 1, type(uint256).max);
+    vm.expectRevert(Zapper.Zapper_InvalidAmount.selector);
+    zapper.sellYieldToken(_ytAmount, _vstForBuyback, 0, block.timestamp);
+  }
+
+  function testFuzz_RevertIf_DeadlineHasPassed(uint256 _ytAmount, uint256 _deadline) public {
+    _ytAmount = _boundToRealisticAmount(_ytAmount);
+    _deadline = bound(_deadline, 0, block.timestamp - 1);
+    uint256 _vstForBuyback = _spotVstForBuybackOnMock(zapper, _ytAmount);
+
+    vm.expectRevert(Zapper.Zapper_DeadlineExpired.selector);
+    vm.prank(user);
+    zapper.sellYieldToken(_ytAmount, _vstForBuyback, 0, _deadline);
   }
 
   function test_SellsYieldTokensThroughTheRealMarket() public {
-    _mintMarketLiquidity();
-    _mintVstAndDepositForUser(user, MARKET_ZAP_AMOUNT);
-    YieldToken _yt = fixedFeeSwap.YIELD_TOKEN();
-    vm.prank(user);
-    _yt.approve(address(marketZapper), MARKET_ZAP_AMOUNT);
+    _setUpMarketSale(MARKET_ZAP_AMOUNT);
+    uint256 _vstForBuyback = _simulateVstForBuyback(MARKET_ZAP_AMOUNT);
+    (uint256 _vstUsed,) = _simulateMarketSwap(_vstForBuyback, false);
+    // The minimum is exactly the VST the sale leaves.
+    uint256 _vstLeft = MARKET_ZAP_AMOUNT - _vstUsed;
 
     vm.prank(user);
-    marketZapper.sellYieldToken(MARKET_ZAP_AMOUNT);
+    marketZapper.sellYieldToken(MARKET_ZAP_AMOUNT, _vstForBuyback, _vstLeft, block.timestamp);
 
-    assertEq(_yt.balanceOf(user), 0);
+    assertEq(fixedFeeSwap.YIELD_TOKEN().balanceOf(user), 0);
+    assertEq(vaultShareToken.balanceOf(user), _vstLeft);
+  }
+
+  function testFuzz_SellsInALaterBlockWithAPaddedBuybackThroughTheRealMarket(
+    uint256 _ytAmount,
+    uint256 _delay
+  ) public {
+    _ytAmount = bound(_ytAmount, MARKET_MIN_SALE, MARKET_MAX_SALE);
+    // From one block to an hour after sizing; the PT price rises toward par throughout.
+    _delay = bound(_delay, 1, 1 hours);
+    _setUpMarketSale(_ytAmount);
+    // Sized as the docs advise: the simulated buyback plus a 0.01% margin.
+    uint256 _vstForBuyback = _simulateVstForBuyback(_ytAmount);
+    _vstForBuyback += _vstForBuyback / 10_000;
+    vm.warp(block.timestamp + _delay);
+
+    vm.prank(user);
+    marketZapper.sellYieldToken(_ytAmount, _vstForBuyback, 0, block.timestamp);
+
+    assertEq(fixedFeeSwap.YIELD_TOKEN().balanceOf(user), 0);
+  }
+
+  function testFuzz_PaysTheSellerTheVstTheBuybackLeavesThroughTheRealMarket(uint256 _ytAmount)
+    public
+  {
+    _ytAmount = bound(_ytAmount, MARKET_MIN_SALE, MARKET_MAX_SALE);
+    _setUpMarketSale(_ytAmount);
+    uint256 _vstForBuyback = _simulateVstForBuyback(_ytAmount);
+    (uint256 _vstUsed,) = _simulateMarketSwap(_vstForBuyback, false);
+
+    vm.prank(user);
+    marketZapper.sellYieldToken(_ytAmount, _vstForBuyback, 0, block.timestamp);
+
+    assertEq(vaultShareToken.balanceOf(user), _ytAmount - _vstUsed);
+    assertEq(vaultShareToken.balanceOf(address(marketZapper)), 0);
+  }
+
+  function testFuzz_PaysTheSellerThePrincipalTheBuybackReturnsBeyondTheLoanThroughTheRealMarket(uint256 _ytAmount)
+    public
+  {
+    _ytAmount = bound(_ytAmount, MARKET_MIN_SALE, MARKET_MAX_SALE);
+    _setUpMarketSale(_ytAmount);
+    uint256 _vstForBuyback = _simulateVstForBuyback(_ytAmount);
+    (, uint256 _principalOut) = _simulateMarketSwap(_vstForBuyback, false);
+    PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
+    uint256 _userPrincipalBefore = _pt.balanceOf(user);
+
+    vm.prank(user);
+    marketZapper.sellYieldToken(_ytAmount, _vstForBuyback, 0, block.timestamp);
+
+    assertEq(_pt.balanceOf(user) - _userPrincipalBefore, _principalOut - _ytAmount);
+    assertEq(_pt.balanceOf(address(marketZapper)), 0);
+  }
+
+  function testFuzz_RevertIf_BuybackReturnsLessPrincipalThanTheLoan(uint256 _ytAmount) public {
+    _ytAmount = bound(_ytAmount, MARKET_MIN_SALE, MARKET_MAX_SALE);
+    _setUpMarketSale(_ytAmount);
+    // The old Zapper's spot sizing: the fee and price impact make it buy back less than the loan.
+    uint256 _vstForBuyback = _spotVstForBuyback(_ytAmount, _marketSpotPrice());
+    (, uint256 _principalOut) = _simulateMarketSwap(_vstForBuyback, false);
+
+    vm.expectRevert(
+      abi.encodeWithSelector(
+        Zapper.Zapper_InsufficientPrincipalToRepay.selector, _principalOut, _ytAmount
+      )
+    );
+    vm.prank(user);
+    marketZapper.sellYieldToken(_ytAmount, _vstForBuyback, 0, block.timestamp);
+  }
+
+  function testFuzz_RevertIf_VstLeftIsBelowTheMinimum(uint256 _ytAmount, uint256 _minVstOut)
+    public
+  {
+    _ytAmount = bound(_ytAmount, MARKET_MIN_SALE, MARKET_MAX_SALE);
+    _setUpMarketSale(_ytAmount);
+    uint256 _vstForBuyback = _simulateVstForBuyback(_ytAmount);
+    (uint256 _vstUsed,) = _simulateMarketSwap(_vstForBuyback, false);
+    uint256 _vstLeft = _ytAmount - _vstUsed;
+    _minVstOut = bound(_minVstOut, _vstLeft + 1, type(uint256).max);
+
+    vm.expectRevert(
+      abi.encodeWithSelector(Zapper.Zapper_InsufficientOutput.selector, _vstLeft, _minVstOut)
+    );
+    vm.prank(user);
+    marketZapper.sellYieldToken(_ytAmount, _vstForBuyback, _minVstOut, block.timestamp);
+  }
+
+  function testFuzz_RevertIf_AFrontRunRaisesThePrincipalPriceAfterTheSaleIsSized(
+    uint256 _ytAmount,
+    uint256 _frontRunVst
+  ) public {
+    _ytAmount = bound(_ytAmount, MARKET_MIN_SALE, MARKET_MAX_SALE);
+    // More than a tick's worth of VST (about 191) after the fee, so the front-run moves the price;
+    // at most a size that keeps the market inside the LP's range.
+    _frontRunVst = bound(_frontRunVst, 200e18, 20_000e18);
+    _setUpMarketSale(_ytAmount);
+    uint256 _vstForBuyback = _simulateVstForBuyback(_ytAmount);
+    // A sandwich's first leg: someone buys PT between the simulation and the sale.
+    _fundAndSwapOnMarket(makeAddr("frontRunner"), _frontRunVst, false);
+
+    vm.expectPartialRevert(Zapper.Zapper_InsufficientPrincipalToRepay.selector);
+    vm.prank(user);
+    marketZapper.sellYieldToken(_ytAmount, _vstForBuyback, 0, block.timestamp);
   }
 
   function testFuzz_PaysTheSellerTheFeesTheirYieldTokensEarned(
@@ -421,7 +729,7 @@ contract SellYieldToken is ZapperTest {
     // fee of at least 1e18 raises the vault fee index on every share.
     _ytAmount = bound(_ytAmount, 1e18, 1e24);
     _feeToken0 = bound(_feeToken0, 1e18, type(uint128).max);
-    _boundAndSetMockPrice(_mockPrice);
+    _mockPrice = _boundAndSetMockPrice(_mockPrice);
     _mintVstAndDepositForUser(user, _ytAmount);
     // The user's YT earns fees, and nothing syncs them into YT before the sale.
     _accrueVaultFees(_feeToken0);
@@ -434,7 +742,7 @@ contract SellYieldToken is ZapperTest {
     _yt.approve(address(zapper), _ytAmount);
 
     vm.prank(user);
-    zapper.sellYieldToken(_ytAmount);
+    zapper.sellYieldToken(_ytAmount, _spotVstForBuyback(_ytAmount, _mockPrice), 0, block.timestamp);
 
     // YieldToken rounds its fee index down by up to 1 per 1e18 shares.
     assertApproxEqAbs(token0.balanceOf(user), _earnedByUser, _ytAmount / FeeTracking.PRECISION + 2);
@@ -456,9 +764,10 @@ contract SellYieldToken is ZapperTest {
     uint256 _earnedByUser = Math.mulDiv(
       _ytAmount, Math.mulDiv(_feeEth, FeeTracking.PRECISION, _ytAmount), FeeTracking.PRECISION
     );
+    uint256 _vstForBuyback = _spotVstForBuybackOnMock(_zapper, _ytAmount);
 
     vm.prank(user);
-    _zapper.sellYieldToken(_ytAmount);
+    _zapper.sellYieldToken(_ytAmount, _vstForBuyback, 0, block.timestamp);
 
     // YieldToken rounds its fee index down by up to 1 per 1e18 shares.
     assertApproxEqAbs(user.balance, _earnedByUser, _ytAmount / FeeTracking.PRECISION + 2);
@@ -483,8 +792,10 @@ contract SellYieldToken is ZapperTest {
     vm.prank(user);
     _yieldToken.approve(address(zapper), _sellAmount);
 
+    uint256 _vstForBuyback = _spotVstForBuybackOnMock(zapper, _sellAmount);
+
     vm.prank(user);
-    zapper.sellYieldToken(_sellAmount);
+    zapper.sellYieldToken(_sellAmount, _vstForBuyback, 0, block.timestamp);
 
     // YieldToken rounds its fee index down by up to 1 per 1e18 shares.
     assertApproxEqAbs(token0.balanceOf(user), _earnedByUser, _ytAmount / FeeTracking.PRECISION + 2);
@@ -505,8 +816,10 @@ contract SellYieldToken is ZapperTest {
     vm.deal(address(_vstWithEth), _feeEth);
     _vstWithEth.exposed_updateFees(_feeEth, 0);
 
+    uint256 _vstForBuyback = _spotVstForBuybackOnMock(_zapper, _ytAmount);
+
     vm.prank(_seller);
-    _zapper.sellYieldToken(_ytAmount);
+    _zapper.sellYieldToken(_ytAmount, _vstForBuyback, 0, block.timestamp);
 
     (,, uint256 _stillAccrued0,) = _fixedFeeSwap.YIELD_TOKEN().userFees(_seller);
     assertGt(_stillAccrued0, 0);
@@ -533,8 +846,10 @@ contract SellYieldToken is ZapperTest {
     vm.deal(address(_vstWithEth), _feeEth);
     _vstWithEth.exposed_updateFees(_feeEth, 0);
 
+    uint256 _vstForBuyback = _spotVstForBuybackOnMock(_zapper, _ytAmount);
+
     vm.prank(user);
-    _zapper.sellYieldToken(_ytAmount);
+    _zapper.sellYieldToken(_ytAmount, _vstForBuyback, 0, block.timestamp);
 
     assertEq(address(_zapper).balance, 0);
     assertGt(user.balance, 0);
@@ -549,11 +864,12 @@ contract SellYieldToken is ZapperTest {
     YieldToken _yieldToken = fixedFeeSwap.YIELD_TOKEN();
     vm.prank(user);
     _yieldToken.approve(address(zapper), _ytAmount);
+    uint256 _vstForBuyback = _spotVstForBuybackOnMock(zapper, _ytAmount);
     vm.warp(maturity + _secondsAfterMaturity);
 
     vm.expectRevert(Zapper.Zapper_AfterMaturity.selector);
     vm.prank(user);
-    zapper.sellYieldToken(_ytAmount);
+    zapper.sellYieldToken(_ytAmount, _vstForBuyback, 0, block.timestamp);
   }
 
   function testFuzz_RevertIf_TheSellerHasNotApprovedTheZapperForItsYieldTokens(uint256 _ytAmount)
@@ -561,6 +877,7 @@ contract SellYieldToken is ZapperTest {
   {
     _ytAmount = _boundToRealisticAmount(_ytAmount);
     _mintVstAndDepositForUser(user, _ytAmount);
+    uint256 _vstForBuyback = _spotVstForBuybackOnMock(zapper, _ytAmount);
 
     vm.expectRevert(
       abi.encodeWithSelector(
@@ -568,14 +885,14 @@ contract SellYieldToken is ZapperTest {
       )
     );
     vm.prank(user);
-    zapper.sellYieldToken(_ytAmount);
+    zapper.sellYieldToken(_ytAmount, _vstForBuyback, 0, block.timestamp);
   }
 }
 
 contract BuyYieldToken is ZapperTest {
   function testFuzz_TransfersVSTFromUserToZapper(uint256 _vstAmount, uint256 _mockPrice) public {
     _vstAmount = _boundToRealisticAmount(_vstAmount);
-    _boundAndSetMockPrice(_mockPrice);
+    _mockPrice = _boundAndSetMockPrice(_mockPrice);
 
     // Give user VST
     deal(address(vaultShareToken), user, _vstAmount);
@@ -590,7 +907,7 @@ contract BuyYieldToken is ZapperTest {
 
     // Execute buy
     vm.prank(user);
-    zapper.buyYieldToken(_vstAmount);
+    zapper.buyYieldToken(_vstAmount, _spotPtLoan(_vstAmount, _mockPrice), 0, block.timestamp);
 
     // User should have spent all VST
     uint256 _userVSTAfter = vaultShareToken.balanceOf(user);
@@ -602,7 +919,7 @@ contract BuyYieldToken is ZapperTest {
 
   function testFuzz_UserReceivesYTAfterBuy(uint256 _vstAmount, uint256 _mockPrice) public {
     _vstAmount = _boundToRealisticAmount(_vstAmount);
-    _boundAndSetMockPrice(_mockPrice);
+    _mockPrice = _boundAndSetMockPrice(_mockPrice);
 
     // Give user VST
     deal(address(vaultShareToken), user, _vstAmount);
@@ -618,7 +935,7 @@ contract BuyYieldToken is ZapperTest {
 
     // Execute buy
     vm.prank(user);
-    zapper.buyYieldToken(_vstAmount);
+    zapper.buyYieldToken(_vstAmount, _spotPtLoan(_vstAmount, _mockPrice), 0, block.timestamp);
 
     // User should receive YT
     uint256 _userYTAfter = _yt.balanceOf(user);
@@ -640,7 +957,7 @@ contract BuyYieldToken is ZapperTest {
   ) public {
     _vstAmount1 = bound(_vstAmount1, 1e18, type(uint64).max);
     _vstAmount2 = bound(_vstAmount2, 1e18, type(uint64).max);
-    _boundAndSetMockPrice(_mockPrice);
+    _mockPrice = _boundAndSetMockPrice(_mockPrice);
     vm.assume(_vstAmount1 != _vstAmount2);
 
     address _user1 = makeAddr("user1");
@@ -658,10 +975,10 @@ contract BuyYieldToken is ZapperTest {
 
     // Execute buys
     vm.prank(_user1);
-    zapper.buyYieldToken(_vstAmount1);
+    zapper.buyYieldToken(_vstAmount1, _spotPtLoan(_vstAmount1, _mockPrice), 0, block.timestamp);
 
     vm.prank(_user2);
-    zapper.buyYieldToken(_vstAmount2);
+    zapper.buyYieldToken(_vstAmount2, _spotPtLoan(_vstAmount2, _mockPrice), 0, block.timestamp);
 
     // Get YT received
     YieldToken _yt = fixedFeeSwap.YIELD_TOKEN();
@@ -677,7 +994,7 @@ contract BuyYieldToken is ZapperTest {
     public
   {
     _vstAmount = _boundToRealisticAmount(_vstAmount);
-    _boundAndSetMockPrice(_mockPrice);
+    _mockPrice = _boundAndSetMockPrice(_mockPrice);
 
     // Give user VST
     deal(address(vaultShareToken), user, _vstAmount);
@@ -688,7 +1005,7 @@ contract BuyYieldToken is ZapperTest {
 
     // Execute buy
     vm.prank(user);
-    zapper.buyYieldToken(_vstAmount);
+    zapper.buyYieldToken(_vstAmount, _spotPtLoan(_vstAmount, _mockPrice), 0, block.timestamp);
 
     // Zapper should have no remaining VST
     assertEq(
@@ -698,11 +1015,15 @@ contract BuyYieldToken is ZapperTest {
     // Zapper should have no remaining YT (all transferred to user)
     YieldToken _yt = fixedFeeSwap.YIELD_TOKEN();
     assertEq(_yt.balanceOf(address(zapper)), 0, "Zapper should have no remaining YT after buy");
+
+    // Zapper should have no remaining PT (any left after repaying goes to the user)
+    PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
+    assertEq(_pt.balanceOf(address(zapper)), 0, "Zapper should have no remaining PT after buy");
   }
 
   function testFuzz_EmitsYieldTokenBoughtEvent(uint256 _vstAmount, uint256 _mockPrice) public {
     _vstAmount = _boundToRealisticAmount(_vstAmount);
-    _boundAndSetMockPrice(_mockPrice);
+    _mockPrice = _boundAndSetMockPrice(_mockPrice);
 
     // Give user VST
     deal(address(vaultShareToken), user, _vstAmount);
@@ -716,12 +1037,12 @@ contract BuyYieldToken is ZapperTest {
     emit Zapper.YieldTokenBought(user, 0, 0);
 
     vm.prank(user);
-    zapper.buyYieldToken(_vstAmount);
+    zapper.buyYieldToken(_vstAmount, _spotPtLoan(_vstAmount, _mockPrice), 0, block.timestamp);
   }
 
   function testFuzz_FlashLoanIsRepaidSuccessfully(uint256 _vstAmount, uint256 _mockPrice) public {
     _vstAmount = _boundToRealisticAmount(_vstAmount);
-    _boundAndSetMockPrice(_mockPrice);
+    _mockPrice = _boundAndSetMockPrice(_mockPrice);
 
     // Give user VST
     deal(address(vaultShareToken), user, _vstAmount);
@@ -732,28 +1053,175 @@ contract BuyYieldToken is ZapperTest {
 
     // Execute buy - if flash loan isn't repaid, this would revert
     vm.prank(user);
-    zapper.buyYieldToken(_vstAmount);
+    zapper.buyYieldToken(_vstAmount, _spotPtLoan(_vstAmount, _mockPrice), 0, block.timestamp);
 
     // If we reach here, flash loan was repaid successfully
     assertTrue(true, "Flash loan was repaid successfully (no revert)");
   }
 
-  function test_RevertIf_AmountIsZero() public {
+  function testFuzz_RevertIf_AmountIsZero(uint256 _ptLoan) public {
     vm.expectRevert(Zapper.Zapper_InvalidAmount.selector);
-    zapper.buyYieldToken(0);
+    zapper.buyYieldToken(0, _ptLoan, 0, block.timestamp);
+  }
+
+  function testFuzz_RevertIf_PtLoanIsZero(uint256 _vstAmount) public {
+    _vstAmount = bound(_vstAmount, 1, type(uint256).max);
+    vm.expectRevert(Zapper.Zapper_InvalidAmount.selector);
+    zapper.buyYieldToken(_vstAmount, 0, 0, block.timestamp);
+  }
+
+  function testFuzz_RevertIf_BoughtAtOrAfterMaturity(
+    uint256 _vstAmount,
+    uint256 _secondsAfterMaturity
+  ) public {
+    _vstAmount = _boundToRealisticAmount(_vstAmount);
+    _secondsAfterMaturity = bound(_secondsAfterMaturity, 0, 365 days);
+    uint256 _ptLoan = _spotPtLoanOnMock(zapper, _vstAmount);
+    deal(address(vaultShareToken), user, _vstAmount);
+    vm.prank(user);
+    vaultShareToken.approve(address(zapper), _vstAmount);
+    vm.warp(maturity + _secondsAfterMaturity);
+
+    vm.expectRevert(Zapper.Zapper_AfterMaturity.selector);
+    vm.prank(user);
+    zapper.buyYieldToken(_vstAmount, _ptLoan, 0, block.timestamp);
+  }
+
+  function testFuzz_RevertIf_DeadlineHasPassed(uint256 _vstAmount, uint256 _deadline) public {
+    _vstAmount = _boundToRealisticAmount(_vstAmount);
+    _deadline = bound(_deadline, 0, block.timestamp - 1);
+    uint256 _ptLoan = _spotPtLoanOnMock(zapper, _vstAmount);
+
+    vm.expectRevert(Zapper.Zapper_DeadlineExpired.selector);
+    vm.prank(user);
+    zapper.buyYieldToken(_vstAmount, _ptLoan, 0, _deadline);
   }
 
   function test_BuysYieldTokensThroughTheRealMarket() public {
-    _mintMarketLiquidity();
-    VaultShareTokenHarness(address(vaultShareToken)).exposed_mint(user, MARKET_ZAP_AMOUNT);
-    vm.prank(user);
-    vaultShareToken.approve(address(marketZapper), MARKET_ZAP_AMOUNT);
+    _setUpMarketPurchase(MARKET_ZAP_AMOUNT);
+    (uint256 _ptLoan, uint256 _ytBought) = _simulatePtLoan(MARKET_ZAP_AMOUNT);
 
     vm.prank(user);
-    marketZapper.buyYieldToken(MARKET_ZAP_AMOUNT);
+    marketZapper.buyYieldToken(MARKET_ZAP_AMOUNT, _ptLoan, _ytBought, block.timestamp);
 
     // Leverage: the buyer gets more YT than the VST it spent.
     assertGt(fixedFeeSwap.YIELD_TOKEN().balanceOf(user), MARKET_ZAP_AMOUNT);
+  }
+
+  function testFuzz_PaysTheBuyerTheSimulatedYieldTokensThroughTheRealMarket(uint256 _vstAmount)
+    public
+  {
+    _vstAmount = bound(_vstAmount, MARKET_MIN_PURCHASE, MARKET_MAX_PURCHASE);
+    _setUpMarketPurchase(_vstAmount);
+    (uint256 _ptLoan, uint256 _ytBought) = _simulatePtLoan(_vstAmount);
+
+    vm.prank(user);
+    marketZapper.buyYieldToken(_vstAmount, _ptLoan, 0, block.timestamp);
+
+    assertEq(fixedFeeSwap.YIELD_TOKEN().balanceOf(user), _ytBought);
+    assertEq(vaultShareToken.balanceOf(address(marketZapper)), 0);
+  }
+
+  function test_RefundsThePrincipalTheMarketLeavesUntakenThroughTheRealMarket() public {
+    _setUpMarketPurchase(MARKET_ZAP_AMOUNT);
+    // A loan that, after the fee, reaches the word edge and goes half a tick further. The market
+    // stops at the edge and leaves the half tick untaken.
+    uint256 _ptToWordEdge = Math.mulDiv(
+      uint256(int256(MARKET_WORD_EDGE_TICK - MARKET_INITIAL_TICK)) * MARKET_PRINCIPAL_PER_TICK,
+      MARKET_FEE_DENOMINATOR,
+      MARKET_FEE_DENOMINATOR - MARKET_FEE_RATE,
+      Math.Rounding.Ceil
+    );
+    uint256 _ptLoan = _ptToWordEdge + MARKET_PRINCIPAL_PER_TICK / 2;
+    (uint256 _ptUsed, uint256 _vstOut) = _simulateMarketSwap(_ptLoan, true);
+
+    vm.prank(user);
+    marketZapper.buyYieldToken(MARKET_ZAP_AMOUNT, _ptLoan, 0, block.timestamp);
+
+    assertEq(_ptLoan - _ptUsed, MARKET_PRINCIPAL_PER_TICK / 2);
+    // The split mints the YT bought in PT too; the loan is repaid from that and the untaken PT.
+    PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
+    assertEq(_pt.balanceOf(user), MARKET_ZAP_AMOUNT + _vstOut - _ptUsed);
+    assertEq(_pt.balanceOf(address(marketZapper)), 0);
+  }
+
+  function testFuzz_PaysTheBuyerThePrincipalLeftAfterRepayingTheLoanThroughTheRealMarket(uint256 _vstAmount)
+    public
+  {
+    _vstAmount = bound(_vstAmount, MARKET_MIN_PURCHASE, MARKET_MAX_PURCHASE);
+    _setUpMarketPurchase(_vstAmount);
+    (uint256 _ptLoan, uint256 _ytBought) = _simulatePtLoan(_vstAmount);
+    (uint256 _ptUsed,) = _simulateMarketSwap(_ptLoan, true);
+
+    vm.prank(user);
+    marketZapper.buyYieldToken(_vstAmount, _ptLoan, 0, block.timestamp);
+
+    // The split mints `_ytBought` PT, and the market leaves any PT it didn't take.
+    PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
+    assertEq(_pt.balanceOf(user), _ytBought + (_ptLoan - _ptUsed) - _ptLoan);
+    assertEq(_pt.balanceOf(address(marketZapper)), 0);
+  }
+
+  function testFuzz_RevertIf_SaleOfTheLoanLeavesTooLittlePrincipalToRepay(uint256 _vstAmount)
+    public
+  {
+    // At most half the usual purchase, so twice its spot-sized loan stays inside the LP's range.
+    _vstAmount = bound(_vstAmount, MARKET_MIN_PURCHASE, MARKET_MAX_PURCHASE / 2);
+    _setUpMarketPurchase(_vstAmount);
+    // Twice the old Zapper's spot sizing. The sale fills below spot, so the VST it can't repay is
+    // at least the PT discount on the PT the market takes, about twice `_vstAmount`. That exceeds
+    // `_vstAmount` plus the under one tick of PT the market can leave untaken. The spot sizing
+    // itself can repay for some amounts, when the market leaves enough PT untaken.
+    uint256 _spotPrice = _marketSpotPrice();
+    uint256 _ptLoan = 2 * _spotPtLoan(_vstAmount, _spotPrice);
+    (uint256 _ptUsed, uint256 _vstOut) = _simulateMarketSwap(_ptLoan, true);
+
+    vm.expectRevert(
+      abi.encodeWithSelector(
+        Zapper.Zapper_InsufficientPrincipalToRepay.selector,
+        (_ptLoan - _ptUsed) + _vstAmount + _vstOut,
+        _ptLoan
+      )
+    );
+    vm.prank(user);
+    marketZapper.buyYieldToken(_vstAmount, _ptLoan, 0, block.timestamp);
+  }
+
+  function testFuzz_RevertIf_YieldTokensBoughtAreBelowTheMinimum(
+    uint256 _vstAmount,
+    uint256 _minYtOut
+  ) public {
+    _vstAmount = bound(_vstAmount, MARKET_MIN_PURCHASE, MARKET_MAX_PURCHASE);
+    _setUpMarketPurchase(_vstAmount);
+    (uint256 _ptLoan, uint256 _ytBought) = _simulatePtLoan(_vstAmount);
+    _minYtOut = bound(_minYtOut, _ytBought + 1, type(uint256).max);
+
+    vm.expectRevert(
+      abi.encodeWithSelector(Zapper.Zapper_InsufficientOutput.selector, _ytBought, _minYtOut)
+    );
+    vm.prank(user);
+    marketZapper.buyYieldToken(_vstAmount, _ptLoan, _minYtOut, block.timestamp);
+  }
+
+  function testFuzz_RevertIf_AFrontRunLowersThePrincipalPriceAfterThePurchaseIsSized(uint256 _frontRunPt)
+    public
+  {
+    // More than a tick of PT (200) after the fee, so the front-run moves the price; at most a size
+    // that leaves the purchase's slack able to repay the loan, so the minimum is what stops it.
+    _frontRunPt = bound(_frontRunPt, 250e18, 1000e18);
+    _setUpMarketPurchase(MARKET_ZAP_AMOUNT);
+    // The caller sizes the loan as if it had 1% less VST, so a small price move can't stop the
+    // repayment, and sets the minimum to the YT it simulates.
+    (uint256 _ptLoan,) = _simulatePtLoan(MARKET_ZAP_AMOUNT * 99 / 100);
+    (, uint256 _vstOut) = _simulateMarketSwap(_ptLoan, true);
+    // A sandwich's first leg: someone sells PT between the simulation and the purchase.
+    _fundAndSwapOnMarket(makeAddr("frontRunner"), _frontRunPt, true);
+
+    vm.expectPartialRevert(Zapper.Zapper_InsufficientOutput.selector);
+    vm.prank(user);
+    marketZapper.buyYieldToken(
+      MARKET_ZAP_AMOUNT, _ptLoan, MARKET_ZAP_AMOUNT + _vstOut, block.timestamp
+    );
   }
 }
 
@@ -787,7 +1255,7 @@ contract OnFlashLoan is ZapperTest {
 
   function testFuzz_ReturnsCorrectMagicValue(uint256 _amount, uint256 _mockPrice) public {
     _amount = _boundToRealisticAmount(_amount);
-    _boundAndSetMockPrice(_mockPrice);
+    _mockPrice = _boundAndSetMockPrice(_mockPrice);
 
     // Setup: Deposit VST to get PT and YT
     _depositVstForUser(address(zapper), _amount);
@@ -800,7 +1268,13 @@ contract OnFlashLoan is ZapperTest {
 
     // Call onFlashLoan from PT contract
     vm.prank(address(_pt));
-    bytes32 _returnValue = zapper.onFlashLoan(address(zapper), address(_pt), _amount, 0, "");
+    bytes32 _returnValue = zapper.onFlashLoan(
+      address(zapper),
+      address(_pt),
+      _amount,
+      0,
+      abi.encode(false, _spotVstForBuyback(_amount, _mockPrice))
+    );
 
     // Check return value matches expected magic value
     assertEq(_returnValue, FLASH_LOAN_RETURN_VALUE, "Should return correct magic value");
@@ -808,7 +1282,7 @@ contract OnFlashLoan is ZapperTest {
 
   function testFuzz_SellPathApprovesHookForPTAndYT(uint256 _amount, uint256 _mockPrice) public {
     _amount = _boundToRealisticAmount(_amount);
-    _boundAndSetMockPrice(_mockPrice);
+    _mockPrice = _boundAndSetMockPrice(_mockPrice);
 
     // Setup: Deposit VST to get PT and YT
     _depositVstForUser(address(zapper), _amount);
@@ -832,9 +1306,15 @@ contract OnFlashLoan is ZapperTest {
       "Initial YT approval should be 0"
     );
 
-    // Call onFlashLoan from PT contract (sell path - empty data)
+    // Call onFlashLoan from PT contract (sell path)
     vm.prank(address(_pt));
-    zapper.onFlashLoan(address(zapper), address(_pt), _amount, 0, "");
+    zapper.onFlashLoan(
+      address(zapper),
+      address(_pt),
+      _amount,
+      0,
+      abi.encode(false, _spotVstForBuyback(_amount, _mockPrice))
+    );
 
     // Check approvals after callback - should be at least _amount
     assertGe(
@@ -851,7 +1331,7 @@ contract OnFlashLoan is ZapperTest {
 
   function testFuzz_SellPathApprovesPTForRepayment(uint256 _amount, uint256 _mockPrice) public {
     _amount = _boundToRealisticAmount(_amount);
-    _boundAndSetMockPrice(_mockPrice);
+    _mockPrice = _boundAndSetMockPrice(_mockPrice);
 
     // Setup: Deposit VST to get PT and YT
     _depositVstForUser(address(zapper), _amount);
@@ -869,9 +1349,15 @@ contract OnFlashLoan is ZapperTest {
       "Initial PT self-approval should be 0"
     );
 
-    // Call onFlashLoan from PT contract (sell path - empty data)
+    // Call onFlashLoan from PT contract (sell path)
     vm.prank(address(_pt));
-    zapper.onFlashLoan(address(zapper), address(_pt), _amount, 0, "");
+    zapper.onFlashLoan(
+      address(zapper),
+      address(_pt),
+      _amount,
+      0,
+      abi.encode(false, _spotVstForBuyback(_amount, _mockPrice))
+    );
 
     // Check approval after callback - should be non-zero for repayment
     assertGt(
@@ -883,7 +1369,7 @@ contract OnFlashLoan is ZapperTest {
 
   function testFuzz_BuyPathApprovesVSTForDeposit(uint256 _amount, uint256 _mockPrice) public {
     _amount = _boundToRealisticAmount(_amount);
-    _boundAndSetMockPrice(_mockPrice);
+    _mockPrice = _boundAndSetMockPrice(_mockPrice);
 
     // Get PT contract
     PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
@@ -900,8 +1386,8 @@ contract OnFlashLoan is ZapperTest {
       "Initial VST approval should be 0"
     );
 
-    // Call onFlashLoan from PT contract (buy path - data encodes true)
-    bytes memory _buyData = abi.encode(true);
+    // Call onFlashLoan from PT contract (buy path)
+    bytes memory _buyData = abi.encode(true, 0);
     vm.prank(address(_pt));
     zapper.onFlashLoan(address(zapper), address(_pt), _amount, 0, _buyData);
 
@@ -912,7 +1398,7 @@ contract OnFlashLoan is ZapperTest {
 
   function testFuzz_BuyPathApprovesPTForRepayment(uint256 _amount, uint256 _mockPrice) public {
     _amount = _boundToRealisticAmount(_amount);
-    _boundAndSetMockPrice(_mockPrice);
+    _mockPrice = _boundAndSetMockPrice(_mockPrice);
 
     // Get PT contract
     PrincipalToken _pt = fixedFeeSwap.PRINCIPAL_TOKEN();
@@ -929,8 +1415,8 @@ contract OnFlashLoan is ZapperTest {
       "Initial PT self-approval should be 0"
     );
 
-    // Call onFlashLoan from PT contract (buy path - data encodes true)
-    bytes memory _buyData = abi.encode(true);
+    // Call onFlashLoan from PT contract (buy path)
+    bytes memory _buyData = abi.encode(true, 0);
     vm.prank(address(_pt));
     zapper.onFlashLoan(address(zapper), address(_pt), _amount, 0, _buyData);
 
