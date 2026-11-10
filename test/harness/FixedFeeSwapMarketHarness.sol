@@ -42,6 +42,9 @@ contract FixedFeeSwapMarketHarness is FixedFeeSwapMarket {
     return _getCashSwapAmount(amountIn, price, _liquidity, nextTick, NO_TICK_LIMIT);
   }
 
+  // Prices the first step a real cash-to-PT swap would take from the current tick, which trades
+  // against the liquidity below that tick when it is initialized. Like `exposed_calculateSwap`,
+  // it changes no state, so it does not cross the tick.
   function exposed_getPrincipalSwapAmount(int256 amountIn, int256 price, int24 nextTick)
     external
     returns (uint256, uint256, int256, int24)

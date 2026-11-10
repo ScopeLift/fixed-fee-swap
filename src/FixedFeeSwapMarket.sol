@@ -414,8 +414,6 @@ contract FixedFeeSwapMarket is BaseHook {
   {
     if (_amountIn == 0) revert FixedFeeSwapMarket_SwapAmountCannotBeZero();
     if (block.timestamp >= MATURITY) revert FixedFeeSwapMarket_MarketExpired();
-    (uint128 _firstStepLiquidity,) = _stepLiquidity(!_principalForCash);
-    if (_firstStepLiquidity == 0) revert FixedFeeSwapMarket_NoActiveLiquidity();
     currentPrice = tickToPrice(currentTick);
 
     int24 _effectiveTickLimit = _tickLimit == 0 ? NO_TICK_LIMIT : _tickLimit;
@@ -488,8 +486,6 @@ contract FixedFeeSwapMarket is BaseHook {
       abi.decode(_hookParams, (int256, bool, int24));
     if (_amountIn <= 0) revert FixedFeeSwapMarket_SwapAmountCannotBeZero();
     if (block.timestamp >= MATURITY) revert FixedFeeSwapMarket_MarketExpired();
-    (uint128 _firstStepLiquidity,) = _stepLiquidity(!_principalForCash);
-    if (_firstStepLiquidity == 0) revert FixedFeeSwapMarket_NoActiveLiquidity();
     currentPrice = tickToPrice(currentTick);
 
     (uint256 _amountInUsed, uint256 _amountOutCalculated) =
@@ -524,6 +520,10 @@ contract FixedFeeSwapMarket is BaseHook {
     internal
     returns (uint256 _amountInUsed, uint256 _amountOutCalculated)
   {
+    // The first step trades against the liquidity below the current tick when moving down.
+    (uint128 _firstStepLiquidity,) = _stepLiquidity(!_principalForCash);
+    if (_firstStepLiquidity == 0) revert FixedFeeSwapMarket_NoActiveLiquidity();
+
     uint256 _amountInNet = _netOfFee(_amountInGross);
     uint256 _amountInRemainingNet = _amountInNet;
     SwapContext memory _ctx = SwapContext({
@@ -634,7 +634,7 @@ contract FixedFeeSwapMarket is BaseHook {
     internal
   {
     uint256 _stepFee = FixedPointMathLib.mulDiv(_netConsumed, FEE_RATE, FEE_DENOMINATOR - FEE_RATE);
-    if (_stepFee == 0 || _liquidity == 0) return;
+    if (_stepFee == 0) return;
     uint256 _stepFeeGrowthX128 = FixedPointMathLib.mulDiv(_stepFee, Q128, _liquidity);
     unchecked {
       if (_principalForCash) feeGrowthGlobal0X128 += _stepFeeGrowthX128;
