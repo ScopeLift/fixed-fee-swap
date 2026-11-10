@@ -414,7 +414,6 @@ contract FixedFeeSwapMarket is BaseHook {
   {
     if (_amountIn == 0) revert FixedFeeSwapMarket_SwapAmountCannotBeZero();
     if (block.timestamp >= MATURITY) revert FixedFeeSwapMarket_MarketExpired();
-    if (activeLiquidity == 0) revert FixedFeeSwapMarket_NoActiveLiquidity();
     currentPrice = tickToPrice(currentTick);
 
     int24 _effectiveTickLimit = _tickLimit == 0 ? NO_TICK_LIMIT : _tickLimit;
@@ -487,7 +486,6 @@ contract FixedFeeSwapMarket is BaseHook {
       abi.decode(_hookParams, (int256, bool, int24));
     if (_amountIn <= 0) revert FixedFeeSwapMarket_SwapAmountCannotBeZero();
     if (block.timestamp >= MATURITY) revert FixedFeeSwapMarket_MarketExpired();
-    if (activeLiquidity == 0) revert FixedFeeSwapMarket_NoActiveLiquidity();
     currentPrice = tickToPrice(currentTick);
 
     (uint256 _amountInUsed, uint256 _amountOutCalculated) =
@@ -528,25 +526,26 @@ contract FixedFeeSwapMarket is BaseHook {
       principalForCash: _principalForCash, tickMovingLeft: !_principalForCash, tickLimit: _tickLimit
     });
 
+    // A swap that takes a step needs liquidity for it. The first step trades against the
+    // liquidity below the current tick when moving down.
+    if (!_tickLimitReached(_ctx)) {
+      (uint128 _firstStepLiquidity,) = _stepLiquidity(_ctx.tickMovingLeft);
+      if (_firstStepLiquidity == 0) revert FixedFeeSwapMarket_NoActiveLiquidity();
+    }
+
     while (_amountInRemainingNet != 0) {
       // Slippage protection: stop the swap if the tick has moved past the caller's limit.
-      // For principal→cash swaps, tick increases so we stop when tick reaches the limit.
-      // For cash→principal swaps, tick decreases so we stop when tick reaches the limit.
-      if (_ctx.tickLimit != NO_TICK_LIMIT) {
-        if (_ctx.principalForCash ? currentTick >= _ctx.tickLimit : currentTick <= _ctx.tickLimit) {
-          break;
-        }
-      }
+      if (_tickLimitReached(_ctx)) break;
 
       // Find next initialized tick
       int24 _nextTick;
       bool _initialized;
       {
+        // Moving left, search strictly below the current tick, which the step crosses itself if
+        // it is initialized. Starting one tick below also finds the nearest initialized tick when
+        // the current tick is not a multiple of the tick spacing.
         int24 _searchTick = currentTick;
-        if (_ctx.tickMovingLeft) {
-          int256 _candidate = int256(currentTick) - int256(YIELD_PER_TICK);
-          _searchTick = _candidate < type(int24).min ? type(int24).min : int24(_candidate);
-        }
+        if (_ctx.tickMovingLeft && currentTick > type(int24).min) _searchTick = currentTick - 1;
         (_nextTick, _initialized) = tickBitmap.nextInitializedTickWithinOneWord(
           _searchTick, YIELD_PER_TICK, _ctx.tickMovingLeft
         );
@@ -570,7 +569,22 @@ contract FixedFeeSwapMarket is BaseHook {
     if (_amountInUsed > _amountInGross) _amountInUsed = _amountInGross;
   }
 
+  /// @notice Returns whether the current tick has reached the swap's tick limit
+  /// @dev A principal→cash swap raises the tick, so it reaches the limit at or above it. A
+  ///      cash→principal swap lowers the tick, so it reaches the limit at or below it.
+  /// @param _ctx Swap context containing the direction and tick limit
+  /// @return Whether the swap must stop
+  function _tickLimitReached(SwapContext memory _ctx) internal view returns (bool) {
+    if (_ctx.tickLimit == NO_TICK_LIMIT) return false;
+    return _ctx.principalForCash ? currentTick >= _ctx.tickLimit : currentTick <= _ctx.tickLimit;
+  }
+
   /// @notice Executes a single swap step: calculates amounts, updates fees, crosses tick if needed
+  /// @dev Active liquidity is always the liquidity of positions with
+  ///      `tickLower <= currentTick < tickUpper`, so tick k is crossed when the price moves from k
+  ///      down to k - 1, or from k - 1 up to k. An upward step crosses the initialized tick it
+  ///      reaches. A downward step crosses the initialized tick it leaves, before pricing the step
+  ///      with the liquidity below that tick, and stops on the next one without crossing it.
   /// @param _amountInNet Net input amount (after fees) available for this step
   /// @param _nextTick The next initialized tick boundary
   /// @param _initialized Whether _nextTick is an initialized tick with liquidity changes
@@ -581,43 +595,84 @@ contract FixedFeeSwapMarket is BaseHook {
     bool _initialized,
     SwapContext memory _ctx
   ) internal returns (uint256, uint256, int24) {
+    (uint128 _liquidity, bool _crossesCurrentTick) = _stepLiquidity(_ctx.tickMovingLeft);
     (uint256 _netConsumed, uint256 _amountOut, int256 _stepPrice, int24 _stepTick) = _calculateSwap(
-      _amountInNet.toInt256(), currentPrice, _nextTick, _ctx.principalForCash, _ctx.tickLimit
+      _amountInNet.toInt256(),
+      currentPrice,
+      _liquidity,
+      _nextTick,
+      _ctx.principalForCash,
+      _ctx.tickLimit
     );
-    // If the swap step couldn't move a full tick (sub-tick snap to zero), stop gracefully.
+    // If the swap step couldn't move a full tick (sub-tick snap to zero), stop gracefully. The
+    // price stays on the current tick, so nothing is crossed.
     if (_netConsumed == 0 || _amountOut == 0) return (0, 0, currentTick);
 
-    // Compute fee for this step directly from net consumed and attribute to LPs.
-    // Per-step tracking is needed because activeLiquidity changes at tick crossings.
-    uint256 _stepFee = FixedPointMathLib.mulDiv(_netConsumed, FEE_RATE, FEE_DENOMINATOR - FEE_RATE);
-    if (_stepFee > 0 && activeLiquidity > 0) {
-      if (_ctx.principalForCash) {
-        feeGrowthGlobal0X128 += FixedPointMathLib.mulDiv(_stepFee, Q128, activeLiquidity);
-      } else {
-        feeGrowthGlobal1X128 += FixedPointMathLib.mulDiv(_stepFee, Q128, activeLiquidity);
-      }
+    // A downward step leaves the current tick. Cross it before this step's fees accrue below it.
+    if (_crossesCurrentTick) {
+      _crossTick(currentTick);
+      activeLiquidity = _liquidity;
     }
 
-    // Cross tick if needed
-    bool _hitBoundary = _stepTick == _nextTick;
-    if (_hitBoundary && _initialized) {
+    _accrueStepFeeGrowth(_netConsumed, _liquidity, _ctx.principalForCash);
+
+    // An upward step crosses the initialized tick it reaches. A downward step that reaches one
+    // stops on it uncrossed, since the ranges starting there stay in range.
+    if (!_ctx.tickMovingLeft && _stepTick == _nextTick && _initialized) {
       _crossTick(_nextTick);
-      int128 _liquidityNet = ticks[_nextTick].liquidityNet;
-      if (_ctx.tickMovingLeft) _liquidityNet = -_liquidityNet;
-      activeLiquidity = LiquidityMath.addDelta(activeLiquidity, _liquidityNet);
+      activeLiquidity = LiquidityMath.addDelta(activeLiquidity, ticks[_nextTick].liquidityNet);
     }
 
     // Update price and calculate new tick.
-    // The search offset (currentTick - YIELD_PER_TICK) is already applied in _executeSwapLoop,
-    // so we do NOT subtract here — that would double-adjust, pushing currentTick below the
-    // actually-traded price and inflating LP cash claims on withdrawal.
+    // currentTick is the tick the step stopped on. Don't subtract from it here: that would push
+    // currentTick below the actually-traded price and inflate LP cash claims on withdrawal.
     currentPrice = _stepPrice;
     return (_netConsumed, _amountOut, _stepTick);
+  }
+
+  /// @notice Adds a swap step's LP fee to the global fee growth of its input token
+  /// @dev The fee is computed per step from the net input consumed, because the liquidity it is
+  ///      spread over changes at tick crossings. Fee growth wraps modulo 2^256 by design, as in
+  ///      Uniswap v3 and v4; only differences between fee growth values are ever used.
+  /// @param _netConsumed Net input consumed by the step
+  /// @param _liquidity The liquidity the step traded against
+  /// @param _principalForCash True when the input token is TOKEN0 (PT)
+  function _accrueStepFeeGrowth(uint256 _netConsumed, uint128 _liquidity, bool _principalForCash)
+    internal
+  {
+    uint256 _stepFee = FixedPointMathLib.mulDiv(_netConsumed, FEE_RATE, FEE_DENOMINATOR - FEE_RATE);
+    if (_stepFee == 0) return;
+    uint256 _stepFeeGrowthX128 = FixedPointMathLib.mulDiv(_stepFee, Q128, _liquidity);
+    unchecked {
+      if (_principalForCash) feeGrowthGlobal0X128 += _stepFeeGrowthX128;
+      else feeGrowthGlobal1X128 += _stepFeeGrowthX128;
+    }
+  }
+
+  /// @notice Returns the liquidity the next swap step trades against, and whether that step
+  /// crosses the current tick
+  /// @dev Active liquidity covers the ticks from the current tick upward. A downward step leaves
+  ///      the current tick, so when that tick is initialized the step crosses it and trades
+  ///      against the liquidity below it.
+  /// @param _movingLeft True for a downward (cash→PT) step
+  /// @return _liquidity The liquidity the step trades against
+  /// @return _crossesCurrentTick Whether the step crosses the current tick as it leaves it
+  function _stepLiquidity(bool _movingLeft)
+    internal
+    view
+    returns (uint128 _liquidity, bool _crossesCurrentTick)
+  {
+    _liquidity = activeLiquidity;
+    if (!_movingLeft) return (_liquidity, false);
+    TickInfo storage currentTickInfo = ticks[currentTick];
+    if (currentTickInfo.liquidityGross == 0) return (_liquidity, false);
+    return (LiquidityMath.addDelta(_liquidity, -currentTickInfo.liquidityNet), true);
   }
 
   /// @notice Routes swap calculation to the appropriate direction-specific function
   /// @param _amountIn The input amount to swap
   /// @param _currentPrice The current price at the start of this step
+  /// @param _liquidity The liquidity this step trades against
   /// @param _nextTick The next initialized tick boundary
   /// @param _principalToCash True for PT→cash, false for cash→PT
   /// @param _tickLimit Tick limit; NO_TICK_LIMIT means no limit
@@ -628,14 +683,15 @@ contract FixedFeeSwapMarket is BaseHook {
   function _calculateSwap(
     int256 _amountIn,
     int256 _currentPrice,
+    uint128 _liquidity,
     int24 _nextTick,
     bool _principalToCash,
     int24 _tickLimit
   ) internal view returns (uint256, uint256, int256, int24) {
     if (_principalToCash) {
-      return _getCashSwapAmount(_amountIn, _currentPrice, _nextTick, _tickLimit);
+      return _getCashSwapAmount(_amountIn, _currentPrice, _liquidity, _nextTick, _tickLimit);
     }
-    return _getPrincipalSwapAmount(_amountIn, _currentPrice, _nextTick, _tickLimit);
+    return _getPrincipalSwapAmount(_amountIn, _currentPrice, _liquidity, _nextTick, _tickLimit);
   }
 
   // ============ Internal Functions - PT→Cash Swap Math ============
@@ -668,6 +724,7 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @notice Calculate cash out for PT in, up to the next tick boundary
   /// @param _amountIn The amount of PT available to trade for cash
   /// @param _currentPrice The price calculated with the current yield tick
+  /// @param _liquidity The liquidity this step trades against
   /// @param _nextTick The next initialized tick boundary
   /// @param _tickLimit Tick limit; NO_TICK_LIMIT means no limit
   /// @return _amountInConsumed PT consumed in this step
@@ -677,6 +734,7 @@ contract FixedFeeSwapMarket is BaseHook {
   function _getCashSwapAmount(
     int256 _amountIn,
     int256 _currentPrice,
+    uint128 _liquidity,
     int24 _nextTick,
     int24 _tickLimit
   )
@@ -710,7 +768,7 @@ contract FixedFeeSwapMarket is BaseHook {
     if (_targetYieldWad <= _startYieldWad) revert FixedFeeSwapMarket_InvalidTickTraversal();
 
     uint256 _principalToTarget = FixedPointMathLib.mulDivUp(
-      uint256(_targetYieldWad - _startYieldWad), uint256(activeLiquidity), BIPS * WAD
+      uint256(_targetYieldWad - _startYieldWad), uint256(_liquidity), BIPS * WAD
     );
     if (_principalToTarget == 0) revert FixedFeeSwapMarket_InvalidTickTraversal();
 
@@ -719,18 +777,20 @@ contract FixedFeeSwapMarket is BaseHook {
       _newTick = _nextTick;
       _newPrice = _targetPrice;
       _cashOut = FixedPointMathLib.mulDiv(
-        uint256(activeLiquidity), uint256(_currentPrice - _newPrice), _scaledTime
+        uint256(_liquidity), uint256(_currentPrice - _newPrice), _scaledTime
       );
       return (_amountInConsumed, _cashOut, _newPrice, _newTick);
     }
 
-    return _getCashSwapAmountWithinTick(uint256(_amountIn), _currentPrice, _startYieldWad);
+    return
+      _getCashSwapAmountWithinTick(uint256(_amountIn), _currentPrice, _liquidity, _startYieldWad);
   }
 
   /// @notice Computes within-tick swap for PT→cash using exact exponential math
   /// @dev Uses expWad to handle fractional tick movements: endPrice = exp(-endYield / BIPS *
   /// scaledTime) @param _amountIn The amount of principal tokens to swap
   /// @param _startPrice The price at the start of this swap step
+  /// @param _liquidity The liquidity this step trades against
   /// @param _startYieldWad The WAD-scaled yield at the start of this swap step
   /// @return _amountInConsumed Amount of input consumed
   /// @return _cashOut Amount of cash tokens output
@@ -739,6 +799,7 @@ contract FixedFeeSwapMarket is BaseHook {
   function _getCashSwapAmountWithinTick(
     uint256 _amountIn,
     int256 _startPrice,
+    uint128 _liquidity,
     int256 _startYieldWad
   )
     internal
@@ -749,8 +810,8 @@ contract FixedFeeSwapMarket is BaseHook {
     uint256 _scaledTime = _scaledTimeRemainingWad();
 
     // Yield movement is linear in PT: Δyield = PT_in * BIPS / L
-    int256 _endYieldWad = _startYieldWad
-      + int256(FixedPointMathLib.mulDiv(_amountIn, BIPS * WAD, uint256(activeLiquidity)));
+    int256 _endYieldWad =
+      _startYieldWad + int256(FixedPointMathLib.mulDiv(_amountIn, BIPS * WAD, uint256(_liquidity)));
 
     // Snap to floored integer tick so swap output matches LP composition accounting.
     // Returns zero consumed/output if the tick didn't move (swap too small).
@@ -760,9 +821,8 @@ contract FixedFeeSwapMarket is BaseHook {
     if (_newPrice >= _startPrice) return (0, 0, _startPrice, _wadToTick(_startYieldWad));
 
     // Cash_out = (L / scaledTime) * (startPrice - newPrice)
-    _cashOut = FixedPointMathLib.mulDiv(
-      uint256(activeLiquidity), uint256(_startPrice - _newPrice), _scaledTime
-    );
+    _cashOut =
+      FixedPointMathLib.mulDiv(uint256(_liquidity), uint256(_startPrice - _newPrice), _scaledTime);
   }
 
   // ============ Internal Functions - Cash→PT Swap Math ============
@@ -778,8 +838,9 @@ contract FixedFeeSwapMarket is BaseHook {
   // Cash required to reach the next tick boundary:
   //     Cash_in_seg = (L / t) * (exp(-rNext * t) - exp(-r * t))
   //
-  // If cash budget >= Cash_in_seg, the swap reaches the boundary. The caller crosses the tick
-  // (updating feeGrowthOutside and activeLiquidity) then re-invokes with remaining cash.
+  // If cash budget >= Cash_in_seg, the swap reaches the boundary and stops on it without crossing
+  // it. The caller re-invokes with the remaining cash, and that step crosses the boundary tick as
+  // it leaves it (updating feeGrowthOutside and activeLiquidity) before trading against L2.
   //
   // If cash budget < Cash_in_seg, the swap stays within the segment. Solving for end yield:
   //     r1 = -(1 / t) * ln( exp(-r0 * t) + (t / L) * C )
@@ -790,15 +851,18 @@ contract FixedFeeSwapMarket is BaseHook {
   /// @notice Calculate PT out for cash in, up to the next tick boundary
   /// @param _amountIn The amount of cash available to trade for PT
   /// @param _currentPrice The price calculated with the current yield tick
+  /// @param _liquidity The liquidity this step trades against
   /// @param _nextTick The next initialized tick boundary
   /// @param _tickLimit Tick limit; NO_TICK_LIMIT means no limit
   /// @return _amountInConsumed Cash consumed in this step
   /// @return _principalOut PT tokens to send to the trader
   /// @return _newPrice Price after this step
-  /// @return _newTick Tick after this step; if equal to `_nextTick`, caller should cross the tick
+  /// @return _newTick Tick after this step; if equal to `_nextTick`, the step stops on that tick
+  /// without crossing it, and the next step crosses it as it leaves
   function _getPrincipalSwapAmount(
     int256 _amountIn,
     int256 _currentPrice,
+    uint128 _liquidity,
     int24 _nextTick,
     int24 _tickLimit
   )
@@ -830,7 +894,7 @@ contract FixedFeeSwapMarket is BaseHook {
 
     uint256 _priceDiff = uint256(_targetPrice - _currentPrice);
     uint256 _cashInToTarget =
-      FixedPointMathLib.mulDivUp(_priceDiff, uint256(activeLiquidity), _scaledTime);
+      FixedPointMathLib.mulDivUp(_priceDiff, uint256(_liquidity), _scaledTime);
     if (_cashInToTarget == 0) revert FixedFeeSwapMarket_InvalidTickTraversal();
 
     if (uint256(_amountIn) >= _cashInToTarget) {
@@ -838,17 +902,20 @@ contract FixedFeeSwapMarket is BaseHook {
       _newTick = _nextTick;
       _newPrice = _targetPrice;
       uint256 _yieldDeltaWad = uint256(_startYieldWad - _targetYieldWad);
-      _principalOut = FixedPointMathLib.mulDiv(uint256(activeLiquidity), _yieldDeltaWad, BIPS * WAD);
+      _principalOut = FixedPointMathLib.mulDiv(uint256(_liquidity), _yieldDeltaWad, BIPS * WAD);
       return (_amountInConsumed, _principalOut, _newPrice, _newTick);
     }
 
-    return _getPrincipalSwapAmountWithinTick(uint256(_amountIn), _currentPrice, _startYieldWad);
+    return _getPrincipalSwapAmountWithinTick(
+      uint256(_amountIn), _currentPrice, _liquidity, _startYieldWad
+    );
   }
 
   /// @notice Computes within-tick swap for cash→PT using exact logarithm math
   /// @dev Uses lnWad to compute: endYield = -ln(newPrice) / scaledTime * BIPS, then PT_out = L *
   /// (startYield - endYield) / BIPS @param _amountIn The amount of cash tokens to swap
   /// @param _startPrice The price at the start of this swap step
+  /// @param _liquidity The liquidity this step trades against
   /// @param _startYieldWad The WAD-scaled yield at the start of this swap step
   /// @return _amountInConsumed Amount of input consumed
   /// @return _principalOut Amount of principal tokens output
@@ -857,6 +924,7 @@ contract FixedFeeSwapMarket is BaseHook {
   function _getPrincipalSwapAmountWithinTick(
     uint256 _amountIn,
     int256 _startPrice,
+    uint128 _liquidity,
     int256 _startYieldWad
   )
     internal
@@ -867,8 +935,8 @@ contract FixedFeeSwapMarket is BaseHook {
     uint256 _scaledTime = _scaledTimeRemainingWad();
 
     // newPrice = startPrice + (scaledTime / L) * cashIn
-    int256 _exactNewPrice = _startPrice
-      + int256(FixedPointMathLib.mulDiv(_scaledTime, _amountIn, uint256(activeLiquidity)));
+    int256 _exactNewPrice =
+      _startPrice + int256(FixedPointMathLib.mulDiv(_scaledTime, _amountIn, uint256(_liquidity)));
     if (_exactNewPrice < _startPrice) revert FixedFeeSwapMarket_InvalidPriceDirection();
 
     // endYieldWad = -ln(newPrice) / scaledTime * BIPS * WAD
@@ -885,7 +953,7 @@ contract FixedFeeSwapMarket is BaseHook {
     int256 _yieldMovedWad = _startYieldWad - _snappedYieldWad;
     if (_yieldMovedWad <= 0) return (0, 0, _startPrice, _wadToTickCeil(_startYieldWad));
     _principalOut =
-      FixedPointMathLib.mulDiv(uint256(activeLiquidity), uint256(_yieldMovedWad), BIPS * WAD);
+      FixedPointMathLib.mulDiv(uint256(_liquidity), uint256(_yieldMovedWad), BIPS * WAD);
   }
 
   // ============ Internal Functions - Liquidity Management ============
@@ -1086,6 +1154,8 @@ contract FixedFeeSwapMarket is BaseHook {
   // ============ Internal Functions - Fee Tracking ============
 
   /// @notice Accrues pending fees for a position and updates its fee growth snapshots
+  /// @dev The fee growth inside the range since the last snapshot is computed modulo 2^256, as in
+  ///      Uniswap v3's `Position.update`, because fee growth values wrap by design.
   /// @param position The position storage pointer to update
   function _accruePositionFees(PositionInfo storage position) internal {
     if (position.liquidity <= 0) return;
@@ -1093,14 +1163,17 @@ contract FixedFeeSwapMarket is BaseHook {
     (uint256 _fg0, uint256 _fg1) = _getFeeGrowthInside(position.tickLower, position.tickUpper);
     uint256 _liq = uint256(uint128(position.liquidity));
 
-    // Note: Cast to uint128 assumes fee amounts won't exceed type(uint128).max.
-    // This is safe in practice as it would require mass fee accumulation beyond realistic volumes.
-    position.tokensOwed0 += uint128(
-      FixedPointMathLib.mulDiv(_fg0 - position.feeGrowthInside0LastX128, _liq, Q128)
-    );
-    position.tokensOwed1 += uint128(
-      FixedPointMathLib.mulDiv(_fg1 - position.feeGrowthInside1LastX128, _liq, Q128)
-    );
+    uint256 _fgDelta0;
+    uint256 _fgDelta1;
+    unchecked {
+      _fgDelta0 = _fg0 - position.feeGrowthInside0LastX128;
+      _fgDelta1 = _fg1 - position.feeGrowthInside1LastX128;
+    }
+
+    // Fee amounts beyond type(uint128).max would need fee accumulation far beyond realistic
+    // volumes, so the casts revert rather than truncate if fee accounting is ever inconsistent.
+    position.tokensOwed0 += FixedPointMathLib.mulDiv(_fgDelta0, _liq, Q128).toUint128();
+    position.tokensOwed1 += FixedPointMathLib.mulDiv(_fgDelta1, _liq, Q128).toUint128();
 
     position.feeGrowthInside0LastX128 = _fg0;
     position.feeGrowthInside1LastX128 = _fg1;
@@ -1116,6 +1189,9 @@ contract FixedFeeSwapMarket is BaseHook {
   }
 
   /// @notice Calculates fee growth inside a tick range
+  /// @dev Computed modulo 2^256, as in Uniswap v3's `Tick.getFeeGrowthInside`. The result can wrap
+  ///      past zero, for example when a tick is initialized after fees accrued on its far side, and
+  ///      only has meaning as a difference from an earlier snapshot of the same range.
   /// @param _tickLower The lower tick boundary
   /// @param _tickUpper The upper tick boundary
   /// @return _fg0 Fee growth for TOKEN0 inside the range
@@ -1131,31 +1207,36 @@ contract FixedFeeSwapMarket is BaseHook {
     bool _belowLower = currentTick < _tickLower;
     bool _aboveUpper = currentTick >= _tickUpper;
 
-    uint256 _below0 = _belowLower
-      ? feeGrowthGlobal0X128 - lower.feeGrowthOutside0X128
-      : lower.feeGrowthOutside0X128;
-    uint256 _below1 = _belowLower
-      ? feeGrowthGlobal1X128 - lower.feeGrowthOutside1X128
-      : lower.feeGrowthOutside1X128;
-    uint256 _above0 = _aboveUpper
-      ? feeGrowthGlobal0X128 - upper.feeGrowthOutside0X128
-      : upper.feeGrowthOutside0X128;
-    uint256 _above1 = _aboveUpper
-      ? feeGrowthGlobal1X128 - upper.feeGrowthOutside1X128
-      : upper.feeGrowthOutside1X128;
+    unchecked {
+      uint256 _below0 = _belowLower
+        ? feeGrowthGlobal0X128 - lower.feeGrowthOutside0X128
+        : lower.feeGrowthOutside0X128;
+      uint256 _below1 = _belowLower
+        ? feeGrowthGlobal1X128 - lower.feeGrowthOutside1X128
+        : lower.feeGrowthOutside1X128;
+      uint256 _above0 = _aboveUpper
+        ? feeGrowthGlobal0X128 - upper.feeGrowthOutside0X128
+        : upper.feeGrowthOutside0X128;
+      uint256 _above1 = _aboveUpper
+        ? feeGrowthGlobal1X128 - upper.feeGrowthOutside1X128
+        : upper.feeGrowthOutside1X128;
 
-    _fg0 = feeGrowthGlobal0X128 - _below0 - _above0;
-    _fg1 = feeGrowthGlobal1X128 - _below1 - _above1;
+      _fg0 = feeGrowthGlobal0X128 - _below0 - _above0;
+      _fg1 = feeGrowthGlobal1X128 - _below1 - _above1;
+    }
   }
 
   /// @notice Updates fee growth outside values when crossing a tick
   /// @dev Crossing a tick flips the meaning of "outside" - subtracting from global inverts
-  ///      the above/below perspective. This is the standard Uniswap v3 tick crossing pattern.
+  ///      the above/below perspective. This is the standard Uniswap v3 tick crossing pattern,
+  ///      computed modulo 2^256 because fee growth values wrap by design.
   /// @param _tick The tick being crossed
   function _crossTick(int24 _tick) internal {
     TickInfo storage info = ticks[_tick];
-    info.feeGrowthOutside0X128 = feeGrowthGlobal0X128 - info.feeGrowthOutside0X128;
-    info.feeGrowthOutside1X128 = feeGrowthGlobal1X128 - info.feeGrowthOutside1X128;
+    unchecked {
+      info.feeGrowthOutside0X128 = feeGrowthGlobal0X128 - info.feeGrowthOutside0X128;
+      info.feeGrowthOutside1X128 = feeGrowthGlobal1X128 - info.feeGrowthOutside1X128;
+    }
   }
 
   // ============ Internal Functions - Fee Helpers ============
